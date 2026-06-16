@@ -45,6 +45,21 @@ function isValidHvhh(value, options) {
   return validateHvhh(value, options).ok;
 }
 
+// Strict, locale-tolerant boundary parser for ՀՎՀՀ input. Unlike normalizeHvhh
+// (which silently returns '' for bad input) and isValidHvhh (boolean only), this
+// returns { ok, hvhh, error }: it strips separators, normalizes to 8 digits, and
+// fails LOUD on missing, non-numeric, wrong-length, or degenerate input. On
+// success, `error` is omitted (so { ok: true, hvhh } deep-equals cleanly); on
+// failure, the normalized form is still exposed so callers can log or echo it
+// back to the user. Accepts the same `checkDigitVerifier` seam as validateHvhh.
+// Use at system boundaries (API bodies, form fields, CSV imports) before
+// trusting an id; keep normalizeHvhh for already-validated internal numbers.
+function parseHvhh(value, options) {
+  const result = validateHvhh(value, options);
+  if (result.ok) return { ok: true, hvhh: result.normalized };
+  return { ok: false, hvhh: result.normalized, error: result.error };
+}
+
 // AMD money. Amounts are whole drams; round before storing/displaying.
 function roundAmd(amount) {
   const n = Number(amount);
@@ -93,6 +108,7 @@ export {
   normalizeHvhh,
   validateHvhh,
   isValidHvhh,
+  parseHvhh,
   roundAmd,
   parseAmd,
   formatAmd,
