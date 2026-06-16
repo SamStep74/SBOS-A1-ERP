@@ -32,13 +32,13 @@ When a plan is executed, the runner:
 
 ```bash
 # Dry-run (prints what would happen, does nothing destructive)
-node scripts/orchestrate-worktrees.js .orchestration/a1-erp-hy-initial.json --dry-run
+node scripts/orchestrate-worktrees.cjs .orchestration/a1-erp-hy-initial.json --dry-run
 
 # Execute (creates worktrees, writes files, launches tmux)
-node scripts/orchestrate-worktrees.js .orchestration/a1-erp-hy-initial.json
+node scripts/orchestrate-worktrees.cjs .orchestration/a1-erp-hy-initial.json
 
 # Skip tmux (useful for CI / non-interactive environments)
-node scripts/orchestrate-worktrees.js .orchestration/a1-erp-hy-initial.json --no-tmux
+node scripts/orchestrate-worktrees.cjs .orchestration/a1-erp-hy-initial.json --no-tmux
 ```
 
 After execution, attach to the tmux session to watch the workers:
