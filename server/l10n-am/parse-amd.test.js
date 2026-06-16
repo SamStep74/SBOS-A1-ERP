@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseAmd, formatAmd } from './localization.js';
+import { t, missingMarker } from './i18n.js';
 
 // parseAmd is the STRICT boundary parser. Unlike roundAmd (lenient, returns 0 for
 // anything un-parseable — which silently corrupts "1,000" → 0), parseAmd returns
@@ -59,4 +60,44 @@ test('parseAmd: a malformed numeric-looking string fails (no partial parse)', ()
   assert.equal(parseAmd('12.3.4').ok, false);
   assert.equal(parseAmd('1,00x').ok, false);
   assert.equal(parseAmd('--5').ok, false);
+});
+
+// --- i18n wiring: locale override routes through t() ---
+//
+// parseAmd's existing hardcoded strings are English, so the default locale is
+// 'en' to keep the existing call sites and tests green. locale=ru/hy must
+// route through the kernel.
+
+test('parseAmd: locale=ru returns Russian errors via t()', () => {
+  const ruRequired = t('ru', 'amd.required');
+  const ruNotFinite = t('ru', 'amd.notFinite');
+  const ruNotNumber = t('ru', 'amd.notNumber', { raw: 'abc' });
+  // Sanity: kernel has the keys (catches translator regressions).
+  for (const [name, value] of Object.entries({ ruRequired, ruNotFinite, ruNotNumber })) {
+    assert.notEqual(value, missingMarker(name), `kernel must have ru translation: ${name}`);
+  }
+  assert.equal(parseAmd('', { locale: 'ru' }).error, ruRequired);
+  assert.equal(parseAmd(NaN, { locale: 'ru' }).error, ruNotFinite);
+  assert.equal(parseAmd('abc', { locale: 'ru' }).error, ruNotNumber);
+});
+
+test('parseAmd: locale=hy returns Armenian errors via t()', () => {
+  const hyRequired = t('hy', 'amd.required');
+  assert.notEqual(
+    hyRequired,
+    missingMarker('amd.required'),
+    'kernel must have hy translation for amd.required',
+  );
+  assert.equal(parseAmd('', { locale: 'hy' }).error, hyRequired);
+  assert.equal(parseAmd(NaN, { locale: 'hy' }).error, t('hy', 'amd.notFinite'));
+  // {{raw}} interpolation: the user's input is echoed into the localized message.
+  assert.equal(parseAmd('xyz', { locale: 'hy' }).error, t('hy', 'amd.notNumber', { raw: 'xyz' }));
+});
+
+test('parseAmd: default locale is en (backward compat with English errors)', () => {
+  // No locale arg → English, matching the hardcoded strings every existing
+  // call site and test depends on.
+  assert.equal(parseAmd('').error, t('en', 'amd.required'));
+  assert.equal(parseAmd(NaN).error, t('en', 'amd.notFinite'));
+  assert.equal(parseAmd('abc').error, t('en', 'amd.notNumber', { raw: 'abc' }));
 });
