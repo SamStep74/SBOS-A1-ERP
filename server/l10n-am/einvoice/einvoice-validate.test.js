@@ -186,3 +186,94 @@ test('validateEInvoice: validate-then-build yields a document for a compliant in
   const xml = buildEInvoiceXml(compliant);
   assert.ok(xml.includes('<TransactionType>1</TransactionType>'));
 });
+
+// --- i18n wiring --------------------------------------------------------
+// validateEInvoice errors are user-facing (the {message} field lands in
+// finance UIs and RA-SRC error reports). All of them must route through
+// the t() kernel so a caller can request Armenian (the native language for
+// SRC e-invoicing forms) or Russian. Default-locale is 'en' to preserve
+// the existing English strings; switching locales must flip every
+// emitted message without losing {{max}} / {{actual}} / {{expected}} /
+// {{net}} / {{rate}} placeholders.
+test('validateEInvoice: i18n — default locale is English (backward compatible)', () => {
+  const result = validateEInvoice({});
+  const missingNumber = result.errors.find((e) => e.code === 'MISSING_NUMBER');
+  assert.ok(missingNumber);
+  assert.ok(
+    missingNumber.message.includes('Invoice number/series is required'),
+    `expected English template, got: ${missingNumber.message}`,
+  );
+});
+
+test('validateEInvoice: i18n — { locale: "hy" } produces Armenian messages', () => {
+  const result = validateEInvoice({}, { locale: 'hy' });
+  const missingNumber = result.errors.find((e) => e.code === 'MISSING_NUMBER');
+  assert.ok(missingNumber);
+  // Armenian must contain Armenian-script characters and must NOT be the
+  // English template.
+  assert.ok(
+    /[Ա-Ֆա-ֆ]/.test(missingNumber.message),
+    `expected Armenian script in message, got: ${missingNumber.message}`,
+  );
+  assert.ok(
+    !missingNumber.message.includes('Invoice number/series is required'),
+    `expected Armenian (not English) message, got: ${missingNumber.message}`,
+  );
+});
+
+test('validateEInvoice: i18n — { locale: "ru" } produces Russian messages', () => {
+  const result = validateEInvoice({}, { locale: 'ru' });
+  const missingNumber = result.errors.find((e) => e.code === 'MISSING_NUMBER');
+  assert.ok(missingNumber);
+  // Russian must use Cyrillic.
+  assert.ok(
+    /[Ѐ-ӿ]/.test(missingNumber.message),
+    `expected Cyrillic script in message, got: ${missingNumber.message}`,
+  );
+  assert.ok(
+    !missingNumber.message.includes('Invoice number/series is required'),
+    `expected Russian (not English) message, got: ${missingNumber.message}`,
+  );
+});
+
+test('validateEInvoice: i18n — interpolated placeholders are substituted, not leaked', () => {
+  // Trigger INVALID_LINE_DESCRIPTION which has {{max}} in the template.
+  const bad = {
+    ...compliant,
+    lines: [{ description: 'x'.repeat(300), netAmount: 100000, vatRate: 20 }],
+  };
+  const result = validateEInvoice(bad, { locale: 'hy' });
+  const desc = result.errors.find((e) => e.code === 'INVALID_LINE_DESCRIPTION');
+  assert.ok(desc);
+  assert.ok(
+    !desc.message.includes('{{'),
+    `expected placeholders to be interpolated, got: ${desc.message}`,
+  );
+  // The numeric max (256) must appear in the localized message.
+  assert.ok(desc.message.includes('256'), `expected max=256 in message, got: ${desc.message}`);
+});
+
+test('validateEInvoice: i18n — every emitted error message is non-empty in every locale', () => {
+  const bad = {
+    number: '',
+    issueDate: 'not-iso',
+    supplier: {},
+    buyer: {},
+    lines: [],
+  };
+  for (const locale of ['en', 'hy', 'ru']) {
+    const result = validateEInvoice(bad, { locale });
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.length > 0, `expected errors in locale=${locale}`);
+    for (const err of result.errors) {
+      assert.ok(
+        err.message && err.message.length > 0,
+        `empty message in locale=${locale} for code=${err.code}`,
+      );
+      assert.ok(
+        !err.message.includes('[[missing:'),
+        `untranslated key in locale=${locale} for code=${err.code}: ${err.message}`,
+      );
+    }
+  }
+});

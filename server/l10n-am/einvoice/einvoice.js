@@ -16,6 +16,7 @@
 // Pure functions, no I/O.
 
 import { roundAmd, isValidHvhh } from '../localization.js';
+import { t } from '../i18n.js';
 
 const EINVOICE_NAMESPACE = 'urn:hayhashvapah:einvoice:1';
 
@@ -168,7 +169,7 @@ function buildEInvoiceXml(invoice = {}) {
 // SRC XSD and submitted. Returns { ok, errors:[{field, code, message}] } and never
 // throws on malformed input, so callers can validate-then-build (submission) or
 // build-raw (drafts/previews). Fails CLOSED on every mandatory SRC field.
-function validateEInvoice(invoice = {}) {
+function validateEInvoice(invoice = {}, { locale = 'en' } = {}) {
   const inv = invoice || {};
   const errors = [];
   const add = (field, code, message) => errors.push({ field, code, message });
@@ -177,34 +178,30 @@ function validateEInvoice(invoice = {}) {
     add(
       'transactionType',
       'MISSING_TRANSACTION_TYPE',
-      'Գործարքի տեսակ (transaction type) is mandatory for SRC e-invoices since 2025-03-01.',
+      t(locale, 'einv.validate.missingTransactionType'),
     );
   }
 
   if (!str(inv.number)) {
-    add('number', 'MISSING_NUMBER', 'Invoice number/series is required.');
+    add('number', 'MISSING_NUMBER', t(locale, 'einv.validate.missingNumber'));
   }
 
   const issueDate = str(inv.issueDate);
   if (!issueDate) {
-    add('issueDate', 'MISSING_ISSUE_DATE', 'Issue date is required.');
+    add('issueDate', 'MISSING_ISSUE_DATE', t(locale, 'einv.validate.missingIssueDate'));
   } else if (!/^\d{4}-\d{2}-\d{2}/.test(issueDate)) {
-    add('issueDate', 'INVALID_ISSUE_DATE', 'Issue date must be ISO format (YYYY-MM-DD).');
+    add('issueDate', 'INVALID_ISSUE_DATE', t(locale, 'einv.validate.invalidIssueDate'));
   }
 
   const supplier = inv.supplier || {};
   if (!str(supplier.name)) {
-    add('supplier.name', 'MISSING_SUPPLIER_NAME', 'Supplier name is required.');
+    add('supplier.name', 'MISSING_SUPPLIER_NAME', t(locale, 'einv.validate.missingSupplierName'));
   }
   const supplierHvhh = str(supplier.hvhh || supplier.taxId);
   if (!supplierHvhh) {
-    add('supplier.hvhh', 'MISSING_SUPPLIER_HVHH', 'Supplier ՀՎՀՀ (tax ID) is required.');
+    add('supplier.hvhh', 'MISSING_SUPPLIER_HVHH', t(locale, 'einv.validate.missingSupplierHvhh'));
   } else if (!isValidHvhh(supplierHvhh)) {
-    add(
-      'supplier.hvhh',
-      'INVALID_SUPPLIER_HVHH',
-      'Supplier ՀՎՀՀ is malformed (expected 8 digits).',
-    );
+    add('supplier.hvhh', 'INVALID_SUPPLIER_HVHH', t(locale, 'einv.validate.invalidSupplierHvhh'));
   }
 
   // Buyer is identified by ՀՎՀՀ (organization) OR a passport (individual) — one is required.
@@ -212,18 +209,14 @@ function validateEInvoice(invoice = {}) {
   const buyerHvhh = str(buyer.hvhh || buyer.taxId);
   const buyerPassport = str(buyer.passport);
   if (!buyerHvhh && !buyerPassport) {
-    add(
-      'buyer',
-      'MISSING_BUYER_ID',
-      'Buyer must be identified by ՀՎՀՀ (organization) or passport (individual).',
-    );
+    add('buyer', 'MISSING_BUYER_ID', t(locale, 'einv.validate.missingBuyerId'));
   } else if (buyerHvhh && !isValidHvhh(buyerHvhh)) {
-    add('buyer.hvhh', 'INVALID_BUYER_HVHH', 'Buyer ՀՎՀՀ is malformed (expected 8 digits).');
+    add('buyer.hvhh', 'INVALID_BUYER_HVHH', t(locale, 'einv.validate.invalidBuyerHvhh'));
   }
 
   const lines = Array.isArray(inv.lines) ? inv.lines : [];
   if (lines.length === 0) {
-    add('lines', 'NO_LINES', 'At least one invoice line is required.');
+    add('lines', 'NO_LINES', t(locale, 'einv.validate.noLines'));
   } else {
     lines.forEach((line, i) => {
       const pos = i + 1; // 1-based positional path, e.g. lines[2].description
@@ -233,7 +226,7 @@ function validateEInvoice(invoice = {}) {
         add(
           `lines[${pos}].description`,
           'INVALID_LINE_DESCRIPTION',
-          `Line description is required and must be ≤ ${MAX_LINE_DESCRIPTION} characters.`,
+          t(locale, 'einv.validate.invalidLineDescription', { max: MAX_LINE_DESCRIPTION }),
         );
       }
       const quantity = l.quantity != null ? Number(l.quantity) : 1;
@@ -241,7 +234,7 @@ function validateEInvoice(invoice = {}) {
         add(
           `lines[${pos}].quantity`,
           'INVALID_LINE_QUANTITY',
-          'Line quantity must be a positive number.',
+          t(locale, 'einv.validate.invalidLineQuantity'),
         );
       }
       const net = l.netAmount != null ? Number(l.netAmount) : 0;
@@ -249,7 +242,7 @@ function validateEInvoice(invoice = {}) {
         add(
           `lines[${pos}].netAmount`,
           'INVALID_LINE_NET',
-          'Line net amount must be a non-negative number.',
+          t(locale, 'einv.validate.invalidLineNet'),
         );
       }
       const rate = str(l.vatRate) !== '' ? Number(l.vatRate) : 0;
@@ -257,7 +250,9 @@ function validateEInvoice(invoice = {}) {
         add(
           `lines[${pos}].vatRate`,
           'INVALID_LINE_VAT_RATE',
-          `Line VAT rate must be ${ISSUED_INVOICE_VAT_RATES.join('% or ')}% (16.67% is imputed — VAT-return only).`,
+          t(locale, 'einv.validate.invalidLineVatRate', {
+            rates: `${ISSUED_INVOICE_VAT_RATES.join('% or ')}%`,
+          }),
         );
       }
       // If an explicit VAT amount is supplied it must be consistent with the line's
@@ -269,7 +264,7 @@ function validateEInvoice(invoice = {}) {
           add(
             `lines[${pos}].vatAmount`,
             'INVALID_LINE_VAT_AMOUNT',
-            'Line VAT amount must be a number.',
+            t(locale, 'einv.validate.invalidLineVatAmount'),
           );
         } else {
           const expectedVat = Math.round((net * rate) / 100);
@@ -277,7 +272,12 @@ function validateEInvoice(invoice = {}) {
             add(
               `lines[${pos}].vatAmount`,
               'LINE_VAT_MISMATCH',
-              `Line VAT amount ${declaredVat} is inconsistent with ${rate}% of net ${net} (expected ~${expectedVat}).`,
+              t(locale, 'einv.validate.lineVatMismatch', {
+                actual: declaredVat,
+                rate,
+                net,
+                expected: expectedVat,
+              }),
             );
           }
         }
