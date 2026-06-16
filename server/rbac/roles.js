@@ -11,9 +11,6 @@
 // DENY is not used; instead, roles are decomposed via finer-grained roles.
 //
 // Inspired by Salesforce role hierarchy + Odoo inheritance groups.
-
-'use strict';
-
 const ROLES_VERSION = 1;
 
 // App IDs — keep aligned with server/app.js APP_ASSIGNMENT_ROLE_GUARDS and
@@ -518,8 +515,7 @@ function clampInt(value, min, max, fallback) {
   return n;
 }
 
-module.exports = {
-  ROLES_VERSION,
+export {ROLES_VERSION,
   APPS,
   APP_PRESETS,
   ROLES,
@@ -534,5 +530,4 @@ module.exports = {
   mfaRequiredFor,
   sessionHardLimitMinutesFor,
   canBeImpersonated,
-  validateCustomRole,
-};
+  validateCustomRole,};

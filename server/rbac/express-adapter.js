@@ -26,11 +26,7 @@
 //
 // No side effects beyond setting `req.rbac` (the diagnostic ctx) and
 // calling next() / res.status(...).json(...). No eval, no Function().
-
-'use strict';
-
-const { requirePerm: rbacRequirePerm, requireRole: rbacRequireRole } = require('./guards');
-
+import { requirePerm as rbacRequirePerm, requireRole as rbacRequireRole } from './guards.js';
 // Internal: extract a context object from the Express request.
 function ctxFromReq(req) {
   return {
@@ -105,7 +101,5 @@ function requireRole(roleName) {
   };
 }
 
-module.exports = {
-  requirePerm,
-  requireRole,
-};
+export {requirePerm,
+  requireRole,};

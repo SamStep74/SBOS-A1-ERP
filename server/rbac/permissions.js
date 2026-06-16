@@ -15,9 +15,6 @@
 //   3. Map it in server/rbac/matrix.js to the roles that should hold it.
 //
 // Renaming a permission is a breaking change; bump PERMISSIONS_VERSION when needed.
-
-'use strict';
-
 const PERMISSIONS_VERSION = 1;
 
 // Permission categories — used for UI grouping in the admin panel.
@@ -557,8 +554,7 @@ function requireKey(key) {
   return PERMISSIONS[key];
 }
 
-module.exports = {
-  PERMISSIONS_VERSION,
+export {PERMISSIONS_VERSION,
   CATEGORIES,
   SENSITIVITY,
   PERMISSIONS,
@@ -566,5 +562,4 @@ module.exports = {
   isValidKey,
   getDefinition,
   listKeys,
-  requireKey,
-};
+  requireKey,};

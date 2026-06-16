@@ -11,37 +11,38 @@
 //   const { seedRBAC, hasPermission, requirePerm, registerRbacRoutes } = rbac;
 //   await seedRBAC(db);
 //   registerRbacRoutes(app, { db });
-
-'use strict';
-
-const {
+import {
   PERMISSIONS, CATEGORIES, SENSITIVITY,
   byCategory, isValidKey, getDefinition, listKeys, requireKey,
   PERMISSIONS_VERSION,
-} = require('./permissions');
-
-const {
+} from './permissions.js';
+import {
   ROLES, APPS, APP_PRESETS, ROLES_VERSION, DEFAULT_INVITED_ROLE,
   isSystemRole, getRole, listRoleIds, roleExists,
   getAppSet, getParentChain, getEffectiveAppSet,
   mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated,
   validateCustomRole,
-} = require('./roles');
-
-const {
+} from './roles.js';
+import {
   PERMISSION_SETS, PERMISSION_SETS_VERSION,
   listPermissionSetIds, getPermissionSet, isSystemPermissionSet,
-} = require('./matrix');
-
-const {
+} from './matrix.js';
+import {
   ROLE_MATRIX, listForRole, getDefaultPermissionSetIds, expandPermissionKeys, expandRolePermissions,
-} = require('./roleMatrix');
-
-const guards = require('./guards');
-
-const { seedRBAC, readVersions } = require('./seed');
-const { registerRbacRoutes } = require('./routes');
-
+} from './roleMatrix.js';
+import {
+  resolveEffectivePermissions,
+  hasPermission, hasAnyPermission, hasAllPermissions,
+  requirePermission, requireAnyPermission, requireAllPermissions,
+  checkSensitivity, requirePermissionWithSensitivity,
+  requirePerm, requireRole, requiresMfa,
+  FLS_RULES, redactFields, RLS_RULES, recordLevelClause,
+  requirePermFastify, requireAnyPerm,
+  enforceSessionPolicy, canImpersonate,
+  expandRolePermissions as expandRolePermissionsFromGuards,
+} from './guards.js';
+import { seedRBAC, readVersions } from './seed.js';
+import { registerRbacRoutes } from './routes.js';
 // One-shot installer: seeds the DB and registers admin routes.
 function install(app, opts = {}) {
   const db = opts.db || app.db;
@@ -63,7 +64,7 @@ function install(app, opts = {}) {
   return { ok: true, seeded: needsSeed };
 }
 
-module.exports = {
+export {
   // catalogs
   PERMISSIONS, CATEGORIES, SENSITIVITY, PERMISSIONS_VERSION,
   ROLES, APPS, APP_PRESETS, ROLES_VERSION, DEFAULT_INVITED_ROLE,
@@ -76,8 +77,15 @@ module.exports = {
   mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated, validateCustomRole,
   listPermissionSetIds, getPermissionSet, isSystemPermissionSet,
   listForRole, getDefaultPermissionSetIds, expandPermissionKeys, expandRolePermissions,
-  // runtime
-  ...guards,
+  // runtime (from ./guards.js)
+  resolveEffectivePermissions,
+  hasPermission, hasAnyPermission, hasAllPermissions,
+  requirePermission, requireAnyPermission, requireAllPermissions,
+  checkSensitivity, requirePermissionWithSensitivity,
+  requirePerm, requireRole, requiresMfa,
+  FLS_RULES, redactFields, RLS_RULES, recordLevelClause,
+  requirePermFastify, requireAnyPerm,
+  enforceSessionPolicy, canImpersonate,
   // lifecycle
   seedRBAC, readVersions, registerRbacRoutes, install,
 };

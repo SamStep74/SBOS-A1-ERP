@@ -29,14 +29,10 @@
 // MFA gating: the requiresMfa(permKey) helper short-circuits to false on
 // ai.agent.*, system.tenant.*, and compliance.* keys unless the session
 // has verified MFA. requirePerm respects it automatically.
-
-'use strict';
-
-const { PERMISSIONS, SENSITIVITY } = require('./permissions');
-const { ROLES, mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated } = require('./roles');
-const { PERMISSION_SETS } = require('./matrix');
-const { expandRolePermissions, listForRole, getParentChain } = require('./roleMatrix');
-
+import { PERMISSIONS, SENSITIVITY } from './permissions.js';
+import { ROLES, mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated } from './roles.js';
+import { PERMISSION_SETS } from './matrix.js';
+import { expandRolePermissions, listForRole, getParentChain } from './roleMatrix.js';
 // ───────── Permission resolution cache ─────────
 //
 // Permission resolution is per-request and inexpensive (Set lookup), but
@@ -528,7 +524,7 @@ function canImpersonate(actor, target) {
   return true;
 }
 
-module.exports = {
+export {
   // Resolution
   resolveEffectivePermissions,
   // Permission checks (legacy throwing variants)

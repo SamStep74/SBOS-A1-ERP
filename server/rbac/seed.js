@@ -7,16 +7,17 @@
 //   const { seedRBAC } = require('./seed');
 //   await seedRBAC(db);            // safe to call on every boot
 //   await seedRBAC(db, { force: true });  // blow away + re-seed (DANGEROUS)
-
-'use strict';
-
-const {
+import {
   PERMISSIONS, PERMISSIONS_VERSION, listKeys, getDefinition,
-} = require('./permissions');
-const { ROLES, ROLES_VERSION, APPS } = require('./roles');
-const { PERMISSION_SETS, PERMISSION_SETS_VERSION } = require('./matrix');
-const { ROLE_MATRIX } = require('./roleMatrix');
+} from './permissions.js';
+import { ROLES, ROLES_VERSION, APPS } from './roles.js';
+import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
+import { ROLE_MATRIX } from './roleMatrix.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // SQL helpers that work against better-sqlite3 (most common in A1) and
 // node:sqlite. We use positional placeholders; both drivers accept that.
 function isSqliteDb(db) {
@@ -127,8 +128,6 @@ async function seedRolePermissionSets(db) {
 async function runMigrations(db) {
   // Apply schema. Split on `;` to get individual statements (SQLite is OK
   // with multi-statement exec). We strip comments first to avoid issues.
-  const fs = require('fs');
-  const path = require('path');
   const schemaPath = path.join(__dirname, 'schema.sql');
   const raw = fs.readFileSync(schemaPath, 'utf8');
 
@@ -202,4 +201,4 @@ function readVersions(db) {
   return out;
 }
 
-module.exports = { seedRBAC, readVersions, runMigrations };
+export {seedRBAC, readVersions, runMigrations};

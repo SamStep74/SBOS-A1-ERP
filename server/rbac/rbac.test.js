@@ -20,13 +20,12 @@
 //   - requiresMfa helper
 //   - Express adapter middleware behavior
 //   - Seed idempotency (in-memory SQLite)
-
-'use strict';
-
-const { test, describe, before } = require('node:test');
-const assert = require('node:assert/strict');
-
-const rbac = require('./index');
+import { test, describe, before } from 'node:test';
+import assert from 'node:assert/strict';
+import * as rbac from './index.js';
+import { requirePerm as expressRequirePerm, requireRole as expressRequireRole } from './express-adapter.js';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 const {
   PERMISSIONS, ROLES, PERMISSION_SETS, ROLE_MATRIX,
   byCategory, isValidKey, getDefinition, listKeys,
@@ -806,7 +805,6 @@ describe('Express adapter', () => {
   test('requirePerm middleware calls next() on grant', () => {
     // Lazy-require to avoid pulling Express in (this is a thin wrapper
     // that takes req/res/next as arguments, no Express import needed).
-    const { requirePerm: expressRequirePerm } = require('./express-adapter');
     const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
     const m = mockReqRes(owner);
     expressRequirePerm('finance.invoice.create')(m.req, m.res, m.next);
@@ -815,7 +813,6 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm middleware 401s on missing user', () => {
-    const { requirePerm: expressRequirePerm } = require('./express-adapter');
     const m = mockReqRes(null);
     expressRequirePerm('finance.invoice.create')(m.req, m.res, m.next);
     assert.equal(m.nextCalled, false);
@@ -824,7 +821,6 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm middleware 403s on deny', () => {
-    const { requirePerm: expressRequirePerm } = require('./express-adapter');
     const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
     const m = mockReqRes(salesrep);
     expressRequirePerm('system.tenant.delete')(m.req, m.res, m.next);
@@ -834,7 +830,6 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm middleware 401s with rbac_mfa_required when MFA needed', () => {
-    const { requirePerm: expressRequirePerm } = require('./express-adapter');
     const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: false };
     const m = mockReqRes(admin);
     // Use a perm Admin holds AND that triggers the MFA gate.
@@ -845,14 +840,12 @@ describe('Express adapter', () => {
   });
 
   test('requireRole middleware calls next() on grant via hierarchy', () => {
-    const { requireRole: expressRequireRole } = require('./express-adapter');
     const m = mockReqRes({ id: 1, role: 'Accountant' });
     expressRequireRole('Bookkeeper')(m.req, m.res, m.next);
     assert.equal(m.nextCalled, true);
   });
 
   test('requireRole middleware 403s on mismatch', () => {
-    const { requireRole: expressRequireRole } = require('./express-adapter');
     const m = mockReqRes({ id: 1, role: 'SalesRep' });
     expressRequireRole('Admin')(m.req, m.res, m.next);
     assert.equal(m.status, 403);
@@ -860,13 +853,11 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm throws TypeError on invalid arg', () => {
-    const { requirePerm: expressRequirePerm } = require('./express-adapter');
     assert.throws(() => expressRequirePerm(''), TypeError);
     assert.throws(() => expressRequirePerm(null), TypeError);
   });
 
   test('requireRole throws TypeError on invalid arg', () => {
-    const { requireRole: expressRequireRole } = require('./express-adapter');
     assert.throws(() => expressRequireRole(''), TypeError);
     assert.throws(() => expressRequireRole(undefined), TypeError);
   });

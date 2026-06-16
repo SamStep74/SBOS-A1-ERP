@@ -8,9 +8,6 @@
 // Use permission sets for cross-functional needs (e.g. "Approver" can be added
 // to any user regardless of role). Use roles for the primary org-position
 // hierarchy.
-
-'use strict';
-
 const PERMISSION_SETS_VERSION = 1;
 
 const PERMISSION_SETS = Object.freeze({
@@ -1310,10 +1307,8 @@ function isSystemPermissionSet(id) {
   return Boolean(ps && ps.isSystem);
 }
 
-module.exports = {
-  PERMISSION_SETS_VERSION,
+export {PERMISSION_SETS_VERSION,
   PERMISSION_SETS,
   listPermissionSetIds,
   getPermissionSet,
-  isSystemPermissionSet,
-};
+  isSystemPermissionSet,};

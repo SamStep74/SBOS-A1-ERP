@@ -11,12 +11,8 @@
 //   - "StandardUser" is implicitly granted to every authenticated user.
 //   - Sensitive roles (Owner, Admin, FinanceLead, PayrollClerk, Auditor)
 //     do NOT get StandardUser — they get it through their custom grants.
-
-'use strict';
-
-const { ROLES } = require('./roles');
-const { PERMISSION_SETS } = require('./matrix');
-
+import { ROLES } from './roles.js';
+import { PERMISSION_SETS } from './matrix.js';
 const ROLE_MATRIX = Object.freeze({
   // ───────── Top of hierarchy ─────────
   Owner:           Object.freeze([
@@ -276,11 +272,9 @@ function expandRolePermissions(roleId, userPermissionSetIds = []) {
   return expandPermissionKeys(ids);
 }
 
-module.exports = {
-  ROLE_MATRIX,
+export {ROLE_MATRIX,
   listForRole,
   getDefaultPermissionSetIds,
   getParentChain,
   expandPermissionKeys,
-  expandRolePermissions,
-};
+  expandRolePermissions,};

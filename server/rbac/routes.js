@@ -31,19 +31,15 @@
 // The router expects to be registered with a Fastify app that has:
 //   - app.authenticate preHandler in place (sets request.user)
 //   - this.db (sqlite) on the app instance OR injected via opts.db
-
-'use strict';
-
-const {
+import {
   PERMISSIONS, listKeys, getDefinition, byCategory,
-} = require('./permissions');
-const { ROLES, validateCustomRole, getRole, listRoleIds } = require('./roles');
-const { PERMISSION_SETS } = require('./matrix');
-const { ROLE_MATRIX, listForRole, getDefaultPermissionSetIds, expandRolePermissions } = require('./roleMatrix');
-const {
+} from './permissions.js';
+import { ROLES, validateCustomRole, getRole, listRoleIds } from './roles.js';
+import { PERMISSION_SETS } from './matrix.js';
+import { ROLE_MATRIX, listForRole, getDefaultPermissionSetIds, expandRolePermissions, getParentChain } from './roleMatrix.js';
+import {
   hasPermission, requirePermFastify, requireAnyPerm, resolveEffectivePermissions, redactFields,
-} = require('./guards');
-
+} from './guards.js';
 function registerRbacRoutes(app, opts = {}) {
   const db = opts.db || app.db;
   if (!db) {
@@ -187,7 +183,7 @@ function registerRbacRoutes(app, opts = {}) {
     const effective = resolveEffectivePermissions(user);
     return {
       user: { id: u.id, username: u.username, email: u.email, role: user.role },
-      roleChain: (require('./roleMatrix').getParentChain(user.role)),
+      roleChain: getParentChain(user.role),
       directPermissionSets: directPS,
       effectivePermissionSetIds: getDefaultPermissionSetIds(user),
       effectivePermissions: [...effective].sort(),
@@ -347,7 +343,7 @@ function registerRbacRoutes(app, opts = {}) {
     const perms = resolveEffectivePermissions(request.user);
     return {
       role: request.user.role,
-      roleChain: require('./roleMatrix').getParentChain(request.user.role),
+      roleChain: getParentChain(request.user.role),
       effectivePermissions: [...perms].sort(),
       count: perms.size,
     };
@@ -371,4 +367,4 @@ function registerRbacRoutes(app, opts = {}) {
   });
 }
 
-module.exports = { registerRbacRoutes };
+export {registerRbacRoutes};
