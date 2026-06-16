@@ -27,6 +27,9 @@ const STRINGS = Object.freeze({
     'hvhh.length': 'ՀՎՀՀ-ն պետք է լինի {{length}} նիշ',
     'hvhh.degenerate': 'ՀՎՀՀ-ն անվավեր է',
     'hvhh.checkDigit': 'ՀՎՀՀ-ի ստուգիչ նիշը սխալ է',
+    'amd.required': 'Գումարը պարտադիր է',
+    'amd.notFinite': 'Գումարը պետք է լինի վերջավոր թիվ',
+    'amd.notNumber': 'Գումարը վավեր թիվ չէ՝ {{raw}}',
   }),
   en: Object.freeze({
     'hvhh.required': 'HVHH is required',
@@ -34,6 +37,9 @@ const STRINGS = Object.freeze({
     'hvhh.length': 'HVHH must be {{length}} digits long',
     'hvhh.degenerate': 'HVHH is invalid',
     'hvhh.checkDigit': 'HVHH check digit is wrong',
+    'amd.required': 'Amount is required.',
+    'amd.notFinite': 'Amount must be a finite number.',
+    'amd.notNumber': 'Amount is not a valid number: {{raw}}',
   }),
   ru: Object.freeze({
     'hvhh.required': 'ИНН обязателен',
@@ -41,6 +47,9 @@ const STRINGS = Object.freeze({
     'hvhh.length': 'ИНН должен содержать {{length}} цифр',
     'hvhh.degenerate': 'ИНН недействителен',
     'hvhh.checkDigit': 'Контрольная цифра ИНН неверна',
+    'amd.required': 'Сумма обязательна',
+    'amd.notFinite': 'Сумма должна быть конечным числом',
+    'amd.notNumber': 'Сумма не является допустимым числом: {{raw}}',
   }),
 });
 

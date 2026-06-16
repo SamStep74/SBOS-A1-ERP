@@ -9,6 +9,8 @@
 // This is the localization "kernel" the operational modules (catalog, inventory,
 // purchase, POS) depend on per the suite's Localization Checklist.
 
+import { t } from './i18n.js';
+
 const AMD = Object.freeze({ code: 'AMD', symbol: '֏', subunit: 0 });
 
 // ՀՎՀՀ is exactly 8 numeric digits: 7 serial + 1 check digit. The official
@@ -16,6 +18,13 @@ const AMD = Object.freeze({ code: 'AMD', symbol: '֏', subunit: 0 });
 // invariants (length, numeric, non-degenerate). `checkDigitVerifier` is a documented
 // seam: pass one in once the official algorithm is sourced to tighten validation.
 const HVHH_LENGTH = 8;
+// Default locale for HVHH error messages. Armenian is the native locale for
+// this id and matches the strings the rest of the suite was written against;
+// callers can override per-request via the `locale` option.
+const HVHH_DEFAULT_LOCALE = 'hy';
+// Default locale for AMD error messages. parseAmd's hardcoded strings were
+// English, so the default stays 'en' to keep existing call sites green.
+const AMD_DEFAULT_LOCALE = 'en';
 
 function normalizeHvhh(value) {
   if (value === null || value === undefined) return '';
@@ -23,20 +32,24 @@ function normalizeHvhh(value) {
   return String(value).replace(/[\s.\-]/g, '');
 }
 
-function validateHvhh(value, { checkDigitVerifier } = {}) {
+function validateHvhh(value, { checkDigitVerifier, locale = HVHH_DEFAULT_LOCALE } = {}) {
   const normalized = normalizeHvhh(value);
-  if (!normalized) return { ok: false, normalized: '', error: 'ՀՎՀՀ-ն պարտադիր է' };
+  if (!normalized) return { ok: false, normalized: '', error: t(locale, 'hvhh.required') };
   if (!/^[0-9]+$/.test(normalized)) {
-    return { ok: false, normalized, error: 'ՀՎՀՀ-ն պետք է պարունակի միայն թվանշաններ' };
+    return { ok: false, normalized, error: t(locale, 'hvhh.notNumeric') };
   }
   if (normalized.length !== HVHH_LENGTH) {
-    return { ok: false, normalized, error: `ՀՎՀՀ-ն պետք է լինի ${HVHH_LENGTH} նիշ` };
+    return {
+      ok: false,
+      normalized,
+      error: t(locale, 'hvhh.length', { length: String(HVHH_LENGTH) }),
+    };
   }
   if (/^(\d)\1{7}$/.test(normalized)) {
-    return { ok: false, normalized, error: 'ՀՎՀՀ-ն անվավեր է' };
+    return { ok: false, normalized, error: t(locale, 'hvhh.degenerate') };
   }
   if (typeof checkDigitVerifier === 'function' && !checkDigitVerifier(normalized)) {
-    return { ok: false, normalized, error: 'ՀՎՀՀ-ի ստուգիչ նիշը սխալ է' };
+    return { ok: false, normalized, error: t(locale, 'hvhh.checkDigit') };
   }
   return { ok: true, normalized, error: null };
 }
@@ -51,9 +64,10 @@ function isValidHvhh(value, options) {
 // fails LOUD on missing, non-numeric, wrong-length, or degenerate input. On
 // success, `error` is omitted (so { ok: true, hvhh } deep-equals cleanly); on
 // failure, the normalized form is still exposed so callers can log or echo it
-// back to the user. Accepts the same `checkDigitVerifier` seam as validateHvhh.
-// Use at system boundaries (API bodies, form fields, CSV imports) before
-// trusting an id; keep normalizeHvhh for already-validated internal numbers.
+// back to the user. Accepts the same options as validateHvhh — `checkDigitVerifier`
+// and `locale` (defaults to 'hy'). Use at system boundaries (API bodies, form
+// fields, CSV imports) before trusting an id; keep normalizeHvhh for
+// already-validated internal numbers.
 function parseHvhh(value, options) {
   const result = validateHvhh(value, options);
   if (result.ok) return { ok: true, hvhh: result.normalized };
@@ -81,23 +95,26 @@ function formatAmd(amount, { symbol = true } = {}) {
 // Strict, locale-tolerant boundary parser for AMD input. Unlike roundAmd (which
 // returns 0 for anything un-parseable — silently corrupting "1,000" → 0), this
 // returns { ok, amount, error }: it accepts grouped/spaced strings and round-trips
-// formatAmd output, but fails LOUD on missing or non-numeric input. Use it at
-// system boundaries (API bodies, form fields, imports) before trusting an amount;
-// keep roundAmd for internal already-validated numbers.
-function parseAmd(value) {
+// formatAmd output, but fails LOUD on missing or non-numeric input. Accepts an
+// optional `locale` option (default 'en') so callers can route errors through
+// the i18n kernel. The {{raw}} interpolation is intentional: it echoes the
+// user's exact input back so a CSV import bug surfaces "you sent `abc`" rather
+// than a generic "not a number". Use it at system boundaries (API bodies, form
+// fields, imports) before trusting an amount; keep roundAmd for internal
+// already-validated numbers.
+function parseAmd(value, { locale = AMD_DEFAULT_LOCALE } = {}) {
   if (typeof value === 'number') {
-    if (!Number.isFinite(value))
-      return { ok: false, amount: 0, error: 'Amount must be a finite number.' };
+    if (!Number.isFinite(value)) return { ok: false, amount: 0, error: t(locale, 'amd.notFinite') };
     return { ok: true, amount: roundAmd(value) };
   }
-  if (value == null) return { ok: false, amount: 0, error: 'Amount is required.' };
+  if (value == null) return { ok: false, amount: 0, error: t(locale, 'amd.required') };
   const raw = String(value).trim();
-  if (raw === '') return { ok: false, amount: 0, error: 'Amount is required.' };
+  if (raw === '') return { ok: false, amount: 0, error: t(locale, 'amd.required') };
   // Drop grouping separators (spaces, commas) and the AMD symbol/code so a formatted
   // value round-trips; keep an optional leading sign, digits, and one decimal point.
   const cleaned = raw.split(AMD.symbol).join('').replace(/AMD/gi, '').replace(/[\s,]/g, '');
   if (!/^-?\d+(\.\d+)?$/.test(cleaned)) {
-    return { ok: false, amount: 0, error: `Amount is not a valid number: ${raw}` };
+    return { ok: false, amount: 0, error: t(locale, 'amd.notNumber', { raw }) };
   }
   return { ok: true, amount: roundAmd(Number(cleaned)) };
 }
@@ -105,6 +122,8 @@ function parseAmd(value) {
 export {
   AMD,
   HVHH_LENGTH,
+  HVHH_DEFAULT_LOCALE,
+  AMD_DEFAULT_LOCALE,
   normalizeHvhh,
   validateHvhh,
   isValidHvhh,

@@ -9,6 +9,7 @@ import {
   roundAmd,
   formatAmd,
 } from './localization.js';
+import { t, missingMarker } from './i18n.js';
 
 // --- ՀՎՀՀ (Armenian taxpayer identification number) ---
 
@@ -73,4 +74,62 @@ test('AMD: currency metadata reflects dram with zero subunits', () => {
   assert.equal(AMD.code, 'AMD');
   assert.equal(AMD.symbol, '֏');
   assert.equal(AMD.subunit, 0);
+});
+
+// --- i18n wiring: locale override on validateHvhh ---
+//
+// validateHvhh must route its user-facing errors through t() so callers can
+// pick a language. Default stays 'hy' to preserve the 5 Armenian strings every
+// existing test and call site depends on.
+
+test('validateHvhh: locale=ru returns the Russian error via t()', () => {
+  // Pre-condition: the kernel must have the ru translation. If a translator
+  // removes it later, this test fails with a clear missing-marker message
+  // instead of silently flipping to Armenian.
+  const russian = t('ru', 'hvhh.required');
+  assert.notEqual(
+    russian,
+    missingMarker('hvhh.required'),
+    'kernel must have ru translation for hvhh.required',
+  );
+  assert.equal(validateHvhh('', { locale: 'ru' }).error, russian);
+});
+
+test('validateHvhh: locale=en returns the English error via t() for every fail path', () => {
+  const englishRequired = t('en', 'hvhh.required');
+  const englishNotNumeric = t('en', 'hvhh.notNumeric');
+  const englishLength = t('en', 'hvhh.length', { length: '8' });
+  const englishDegenerate = t('en', 'hvhh.degenerate');
+  const englishCheckDigit = t('en', 'hvhh.checkDigit');
+  // Sanity: kernel has the keys (catches translator regressions).
+  for (const [name, value] of Object.entries({
+    englishRequired,
+    englishNotNumeric,
+    englishLength,
+    englishDegenerate,
+    englishCheckDigit,
+  })) {
+    assert.notEqual(value, missingMarker(name), `kernel must have en translation: ${name}`);
+  }
+  assert.equal(validateHvhh('', { locale: 'en' }).error, englishRequired);
+  assert.equal(validateHvhh('0012345A', { locale: 'en' }).error, englishNotNumeric);
+  assert.equal(validateHvhh('1234567', { locale: 'en' }).error, englishLength);
+  assert.equal(validateHvhh('00000000', { locale: 'en' }).error, englishDegenerate);
+  assert.equal(
+    validateHvhh('01234567', { locale: 'en', checkDigitVerifier: () => false }).error,
+    englishCheckDigit,
+  );
+});
+
+test('validateHvhh: default locale is hy (backward compat with Armenian errors)', () => {
+  // No locale arg → must keep producing the same Armenian strings the existing
+  // call sites and the 5 regex-based tests in this file depend on.
+  assert.equal(validateHvhh('').error, t('hy', 'hvhh.required'));
+  assert.equal(validateHvhh('0012345A').error, t('hy', 'hvhh.notNumeric'));
+  assert.equal(validateHvhh('1234567').error, t('hy', 'hvhh.length', { length: '8' }));
+  assert.equal(validateHvhh('00000000').error, t('hy', 'hvhh.degenerate'));
+  assert.equal(
+    validateHvhh('01234567', { checkDigitVerifier: () => false }).error,
+    t('hy', 'hvhh.checkDigit'),
+  );
 });

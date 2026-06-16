@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHvhh, isValidHvhh } from './localization.js';
+import { t, missingMarker } from './i18n.js';
 
 // parseHvhh is the STRICT boundary parser for ՀՎՀՀ (Armenian taxpayer id).
 // Mirrors parseAmd's shape: { ok, hvhh, error }. Unlike normalizeHvhh (which
@@ -74,4 +75,27 @@ test('parseHvhh: a passing checkDigitVerifier leaves ok=true', () => {
   const r = parseHvhh(VALID, { checkDigitVerifier: () => true });
   assert.equal(r.ok, true);
   assert.equal(r.hvhh, VALID);
+});
+
+// --- i18n wiring: locale override propagates through parseHvhh → validateHvhh ---
+
+test('parseHvhh: locale=ru returns the Russian error via t()', () => {
+  const russian = t('ru', 'hvhh.required');
+  assert.notEqual(
+    russian,
+    missingMarker('hvhh.required'),
+    'kernel must have ru translation for hvhh.required',
+  );
+  assert.equal(parseHvhh('', { locale: 'ru' }).error, russian);
+  assert.equal(parseHvhh('0012345A', { locale: 'ru' }).error, t('ru', 'hvhh.notNumeric'));
+  assert.equal(
+    parseHvhh('1234567', { locale: 'ru' }).error,
+    t('ru', 'hvhh.length', { length: '8' }),
+  );
+});
+
+test('parseHvhh: default locale stays hy (preserves Armenian errors for existing callers)', () => {
+  // No locale arg → Armenian, matching the regex-based tests above.
+  assert.equal(parseHvhh('').error, t('hy', 'hvhh.required'));
+  assert.equal(parseHvhh('0012345A').error, t('hy', 'hvhh.notNumeric'));
 });
