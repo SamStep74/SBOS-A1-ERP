@@ -25,11 +25,47 @@ const STRINGS = Object.freeze({
     'hvhh.required': 'ՀՎՀՀ-ն պարտադիր է',
     'hvhh.notNumeric': 'ՀՎՀՀ-ն պետք է պարունակի միայն թվանշաններ',
     'hvhh.length': 'ՀՎՀՀ-ն պետք է լինի {{length}} նիշ',
-    'hvhh.degenerate': 'ՀՎՀՀ-ն անվավեր է',
+    'hvhh.degenerate': 'ՀՎՀհ-ն անվավեր է',
     'hvhh.checkDigit': 'ՀՎՀՀ-ի ստուգիչ նիշը սխալ է',
     'amd.required': 'Գումարը պարտադիր է',
     'amd.notFinite': 'Գումարը պետք է լինի վերջավոր թիվ',
     'amd.notNumber': 'Գումարը վավեր թիվ չէ՝ {{raw}}',
+    'vat.form.missingLine': "ԱԱՀ-ի հաշվարկում բացակայում է պարտադիր '{{id}}' տողը։",
+    'vat.form.nonNumericAmount': '{{id}} տողի {{field}} դաշտը պետք է լինի թիվ։',
+    'vat.form.nonIntegerAmount': '{{id}} տողի {{field}} դաշտը պետք է լինի ամբողջ դրամ։',
+    'vat.form.negativeAmount': '{{id}} տողի {{field}} դաշտը չպետք է լինի բացասական։',
+    'vat.form.line16BaseMismatch':
+      '16-րդ տողի հիմքը ({{actual}}) պետք է հավասար լինի 7+9+12+13 տողերի հիմքերի գումարին ({{expected}})։',
+    'vat.form.line16VatMismatch':
+      '16-րդ տողի ԱԱՀ-ն ({{actual}}) պետք է հավասար լինի 7+9 տողերի ԱԱՀ-ների գումարին ({{expected}})։',
+    'vat.form.line21VatMismatch':
+      '21-րդ տողի ԱԱՀ-ն ({{actual}}) պետք է հավասար լինի 17+18 տողերի ԱԱՀ-ների գումարին ({{expected}})։',
+    'vat.form.line23NetMismatch':
+      '23-րդ տողը պետք է լինի վճարման ենթակա={{payable}}, հաշվելի={{recoverable}} (= տող 16 ԱԱՀ − տող 21 ԱԱՀ)։',
+    'vat.form.rateMismatch':
+      '{{id}} տողի ԱԱՀ-ն ({{actual}}) անհավանական է {{base}} հիմքի համար {{rate}}% դրույքաչափով (�պասվում է ≈{{expected}} ± {{tolerance}})։',
+    'einv.validate.missingTransactionType':
+      'Գործարքի տեսակը պարտադիր է ՍՀԿ էլեկտրոնային հաշիվ-ապրանքագրերի համար 2025-03-01-ից։',
+    'einv.validate.missingNumber': 'Հաշիվ-ապրանքագրի համարը/սերիան պարտադիր է։',
+    'einv.validate.missingIssueDate': 'Հաշվարկման ամսաթիվը պարտադիր է։',
+    'einv.validate.invalidIssueDate': 'Հաշվարկման ամսաթիվը պետք է լինի ISO ձևաչափով (ՏՏՏՏ-ԱԱ-ՕՕ)։',
+    'einv.validate.missingSupplierName': 'Մատակարարի անվանումը պարտադիր է։',
+    'einv.validate.missingSupplierHvhh':
+      'Մատակարարի ՀՎՀՀ-ն (հարկ վճարողի հաշվառման համարը) պարտադիր է։',
+    'einv.validate.invalidSupplierHvhh': 'Մատակարարի ՀՎՀՀ-ն սխալ է (սպասվում է 8 թվանշան)։',
+    'einv.validate.missingBuyerId':
+      'Գնորդը պետք է նույնականացվի ՀՎՀՀ-ով (կազմակերպություն) կամ անձնագրով (ֆիզիկական անձ)։',
+    'einv.validate.invalidBuyerHvhh': 'Գնորդի ՀՎՀՀ-ն սխալ է (սպասվում է 8 թվանշան)։',
+    'einv.validate.noLines': 'Անհրաժեշտ է առնվազն մեկ հաշվարկման տող։',
+    'einv.validate.invalidLineDescription':
+      'Տողի նկարագրությունը պարտադիր է և չպետք է գերազանցի {{max}} նիշը։',
+    'einv.validate.invalidLineQuantity': 'Տողի քանակը պետք է լինի դրական թիվ։',
+    'einv.validate.invalidLineNet': 'Տողի զուտ գումարը պետք է լինի ոչ բացասական թիվ։',
+    'einv.validate.invalidLineVatRate':
+      'Տողի ԱԱՀ-ի դրույքաչափը պետք է լինի {{rates}} (16.67%-ը հաշվարկային է՝ միայն ԱԱՀ-ի հաշվարկի համար)։',
+    'einv.validate.invalidLineVatAmount': 'Տողի ԱԱՀ-ի գումարը պետք է լինի թիվ։',
+    'einv.validate.lineVatMismatch':
+      'Տողի ԱԱՀ-ի գումարը {{actual}} չի համապատասխանում {{net}} զուտ գումարի {{rate}}%-ին (սպասվում է ≈{{expected}})։',
   }),
   en: Object.freeze({
     'hvhh.required': 'HVHH is required',
@@ -40,6 +76,39 @@ const STRINGS = Object.freeze({
     'amd.required': 'Amount is required.',
     'amd.notFinite': 'Amount must be a finite number.',
     'amd.notNumber': 'Amount is not a valid number: {{raw}}',
+    'vat.form.missingLine': "VAT return is missing required line '{{id}}'.",
+    'vat.form.nonNumericAmount': 'Line {{id}}.{{field}} must be a number.',
+    'vat.form.nonIntegerAmount': 'Line {{id}}.{{field}} must be a whole-dram amount.',
+    'vat.form.negativeAmount': 'Line {{id}}.{{field}} must not be negative.',
+    'vat.form.line16BaseMismatch':
+      'Line 16 base ({{actual}}) must equal 7+9+12+13 bases ({{expected}}).',
+    'vat.form.line16VatMismatch': 'Line 16 VAT ({{actual}}) must equal 7+9 VAT ({{expected}}).',
+    'vat.form.line21VatMismatch': 'Line 21 VAT ({{actual}}) must equal 17+18 VAT ({{expected}}).',
+    'vat.form.line23NetMismatch':
+      'Line 23 must be payable={{payable}}, recoverable={{recoverable}} (= line16.vat − line21.vat).',
+    'vat.form.rateMismatch':
+      'Line {{id}} VAT ({{actual}}) is implausible for base {{base}} at {{rate}}% (expected ~{{expected}} ± {{tolerance}}).',
+    'einv.validate.missingTransactionType':
+      'Գործարքի տեսակ (transaction type) is mandatory for SRC e-invoices since 2025-03-01.',
+    'einv.validate.missingNumber': 'Invoice number/series is required.',
+    'einv.validate.missingIssueDate': 'Issue date is required.',
+    'einv.validate.invalidIssueDate': 'Issue date must be ISO format (YYYY-MM-DD).',
+    'einv.validate.missingSupplierName': 'Supplier name is required.',
+    'einv.validate.missingSupplierHvhh': 'Supplier ՀՎՀՀ (tax ID) is required.',
+    'einv.validate.invalidSupplierHvhh': 'Supplier ՀՎՀՀ is malformed (expected 8 digits).',
+    'einv.validate.missingBuyerId':
+      'Buyer must be identified by ՀՎՀՀ (organization) or passport (individual).',
+    'einv.validate.invalidBuyerHvhh': 'Buyer ՀՎՀՀ is malformed (expected 8 digits).',
+    'einv.validate.noLines': 'At least one invoice line is required.',
+    'einv.validate.invalidLineDescription':
+      'Line description is required and must be ≤ {{max}} characters.',
+    'einv.validate.invalidLineQuantity': 'Line quantity must be a positive number.',
+    'einv.validate.invalidLineNet': 'Line net amount must be a non-negative number.',
+    'einv.validate.invalidLineVatRate':
+      'Line VAT rate must be {{rates}} (16.67% is imputed — VAT-return only).',
+    'einv.validate.invalidLineVatAmount': 'Line VAT amount must be a number.',
+    'einv.validate.lineVatMismatch':
+      'Line VAT amount {{actual}} is inconsistent with {{rate}}% of net {{net}} (expected ~{{expected}}).',
   }),
   ru: Object.freeze({
     'hvhh.required': 'ИНН обязателен',
@@ -50,6 +119,42 @@ const STRINGS = Object.freeze({
     'amd.required': 'Сумма обязательна',
     'amd.notFinite': 'Сумма должна быть конечным числом',
     'amd.notNumber': 'Сумма не является допустимым числом: {{raw}}',
+    'vat.form.missingLine': "В расчёте НДС отсутствует обязательная строка '{{id}}'.",
+    'vat.form.nonNumericAmount': 'Поле {{field}} строки {{id}} должно быть числом.',
+    'vat.form.nonIntegerAmount':
+      'Поле {{field}} строки {{id}} должно быть целым числом (в драмах).',
+    'vat.form.negativeAmount': 'Поле {{field}} строки {{id}} не должно быть отрицательным.',
+    'vat.form.line16BaseMismatch':
+      'База строки 16 ({{actual}}) должна равняться сумме баз строк 7+9+12+13 ({{expected}}).',
+    'vat.form.line16VatMismatch':
+      'НДС строки 16 ({{actual}}) должен равняться сумме НДС строк 7+9 ({{expected}}).',
+    'vat.form.line21VatMismatch':
+      'НДС строки 21 ({{actual}}) должен равняться сумме НДС строк 17+18 ({{expected}}).',
+    'vat.form.line23NetMismatch':
+      'Строка 23 должна иметь к_уплате={{payable}}, к_зачёту={{recoverable}} (= строка 16 НДС − строка 21 НДС).',
+    'vat.form.rateMismatch':
+      'НДС строки {{id}} ({{actual}}) неправдоподобен для базы {{base}} при ставке {{rate}}% (ожидается ≈{{expected}} ± {{tolerance}}).',
+    'einv.validate.missingTransactionType':
+      'Вид операции обязателен для электронных счетов-фактур SRC с 01.03.2025.',
+    'einv.validate.missingNumber': 'Номер/серия счёта-фактуры обязательны.',
+    'einv.validate.missingIssueDate': 'Дата выставления обязательна.',
+    'einv.validate.invalidIssueDate': 'Дата выставления должна быть в формате ISO (ГГГГ-ММ-ДД).',
+    'einv.validate.missingSupplierName': 'Наименование поставщика обязательно.',
+    'einv.validate.missingSupplierHvhh': 'ИНН поставщика (учётный номер плательщика) обязателен.',
+    'einv.validate.invalidSupplierHvhh': 'ИНН поставщика имеет неверный формат (ожидается 8 цифр).',
+    'einv.validate.missingBuyerId':
+      'Покупатель должен быть идентифицирован по ИНН (организация) или паспорту (физическое лицо).',
+    'einv.validate.invalidBuyerHvhh': 'ИНН покупателя имеет неверный формат (ожидается 8 цифр).',
+    'einv.validate.noLines': 'Требуется хотя бы одна строка счёта.',
+    'einv.validate.invalidLineDescription':
+      'Описание строки обязательно и не должно превышать {{max}} символов.',
+    'einv.validate.invalidLineQuantity': 'Количество строки должно быть положительным числом.',
+    'einv.validate.invalidLineNet': 'Сумма нетто строки должна быть неотрицательным числом.',
+    'einv.validate.invalidLineVatRate':
+      'Ставка НДС строки должна быть {{rates}} (16,67% — расчётная, только для расчёта НДС).',
+    'einv.validate.invalidLineVatAmount': 'Сумма НДС строки должна быть числом.',
+    'einv.validate.lineVatMismatch':
+      'Сумма НДС строки {{actual}} не соответствует {{rate}}% от базы {{net}} (ожидается ≈{{expected}}).',
   }),
 });
 

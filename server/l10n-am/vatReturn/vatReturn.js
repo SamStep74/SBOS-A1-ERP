@@ -11,6 +11,7 @@
 // Pure functions, no I/O.
 
 import { roundAmd } from '../localization.js';
+import { t } from '../i18n.js';
 
 const STANDARD_VAT_RATE = 20;
 const IMPUTED_VAT_RATE = 16.67; // VAT fraction of a VAT-inclusive price (20/120); form line 9
@@ -205,14 +206,14 @@ const VAT_FORM_LINE_AMOUNT_FIELDS = Object.freeze({
   23: ['payable', 'recoverable'],
 });
 
-function validateVatReturnForm(form = {}) {
+function validateVatReturnForm(form = {}, { locale = 'en' } = {}) {
   const lines = (form && typeof form === 'object' && form.lines) || {};
   const errors = [];
   const add = (field, code, message) => errors.push({ field, code, message });
 
   for (const id of VAT_FORM_REQUIRED_LINES) {
     if (!lines[id] || typeof lines[id] !== 'object') {
-      add(`lines.${id}`, 'FORM_MISSING_LINE', `VAT return is missing required line ${id}.`);
+      add(`lines.${id}`, 'FORM_MISSING_LINE', t(locale, 'vat.form.missingLine', { id }));
     }
   }
 
@@ -223,18 +224,26 @@ function validateVatReturnForm(form = {}) {
       if (line[f] == null) continue; // absence is covered by the cross-foot checks below
       const v = line[f];
       if (typeof v !== 'number' || !Number.isFinite(v)) {
-        add(`lines.${id}.${f}`, 'FORM_NON_NUMERIC_AMOUNT', `Line ${id}.${f} must be a number.`);
+        add(
+          `lines.${id}.${f}`,
+          'FORM_NON_NUMERIC_AMOUNT',
+          t(locale, 'vat.form.nonNumericAmount', { id, field: f }),
+        );
         continue;
       }
       if (!Number.isInteger(v)) {
         add(
           `lines.${id}.${f}`,
           'FORM_NON_INTEGER_AMOUNT',
-          `Line ${id}.${f} must be a whole-dram amount.`,
+          t(locale, 'vat.form.nonIntegerAmount', { id, field: f }),
         );
       }
       if (v < 0) {
-        add(`lines.${id}.${f}`, 'FORM_NEGATIVE_AMOUNT', `Line ${id}.${f} must not be negative.`);
+        add(
+          `lines.${id}.${f}`,
+          'FORM_NEGATIVE_AMOUNT',
+          t(locale, 'vat.form.negativeAmount', { id, field: f }),
+        );
       }
     }
   }
@@ -253,7 +262,10 @@ function validateVatReturnForm(form = {}) {
       add(
         'lines.16.base',
         'FORM_16_BASE_MISMATCH',
-        `Line 16 base (${val('16', 'base')}) must equal 7+9+12+13 bases (${expected}).`,
+        t(locale, 'vat.form.line16BaseMismatch', {
+          actual: val('16', 'base'),
+          expected,
+        }),
       );
     }
   }
@@ -263,7 +275,10 @@ function validateVatReturnForm(form = {}) {
       add(
         'lines.16.vat',
         'FORM_16_VAT_MISMATCH',
-        `Line 16 VAT (${val('16', 'vat')}) must equal 7+9 VAT (${expected}).`,
+        t(locale, 'vat.form.line16VatMismatch', {
+          actual: val('16', 'vat'),
+          expected,
+        }),
       );
     }
   }
@@ -273,7 +288,10 @@ function validateVatReturnForm(form = {}) {
       add(
         'lines.21.vat',
         'FORM_21_VAT_MISMATCH',
-        `Line 21 VAT (${val('21', 'vat')}) must equal 17+18 VAT (${expected}).`,
+        t(locale, 'vat.form.line21VatMismatch', {
+          actual: val('21', 'vat'),
+          expected,
+        }),
       );
     }
   }
@@ -285,7 +303,7 @@ function validateVatReturnForm(form = {}) {
       add(
         'lines.23',
         'FORM_23_NET_MISMATCH',
-        `Line 23 must be payable=${payable}, recoverable=${recoverable} (= line16.vat − line21.vat).`,
+        t(locale, 'vat.form.line23NetMismatch', { payable, recoverable }),
       );
     }
   }
@@ -307,7 +325,14 @@ function validateVatReturnForm(form = {}) {
       add(
         `lines.${id}.vat`,
         `FORM_${id}_RATE_MISMATCH`,
-        `Line ${id} VAT (${vat}) is implausible for base ${base} at ${ratePct}% (expected ~${Math.round(expected)} ± ${Math.round(tolerance)}).`,
+        t(locale, 'vat.form.rateMismatch', {
+          id,
+          actual: vat,
+          base,
+          rate: ratePct,
+          expected: Math.round(expected),
+          tolerance: Math.round(tolerance),
+        }),
       );
     }
   };

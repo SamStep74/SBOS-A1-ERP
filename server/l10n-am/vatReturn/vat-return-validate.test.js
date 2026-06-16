@@ -128,3 +128,104 @@ test('validateVatReturnForm: a non-numeric amount is rejected, not coerced', () 
   const result = validateVatReturnForm(form);
   assert.ok(codes(result).includes('FORM_NON_NUMERIC_AMOUNT'));
 });
+
+// --- i18n wiring --------------------------------------------------------
+// Error messages are user-facing (the {message} field lands in finance UIs
+// and RA-SRC error reports). All of them must route through the t() kernel
+// so a caller can request Armenian (the native form language per decree
+// N 298-Ն) or Russian. The default-locale is 'en' to preserve the strings
+// the test corpus was written against — switching to 'hy' / 'ru' must
+// flip every emitted message to the requested locale without losing
+// {{id}} / {{field}} / {{actual}} / {{expected}} placeholders.
+test('validateVatReturnForm: i18n — default locale is English (backward compatible)', () => {
+  const result = validateVatReturnForm({ lines: {} });
+  const missing = result.errors.find((e) => e.code === 'FORM_MISSING_LINE');
+  assert.ok(missing);
+  assert.ok(
+    missing.message.includes('missing required line'),
+    `expected English template, got: ${missing.message}`,
+  );
+  assert.ok(
+    missing.message.includes("'7'") || missing.message.includes(' 7 '),
+    `expected {{id}} interpolation, got: ${missing.message}`,
+  );
+});
+
+test('validateVatReturnForm: i18n — { locale: "hy" } produces Armenian messages', () => {
+  const result = validateVatReturnForm({ lines: {} }, { locale: 'hy' });
+  const missing = result.errors.find((e) => e.code === 'FORM_MISSING_LINE');
+  assert.ok(missing);
+  // Armenian must contain an Armenian-script char (U+0530–U+058F) and must NOT be the
+  // English template. We don't pin the exact wording — translation drift is fine —
+  // we just assert the routing happened.
+  assert.ok(
+    /[Ա-Ֆա-ֆև]/.test(missing.message),
+    `expected Armenian script in message, got: ${missing.message}`,
+  );
+  assert.ok(
+    !missing.message.includes('missing required line'),
+    `expected Armenian (not English) message, got: ${missing.message}`,
+  );
+});
+
+test('validateVatReturnForm: i18n — { locale: "ru" } produces Russian messages', () => {
+  const result = validateVatReturnForm({ lines: {} }, { locale: 'ru' });
+  const missing = result.errors.find((e) => e.code === 'FORM_MISSING_LINE');
+  assert.ok(missing);
+  // Russian must use Cyrillic (U+0400–U+04FF).
+  assert.ok(
+    /[Ѐ-ӿ]/.test(missing.message),
+    `expected Cyrillic script in message, got: ${missing.message}`,
+  );
+  assert.ok(
+    !missing.message.includes('missing required line'),
+    `expected Russian (not English) message, got: ${missing.message}`,
+  );
+});
+
+test('validateVatReturnForm: i18n — mismatch error interpolates {{actual}} and {{expected}}', () => {
+  const form = clone(vatReturnForm(payablePeriod));
+  form.lines['16'].base += 1; // triggers FORM_16_BASE_MISMATCH
+  const result = validateVatReturnForm(form, { locale: 'hy' });
+  const mismatch = result.errors.find((e) => e.code === 'FORM_16_BASE_MISMATCH');
+  assert.ok(mismatch);
+  // Armenian template must show the actual and expected figures, NOT the literal
+  // {{actual}} / {{expected}} placeholders — those are kernel-internal, not user-facing.
+  assert.ok(
+    !mismatch.message.includes('{{'),
+    `expected placeholders to be interpolated, got: ${mismatch.message}`,
+  );
+  // And the numbers must be present in the localized message.
+  const actual = form.lines['16'].base; // tampered value
+  const expected = actual - 1; // sum of 7+9+12+13 bases
+  assert.ok(
+    mismatch.message.includes(String(actual)),
+    `expected actual=${actual} in message: ${mismatch.message}`,
+  );
+  assert.ok(
+    mismatch.message.includes(String(expected)),
+    `expected expected=${expected} in message: ${mismatch.message}`,
+  );
+});
+
+test('validateVatReturnForm: i18n — every emitted error message is non-empty in every locale', () => {
+  const form = clone(vatReturnForm(payablePeriod));
+  form.lines['18'].vat = '80000'; // triggers FORM_NON_NUMERIC_AMOUNT
+  form.lines['18'].base = -1; // triggers FORM_NEGATIVE_AMOUNT
+  form.lines['16'].base += 1; // triggers FORM_16_BASE_MISMATCH
+  for (const locale of ['en', 'hy', 'ru']) {
+    const result = validateVatReturnForm(form, { locale });
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.length > 0, `expected errors in locale=${locale}`);
+    for (const err of result.errors) {
+      assert.ok(
+        err.message && err.message.length > 0,
+        `empty message in locale=${locale} for code=${err.code}`,
+      );
+      assert.ok(
+        !err.message.includes('[[missing:'),
+        `untranslated key in locale=${locale} for code=${err.code}: ${err.message}`,
+      );
+    }
+  }
+});
