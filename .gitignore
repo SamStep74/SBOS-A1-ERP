@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Worktrees and orchestration scratch
+.claude/worktrees/
+.orchestration/*/[a-z]*/
+!.orchestration/README.md
+
+# Build output
+dist/
+build/
+coverage/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# TypeScript build info
+*.tsbuildinfo
