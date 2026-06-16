@@ -10,7 +10,7 @@
 //
 // Pure functions, no I/O.
 
-const { roundAmd } = require("./localization.cjs");
+import { roundAmd } from './localization.js';
 
 const INCOME_TAX_RATE = 20; // flat %, since 1 Jan 2023
 
@@ -44,7 +44,7 @@ function pension(gross) {
   const g = roundAmd(gross);
   if (g <= 0) return 0;
   if (g <= PENSION_LOW_CEIL) return roundAmd(g * 0.05);
-  if (g <= PENSION_CAP_THRESHOLD) return roundAmd(g * 0.10 - 25000);
+  if (g <= PENSION_CAP_THRESHOLD) return roundAmd(g * 0.1 - 25000);
   return PENSION_CAP;
 }
 
@@ -77,7 +77,7 @@ function computePayroll(grossInput) {
   };
 }
 
-module.exports = {
+export {
   INCOME_TAX_RATE,
   PENSION_CAP,
   incomeTax,

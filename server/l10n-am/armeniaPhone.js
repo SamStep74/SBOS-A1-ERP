@@ -9,15 +9,17 @@
 // reject legitimate numbers. Pure functions, no I/O.
 
 function normalizeNsn(value) {
-  let s = String(value == null ? "" : value).replace(/[^\d]/g, "");
-  if (s.startsWith("00374")) s = s.slice(5); // 00 international prefix
-  else if (s.length === 11 && s.startsWith("374")) s = s.slice(3); // 374 + 8-digit NSN
-  else if (s.length === 9 && s.startsWith("0")) s = s.slice(1); // domestic trunk 0 + NSN
-  return /^[1-9]\d{7}$/.test(s) ? s : "";
+  let s = String(value == null ? '' : value).replace(/[^\d]/g, '');
+  if (s.startsWith('00374'))
+    s = s.slice(5); // 00 international prefix
+  else if (s.length === 11 && s.startsWith('374'))
+    s = s.slice(3); // 374 + 8-digit NSN
+  else if (s.length === 9 && s.startsWith('0')) s = s.slice(1); // domestic trunk 0 + NSN
+  return /^[1-9]\d{7}$/.test(s) ? s : '';
 }
 
 function isValidArmenianPhone(value) {
-  return normalizeNsn(value) !== "";
+  return normalizeNsn(value) !== '';
 }
 
 function e164(value) {
@@ -30,11 +32,6 @@ function formatPhone(value) {
   return nsn ? `+374 ${nsn.slice(0, 2)} ${nsn.slice(2)}` : null;
 }
 
-module.exports = {
-  COUNTRY_CODE: "374",
-  NSN_LENGTH: 8,
-  normalizeNsn,
-  isValidArmenianPhone,
-  e164,
-  formatPhone,
-};
+const COUNTRY_CODE = '374';
+const NSN_LENGTH = 8;
+export { COUNTRY_CODE, NSN_LENGTH, normalizeNsn, isValidArmenianPhone, e164, formatPhone };
