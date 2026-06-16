@@ -101,3 +101,49 @@ test('parseAmd: default locale is en (backward compat with English errors)', () 
   assert.equal(parseAmd(NaN).error, t('en', 'amd.notFinite'));
   assert.equal(parseAmd('abc').error, t('en', 'amd.notNumber', { raw: 'abc' }));
 });
+
+// --- security: raw user input is sanitized before being echoed into the error ---
+//
+// `raw` echoes user input back into a localized error that lands in logs/UI
+// sinks. Unfiltered, an attacker (or a buggy upstream) could inject control
+// characters (log forging, terminal escape codes) or unbounded length (log
+// spam / DoS on sinks). parseAmd MUST strip ASCII control chars and cap the
+// length to a small fixed budget before interpolation. The contract: the
+// echoed substring is plain printable text and fits in 200 chars.
+
+test('parseAmd: control characters in raw are stripped from the error', () => {
+  // \n and \r are the canonical log-injection vectors. \x1b is the ANSI ESC
+  // that turns a terminal log into a slot machine. \x00 is a NUL byte. All
+  // must be removed; the printable parts survive intact.
+  const evil = 'abc\nline2\rline3\x1b[31mred\x1b[0m\x00end';
+  const err = parseAmd(evil, { locale: 'en' }).error;
+  assert.equal(err.includes('\n'), false, 'newline leaked into error');
+  assert.equal(err.includes('\r'), false, 'carriage return leaked into error');
+  assert.equal(err.includes('\x1b'), false, 'ANSI ESC leaked into error');
+  assert.equal(err.includes('\x00'), false, 'NUL byte leaked into error');
+  // Printable fragments must remain so the message still tells the user what they sent.
+  assert.ok(err.includes('abc'), 'expected the printable prefix to survive');
+  assert.ok(err.includes('end'), 'expected the printable suffix to survive');
+  // Equivalent to the kernel's interpolation applied to the sanitized raw.
+  const safe = evil.replace(/[\x00-\x1f\x7f]/g, '');
+  assert.equal(err, t('en', 'amd.notNumber', { raw: safe }));
+});
+
+test('parseAmd: raw is capped at 200 characters in the error', () => {
+  // A 5,000-char string of 'a' would otherwise be echoed verbatim, inflating
+  // log lines and downstream error renderers. Cap at 200.
+  const huge = 'a'.repeat(5000);
+  const err = parseAmd(huge, { locale: 'en' }).error;
+  // Anchor to the template's "number: " prefix so we measure the echoed run,
+  // not the lone 'a' in "valid" (the first `/a+/` match is always that one).
+  const match = err.match(/number: (a+)/);
+  assert.ok(match, 'expected the echoed run of a to follow the "number: " prefix');
+  assert.equal(
+    match[1].length,
+    200,
+    `expected the echoed run to be capped at 200 chars, got ${match[1].length}`,
+  );
+  // Total error length must also stay bounded (template + 200 chars).
+  const safe = 'a'.repeat(200);
+  assert.equal(err, t('en', 'amd.notNumber', { raw: safe }));
+});

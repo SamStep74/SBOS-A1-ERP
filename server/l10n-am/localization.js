@@ -26,6 +26,26 @@ const HVHH_DEFAULT_LOCALE = 'hy';
 // English, so the default stays 'en' to keep existing call sites green.
 const AMD_DEFAULT_LOCALE = 'en';
 
+// Defang user input before it lands in a localized error string. Applied at
+// every parseAmd error that echoes `raw` back to the caller:
+//   1. Strip ASCII control chars (U+0000–U+001F, U+007F). The log-injection
+//      / terminal-escape attack surface: a stray \n forges a fake log line,
+//      an ANSI ESC turns a terminal log into a slot machine, a NUL byte
+//      has no business in a user-facing message.
+//   2. Cap length at RAW_ECHO_MAX. Prevents unbounded log lines / DoS on
+//      downstream error renderers when an upstream feeds in a multi-KB
+//      string. 200 chars is enough to make "you sent abc" diagnosable while
+//      keeping the error readable.
+// Sanitization lives at the boundary (parseAmd), not in the i18n kernel,
+// because raw user input only enters the kernel through this one
+// `amd.notNumber` key. The kernel stays a pure, well-behaved interpolator.
+const RAW_ECHO_MAX = 200;
+function sanitizeRawEcho(raw) {
+  return String(raw)
+    .slice(0, RAW_ECHO_MAX)
+    .replace(/[\x00-\x1f\x7f]/g, '');
+}
+
 function normalizeHvhh(value) {
   if (value === null || value === undefined) return '';
   // Strip separators users commonly type (spaces, dots, hyphens).
@@ -114,7 +134,11 @@ function parseAmd(value, { locale = AMD_DEFAULT_LOCALE } = {}) {
   // value round-trips; keep an optional leading sign, digits, and one decimal point.
   const cleaned = raw.split(AMD.symbol).join('').replace(/AMD/gi, '').replace(/[\s,]/g, '');
   if (!/^-?\d+(\.\d+)?$/.test(cleaned)) {
-    return { ok: false, amount: 0, error: t(locale, 'amd.notNumber', { raw }) };
+    return {
+      ok: false,
+      amount: 0,
+      error: t(locale, 'amd.notNumber', { raw: sanitizeRawEcho(raw) }),
+    };
   }
   return { ok: true, amount: roundAmd(Number(cleaned)) };
 }
