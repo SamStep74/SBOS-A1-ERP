@@ -222,6 +222,51 @@ test('vat-return-form: line 22 (imports per Tax Code art. 79) is input base + VA
   assert.deepEqual(f.lines['22'], { base: 0, vat: 0 });
 });
 
+test('vat-return-form: a sale flagged as a correcting invoice routes base to line 8 sub-cell per direction', () => {
+  // A Ճշգրտող հարկային հաշիվ (correcting tax invoice) is a separate document
+  // that adjusts a previously issued sale. Per decree N 298-Ն it does NOT
+  // roll into line 7 (current-period 20% sales); instead its base flows to
+  // line 8 (baseDecrease when direction='decrease', baseIncrease when 'increase').
+  const dec = vatReturnForm({
+    sales: [{ netAmount: 50000, vatRate: 20, adjusting: 'decrease' }],
+    purchases: [],
+  });
+  assert.equal(dec.lines['8'].baseDecrease, 50000);
+  assert.equal(dec.lines['8'].baseIncrease, 0);
+  // the correcting base must NOT have leaked into line 7 (no current-period sale)
+  assert.equal(dec.lines['7'].base, 0);
+  assert.equal(dec.lines['7'].vat, 0);
+
+  const inc = vatReturnForm({
+    sales: [{ netAmount: 80000, vatRate: 20, adjusting: 'increase' }],
+    purchases: [],
+  });
+  assert.equal(inc.lines['8'].baseDecrease, 0);
+  assert.equal(inc.lines['8'].baseIncrease, 80000);
+  assert.equal(inc.lines['7'].base, 0);
+  assert.equal(inc.lines['7'].vat, 0);
+});
+
+test('vat-return-form: line 16 base reflects correcting-invoice adjustments (7+9+12+13 − 8.dec + 8.inc)', () => {
+  // Cross-foot invariant from decree N 298-Ն:
+  //   line 16 base = 7 + 9 + 12 + 13 + 14 − 8.baseDecrease + 8.baseIncrease
+  // Mixing a 1,000,000 standard sale with a 200,000 correcting decrease and
+  // a 50,000 correcting increase must produce line 16 base = 850,000 — NOT
+  // the naive 1,000,000 that ignores the line-8 adjustments.
+  const f = vatReturnForm({
+    sales: [
+      { netAmount: 1000000, vatRate: 20 }, // standard → line 7
+      { netAmount: 200000, vatRate: 20, adjusting: 'decrease' }, // line 8 dec
+      { netAmount: 50000, vatRate: 20, adjusting: 'increase' }, // line 8 inc
+    ],
+    purchases: [],
+  });
+  assert.equal(f.lines['7'].base, 1000000);
+  assert.equal(f.lines['8'].baseDecrease, 200000);
+  assert.equal(f.lines['8'].baseIncrease, 50000);
+  assert.equal(f.lines['16'].base, 850000); // 1,000,000 − 200,000 + 50,000
+});
+
 test('vat-return-form: every line definition carries the same shape (section/labelHy/fields)', () => {
   const f = vatReturnForm({ sales: [], purchases: [] });
   for (const id of ['8', '10', '11', '14', '15', '19', '20', '22']) {

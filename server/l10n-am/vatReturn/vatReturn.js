@@ -175,8 +175,19 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     imputedVat: 0,
     zeroBase: 0,
     exemptBase: 0,
+    // Correcting tax invoices (Ճշգրտող հարկային հաշիվ) — decree N 298-Ն line 8.
+    // Per direction: 'decrease' → baseDecrease, 'increase' → baseIncrease.
+    // These sales do NOT roll into line 7 (current-period standard base).
+    adjustingBaseDecrease: 0,
+    adjustingBaseIncrease: 0,
   };
   for (const s of sales) {
+    if (s.adjusting === 'decrease' || s.adjusting === 'increase') {
+      const adjBase = roundAmd(s.netAmount);
+      if (s.adjusting === 'decrease') o.adjustingBaseDecrease += adjBase;
+      else o.adjustingBaseIncrease += adjBase;
+      continue;
+    }
     const c = classifySale(s);
     if (c.bucket === 'standard') {
       o.standardBase += c.net;
@@ -213,7 +224,10 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     lineDefinitions: VAT_RETURN_FORM_LINE_DEFINITIONS,
     lines: {
       7: { base: o.standardBase, vat: o.standardVat }, // 20% taxable transactions
-      8: { baseDecrease: 0, baseIncrease: 0 }, // correcting tax invoices (output base)
+      8: {
+        baseDecrease: o.adjustingBaseDecrease,
+        baseIncrease: o.adjustingBaseIncrease,
+      }, // correcting tax invoices (output base)
       9: { base: o.imputedBase, vat: o.imputedVat }, // 16.67% imputed
       10: { vat: 0 }, // other VAT liability
       11: { vatDecrease: 0, vatIncrease: 0 }, // correcting invoices issued outside supplier name
@@ -221,7 +235,12 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       13: { base: o.exemptBase }, // exempt (art. 64)
       14: { base: 0 }, // REPEALED 27.08.19 N 556-Ն (kept for backward compatibility)
       15: { vatIncrease: 0, vatDecrease: 0 }, // VAT credit adjustment
-      16: { base: creditBase, vat: creditVat }, // total VAT credit (output)
+      16: {
+        // Cross-foot per decree N 298-Ն: 7+9+12+13+14 bases − 8.dec + 8.inc.
+        // creditBase already excludes adjusting invoices (they route to line 8).
+        base: creditBase - o.adjustingBaseDecrease + o.adjustingBaseIncrease,
+        vat: creditVat,
+      }, // total VAT credit (output)
       17: { base: importBase, vat: importVat }, // imported goods
       18: { base: domesticBase, vat: domesticVat }, // domestic acquisitions
       19: { vatDecrease: 0, vatIncrease: 0 }, // acquisition correcting tax invoices
