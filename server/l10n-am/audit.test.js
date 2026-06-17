@@ -9,7 +9,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { auditCatalog, auditSource } from './audit.js';
+import { auditAll, auditCatalog, auditSource } from './audit.js';
 import { STRINGS, LOCALES } from './i18n.js';
 
 describe('auditCatalog', () => {
@@ -113,5 +113,24 @@ describe('auditSource', () => {
     // Only real.js counts — test.js and README.md are exempt
     assert.equal(result.issues.length, 0);
     assert.equal(result.tCallCount, 1);
+  });
+});
+
+// ---- live-repo regression net ---------------------------------------------
+//
+// This describe block is the durable wire-into-`npm test` piece: every time
+// the test suite runs (locally, in CI, in a pre-commit hook), it asserts
+// that the REAL l10n-am catalog is balanced AND every REAL t() call site
+// references a real key. If a future contributor adds a new i18n key to
+// one locale only, or hardcodes a string instead of routing through t(),
+// this test fails the build with a precise pointer.
+
+describe('auditAll — live l10n-am regression', () => {
+  test('real catalog + real source tree has zero issues at HEAD', () => {
+    const result = auditAll({ strings: STRINGS, locales: LOCALES });
+    assert.equal(result.issues.length, 0,
+      `live repo should be clean but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.ok(result.catalogKeyCount > 0, 'live catalog should have keys');
+    assert.ok(result.tCallCount > 0, 'live source should have t() calls');
   });
 });
