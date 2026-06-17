@@ -24,6 +24,7 @@ import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as rbac from './index.js';
 import { requirePerm as expressRequirePerm, requireRole as expressRequireRole } from './express-adapter.js';
+import { requirePermFastify, requireAnyPerm } from './guards.js';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
@@ -860,6 +861,121 @@ describe('Express adapter', () => {
   test('requireRole throws TypeError on invalid arg', () => {
     assert.throws(() => expressRequireRole(''), TypeError);
     assert.throws(() => expressRequireRole(undefined), TypeError);
+  });
+});
+
+// ─────────────── Fastify adapter ───────────────
+
+describe('Fastify adapter', () => {
+  // Minimal mock request/reply — Fastify-free. The preHandler signature is
+  // (request, reply) => Promise<void>; reply must support .code(n).send(payload).
+  // We capture code+body and detect "happy path" by code remaining at the
+  // default (undefined → tests check `sent === false`).
+  function mockRequestReply({ user, session, impersonator } = {}) {
+    let statusCode = undefined;
+    let body = undefined;
+    let sent = false;
+    const request = { user, session, impersonator };
+    const reply = {
+      code(n) { statusCode = n; return this; },
+      send(payload) { body = payload; sent = true; return this; },
+    };
+    return {
+      request, reply,
+      get statusCode() { return statusCode; },
+      get body() { return body; },
+      get sent() { return sent; },
+    };
+  }
+
+  test('requirePermFastify is a function that returns a preHandler', () => {
+    const preHandler = requirePermFastify('finance.invoice.create');
+    assert.equal(typeof preHandler, 'function');
+    assert.equal(preHandler.constructor.name, 'AsyncFunction');
+  });
+
+  test('requirePermFastify passes through silently on grant (no reply sent)', async () => {
+    const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const m = mockRequestReply({ user: owner });
+    const preHandler = requirePermFastify('finance.invoice.create');
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, false, 'preHandler must NOT call reply.send() on grant');
+    assert.equal(m.statusCode, undefined);
+  });
+
+  test('requirePermFastify 403s with rbac_forbidden when user lacks permission', async () => {
+    const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const m = mockRequestReply({ user: salesrep });
+    const preHandler = requirePermFastify('system.tenant.delete');
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, true);
+    assert.equal(m.statusCode, 403);
+    assert.equal(m.body.error, 'rbac_forbidden');
+    assert.equal(m.body.required, 'system.tenant.delete');
+    assert.equal(m.body.reason, 'no_permission');
+  });
+
+  test('requirePermFastify 403s (not 401) on missing user — Fastify preHandler contract', async () => {
+    // The Express adapter 401s with `unauthenticated` for no-user, but the
+    // Fastify preHandler uses the pure-function outcome.reason path which
+    // surfaces 403 rbac_forbidden with reason=no_user. Pin this so a future
+    // refactor to "401 like Express" is a conscious decision.
+    const m = mockRequestReply({ user: null });
+    const preHandler = requirePermFastify('finance.invoice.create');
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, true);
+    assert.equal(m.statusCode, 403);
+    assert.equal(m.body.error, 'rbac_forbidden');
+    assert.equal(m.body.reason, 'no_user');
+  });
+
+  test('requirePermFastify 401s with rbac_mfa_required when perm requires MFA but session is unverified', async () => {
+    const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: false };
+    const m = mockRequestReply({ user: admin });
+    // ai.agent.run triggers the MFA gate per MFA_REQUIRED_KEY_PATTERNS
+    const preHandler = requirePermFastify('ai.agent.run');
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, true);
+    assert.equal(m.statusCode, 401);
+    assert.equal(m.body.error, 'rbac_mfa_required');
+    assert.equal(m.body.required, 'ai.agent.run');
+  });
+
+  test('requirePermFastify MFA gate yields to a verified session and grants', async () => {
+    const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const m = mockRequestReply({ user: admin });
+    const preHandler = requirePermFastify('ai.agent.run');
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, false, 'verified MFA session must pass through silently');
+  });
+
+  test('requireAnyPerm 403s when user holds none of the keys', async () => {
+    const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const m = mockRequestReply({ user: salesrep });
+    const preHandler = requireAnyPerm(['system.tenant.delete', 'compliance.audit.read']);
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, true);
+    assert.equal(m.statusCode, 403);
+    assert.equal(m.body.error, 'rbac_forbidden');
+    assert.deepEqual(m.body.requiredAny, ['system.tenant.delete', 'compliance.audit.read']);
+  });
+
+  test('requireAnyPerm passes through silently when user holds at least one key', async () => {
+    // Owner holds every perm via the super-user shortcut in resolveEffectivePermissions.
+    const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const m = mockRequestReply({ user: owner });
+    const preHandler = requireAnyPerm(['finance.invoice.create', 'system.tenant.delete']);
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, false);
+  });
+
+  test('requireAnyPerm 403s on missing user', async () => {
+    const m = mockRequestReply({ user: null });
+    const preHandler = requireAnyPerm(['finance.invoice.create']);
+    await preHandler(m.request, m.reply);
+    assert.equal(m.sent, true);
+    assert.equal(m.statusCode, 403);
+    assert.equal(m.body.error, 'rbac_forbidden');
   });
 });
 
