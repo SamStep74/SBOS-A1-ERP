@@ -180,9 +180,23 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // These sales do NOT roll into line 7 (current-period standard base).
     adjustingBaseDecrease: 0,
     adjustingBaseIncrease: 0,
+    // Correcting invoices issued in supplier's name (Մատակարարի անունից) —
+    // decree N 298-Ն line 11 (OUTPUT VAT, agent/commission scenario). Mirror
+    // of line 19: same `adjusting` flag, distinguished by adjustingInSupplierName.
+    // Per direction: 'decrease' → vatDecrease, 'increase' → vatIncrease.
+    adjustingVatDecrease: 0,
+    adjustingVatIncrease: 0,
   };
   for (const s of sales) {
     if (s.adjusting === 'decrease' || s.adjusting === 'increase') {
+      // Line 11 takes precedence: if the correcting invoice was issued in the
+      // supplier's name (agent/commission), VAT (not base) flows to line 11.
+      if (s.adjustingInSupplierName === true) {
+        const { vat } = lineVat(s);
+        if (s.adjusting === 'decrease') o.adjustingVatDecrease += vat;
+        else o.adjustingVatIncrease += vat;
+        continue;
+      }
       const adjBase = roundAmd(s.netAmount);
       if (s.adjusting === 'decrease') o.adjustingBaseDecrease += adjBase;
       else o.adjustingBaseIncrease += adjBase;
@@ -242,7 +256,10 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       }, // correcting tax invoices (output base)
       9: { base: o.imputedBase, vat: o.imputedVat }, // 16.67% imputed
       10: { vat: 0 }, // other VAT liability
-      11: { vatDecrease: 0, vatIncrease: 0 }, // correcting invoices issued outside supplier name
+      11: {
+        vatDecrease: o.adjustingVatDecrease,
+        vatIncrease: o.adjustingVatIncrease,
+      }, // correcting invoices issued in supplier's name (output VAT, agent/commission)
       12: { base: o.zeroBase }, // zero-rated (art. 65)
       13: { base: o.exemptBase }, // exempt (art. 64)
       14: { base: 0 }, // REPEALED 27.08.19 N 556-Ն (kept for backward compatibility)
