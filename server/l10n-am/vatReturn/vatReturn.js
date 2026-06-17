@@ -224,12 +224,28 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // (refund input VAT to SRC), 'increase' → vatIncrease (claim more input VAT).
     // These purchases do NOT roll into lines 17/18 (current-period acquisitions).
     adjustingVatDecrease = 0,
-    adjustingVatIncrease = 0;
+    adjustingVatIncrease = 0,
+    // Imports per Tax Code art. 79 — decree N 298-Ն line 22 (INPUT side,
+    // INDEPENDENT liability). The VAT is paid at customs, not via the regular
+    // input-credit path; line 22 reports base + VAT for reconciliation only.
+    // These purchases do NOT roll into lines 17/18 (current-period reverse-charge
+    // imports) and do NOT contribute to line 21 (debit). They are reported here
+    // AND in a separate declaration to customs.
+    art79Base = 0,
+    art79Vat = 0;
   for (const p of purchases) {
     if (p.adjusting === 'decrease' || p.adjusting === 'increase') {
       const { vat } = lineVat(p);
       if (p.adjusting === 'decrease') adjustingVatDecrease += vat;
       else adjustingVatIncrease += vat;
+      continue;
+    }
+    // Line 22 takes precedence: art. 79 imports are a separate liability
+    // and must NOT enter the recoverable input-credit flow (lines 17/18 → 21).
+    if (p.art79 === true) {
+      const { net, vat } = lineVat(p);
+      art79Base += net;
+      art79Vat += vat;
       continue;
     }
     if (p.recoverable === false) continue;
@@ -242,6 +258,8 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       domesticVat += vat;
     }
   }
+  // Line 22 is intentionally OUTSIDE the line 21 cross-foot: it is a
+  // separately-calculated liability, not an input credit.
   const debitVat = importVat + domesticVat - adjustingVatDecrease + adjustingVatIncrease;
   const net = creditVat - debitVat;
 
@@ -278,7 +296,7 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       }, // acquisition correcting tax invoices (input VAT adjustments)
       20: { vatIncrease: 0, vatDecrease: 0 }, // offset VAT adjustment total
       21: { vat: debitVat }, // total VAT debit (input)
-      22: { base: 0, vat: 0 }, // imports per Tax Code art. 79 (independent of 21)
+      22: { base: art79Base, vat: art79Vat }, // imports per Tax Code art. 79 (independent of 21)
       23: { payable: Math.max(0, net), recoverable: Math.max(0, -net) }, // net for the period
     },
   };

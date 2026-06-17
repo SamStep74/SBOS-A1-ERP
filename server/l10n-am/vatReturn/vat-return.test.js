@@ -223,6 +223,53 @@ test('vat-return-form: line 22 (imports per Tax Code art. 79) is input base + VA
   assert.deepEqual(f.lines['22'], { base: 0, vat: 0 });
 });
 
+test('vat-return-form: a purchase flagged art79: true (imports per Tax Code art. 79) routes base + VAT to line 22, not to lines 17/18', () => {
+  // Per decree N 298-Ն: goods imported under Tax Code art. 79 are reported
+  // on line 22 (independent liability) — NOT on line 17/18 (which only cover
+  // ordinary current-period imports of goods/services subject to reverse charge).
+  // The art. 79 VAT is paid at customs, not via the regular VAT return input-
+  // credit path; line 22 carries the full base and VAT for reconciliation.
+  const f = vatReturnForm({
+    sales: [],
+    purchases: [
+      { netAmount: 200000, vatRate: 20, vatAmount: 40000, source: 'import', art79: true },
+    ],
+  });
+  assert.equal(f.lines['22'].base, 200000);
+  assert.equal(f.lines['22'].vat, 40000);
+  // art. 79 import must NOT have leaked into lines 17/18 (current-period reverse charge)
+  assert.equal(f.lines['17'].base, 0);
+  assert.equal(f.lines['17'].vat, 0);
+  assert.equal(f.lines['18'].base, 0);
+  assert.equal(f.lines['18'].vat, 0);
+});
+
+test('vat-return-form: line 22 (art. 79 imports) and lines 17/18 (regular imports) coexist; line 21 only includes recoverable regular VAT', () => {
+  // Two imports in the same period:
+  //   - one ordinary import of services (source='import', no art79) → lines 17/18,
+  //     line 21 VAT is the recoverable reverse-charge input credit
+  //   - one art. 79 import of goods (source='import', art79=true) → line 22,
+  //     NOT recoverable in line 21 (customs-paid, separate liability)
+  // Cross-foot invariant: line 21 vat excludes the art. 79 amount entirely.
+  const f = vatReturnForm({
+    sales: [],
+    purchases: [
+      { netAmount: 100000, vatRate: 20, vatAmount: 20000, source: 'import' },
+      { netAmount: 300000, vatRate: 20, vatAmount: 60000, source: 'import', art79: true },
+    ],
+  });
+  // regular import → lines 17/18
+  assert.equal(f.lines['17'].base, 100000);
+  assert.equal(f.lines['17'].vat, 20000);
+  // art. 79 import → line 22
+  assert.equal(f.lines['22'].base, 300000);
+  assert.equal(f.lines['22'].vat, 60000);
+  // line 21 only includes the RECOVERABLE regular input VAT (20,000)
+  // the art. 79 amount (60,000) is NOT in line 21 — it's reported on line 22
+  // as a separate calculated liability paid at customs
+  assert.equal(f.lines['21'].vat, 20000);
+});
+
 test('vat-return-form: a sale flagged as a correcting invoice routes base to line 8 sub-cell per direction', () => {
   // A Ճշգրտող հարկային հաշիվ (correcting tax invoice) is a separate document
   // that adjusts a previously issued sale. Per decree N 298-Ն it does NOT
