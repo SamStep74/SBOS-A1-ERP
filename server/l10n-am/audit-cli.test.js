@@ -7,7 +7,14 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs, runAudit } from './audit-cli.js';
+
+// Resolve the project root from this test file's location so the live-repo
+// regression below spawns audit-cli.js from the same cwd CI would use.
+const PROJECT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 describe('parseArgs', () => {
   test('empty argv returns defaults', () => {
@@ -194,5 +201,52 @@ describe('runAudit', () => {
     assert.equal(scanCalled, false);
     assert.equal(out.exitCode, 1);
     assert.match(stdout, /bogus/);
+  });
+});
+
+describe('audit-cli.js — live l10n-am regression (child process)', () => {
+  // Spawn the actual `node server/l10n-am/audit-cli.js` entry point against
+  // the project's real source tree. This is the same command the GitHub
+  // Actions CI step will run, so any drift between the synthetic-scan
+  // tests above and the real CLI behavior is caught here.
+  test('node server/l10n-am/audit-cli.js exits 0 and reports no issues', () => {
+    const cliPath = join(PROJECT_ROOT, 'server', 'l10n-am', 'audit-cli.js');
+    const result = spawnSync('node', [cliPath], {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0,
+      `audit-cli should exit 0 on a clean repo.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.match(result.stdout, /no issues/i);
+  });
+
+  test('node server/l10n-am/audit-cli.js --quiet exits 0 with no output', () => {
+    const cliPath = join(PROJECT_ROOT, 'server', 'l10n-am', 'audit-cli.js');
+    const result = spawnSync('node', [cliPath, '--quiet'], {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0,
+      `audit-cli --quiet should exit 0 on a clean repo.\nstderr: ${result.stderr}`);
+    assert.equal(result.stdout, '',
+      `audit-cli --quiet should suppress stdout, got: ${JSON.stringify(result.stdout)}`);
+  });
+
+  test('node server/l10n-am/audit-cli.js --format json emits valid JSON', () => {
+    const cliPath = join(PROJECT_ROOT, 'server', 'l10n-am', 'audit-cli.js');
+    const result = spawnSync('node', [cliPath, '--format', 'json'], {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0,
+      `audit-cli --format json should exit 0 on a clean repo.\nstderr: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.deepEqual(parsed.issues, []);
+    assert.ok(parsed.catalogKeyCount > 0);
+    assert.ok(parsed.tCallCount > 0);
+    assert.equal(parsed.unusedKeyCount, 0);
   });
 });
