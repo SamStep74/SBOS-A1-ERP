@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   computeVatReturn,
   vatReturnForm,
+  validateVatReturnForm,
   STANDARD_VAT_RATE,
   IMPUTED_VAT_RATE,
   VAT_RETURN_FORM_SOURCE,
@@ -265,6 +266,59 @@ test('vat-return-form: line 16 base reflects correcting-invoice adjustments (7+9
   assert.equal(f.lines['8'].baseDecrease, 200000);
   assert.equal(f.lines['8'].baseIncrease, 50000);
   assert.equal(f.lines['16'].base, 850000); // 1,000,000 − 200,000 + 50,000
+});
+
+test('vat-return-form: a purchase flagged as a correcting invoice routes VAT to line 19 sub-cell per direction', () => {
+  // Line 19 covers correcting tax invoices for INPUT side (acquisitions).
+  // Per decree N 298-Ն: adjusting='decrease' → vatDecrease (you owe back input VAT),
+  // adjusting='increase' → vatIncrease (you can claim more input VAT).
+  // Routed amount is VAT (not base) — unlike line 8 which is base for OUTPUT.
+  const dec = vatReturnForm({
+    sales: [],
+    purchases: [
+      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'decrease' },
+    ],
+  });
+  assert.equal(dec.lines['19'].vatDecrease, 20000);
+  assert.equal(dec.lines['19'].vatIncrease, 0);
+  // correcting purchase must NOT have leaked into line 18 (no current-period acquisition)
+  assert.equal(dec.lines['18'].base, 0);
+  assert.equal(dec.lines['18'].vat, 0);
+
+  const inc = vatReturnForm({
+    sales: [],
+    purchases: [
+      { netAmount: 50000, vatRate: 20, vatAmount: 10000, adjusting: 'increase' },
+    ],
+  });
+  assert.equal(inc.lines['19'].vatDecrease, 0);
+  assert.equal(inc.lines['19'].vatIncrease, 10000);
+  assert.equal(inc.lines['18'].base, 0);
+  assert.equal(inc.lines['18'].vat, 0);
+});
+
+test('vat-return-form: line 21 VAT reflects purchase correcting-invoice adjustments (17+18 − 19.dec + 19.inc)', () => {
+  // Cross-foot invariant from decree N 298-Ն for the input side:
+  //   line 21.vat = 17.vat + 18.vat − 19.vatDecrease + 19.vatIncrease + 20.inc − 20.dec
+  // Pick a realistic mix where current acquisitions dominate so line 21 stays
+  // non-negative (the form validator blocks negative totals). 1,000,000-base
+  // domestic purchase (200,000 VAT) + 30,000 correcting dec + 5,000 correcting inc
+  // = 175,000 — exactly the −dec +inc cross-foot.
+  const f = vatReturnForm({
+    sales: [{ netAmount: 5000000, vatRate: 20 }],
+    purchases: [
+      { netAmount: 1000000, vatRate: 20 }, // standard → line 18: vat 200000
+      { netAmount: 150000, vatRate: 20, vatAmount: 30000, adjusting: 'decrease' }, // line 19 dec
+      { netAmount: 25000, vatRate: 20, vatAmount: 5000, adjusting: 'increase' }, // line 19 inc
+    ],
+  });
+  assert.equal(f.lines['18'].vat, 200000);
+  assert.equal(f.lines['19'].vatDecrease, 30000);
+  assert.equal(f.lines['19'].vatIncrease, 5000);
+  assert.equal(f.lines['21'].vat, 175000); // 200000 − 30000 + 5000
+  // validateVatReturnForm must accept this assembled form
+  const v = validateVatReturnForm(f);
+  assert.equal(v.ok, true, `unexpected errors: ${JSON.stringify(v.errors)}`);
 });
 
 test('vat-return-form: every line definition carries the same shape (section/labelHy/fields)', () => {

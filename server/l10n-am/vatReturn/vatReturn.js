@@ -204,8 +204,20 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
   let importBase = 0,
     importVat = 0,
     domesticBase = 0,
-    domesticVat = 0;
+    domesticVat = 0,
+    // Correcting tax invoices (Ձեռքբերումներին վերաբերող Ճշգրտող հարկային հաշիվներ) —
+    // decree N 298-Ն line 19 (INPUT side). Per direction: 'decrease' → vatDecrease
+    // (refund input VAT to SRC), 'increase' → vatIncrease (claim more input VAT).
+    // These purchases do NOT roll into lines 17/18 (current-period acquisitions).
+    adjustingVatDecrease = 0,
+    adjustingVatIncrease = 0;
   for (const p of purchases) {
+    if (p.adjusting === 'decrease' || p.adjusting === 'increase') {
+      const { vat } = lineVat(p);
+      if (p.adjusting === 'decrease') adjustingVatDecrease += vat;
+      else adjustingVatIncrease += vat;
+      continue;
+    }
     if (p.recoverable === false) continue;
     const { net, vat } = lineVat(p);
     if (p.source === 'import') {
@@ -216,7 +228,7 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       domesticVat += vat;
     }
   }
-  const debitVat = importVat + domesticVat;
+  const debitVat = importVat + domesticVat - adjustingVatDecrease + adjustingVatIncrease;
   const net = creditVat - debitVat;
 
   return {
@@ -243,7 +255,10 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       }, // total VAT credit (output)
       17: { base: importBase, vat: importVat }, // imported goods
       18: { base: domesticBase, vat: domesticVat }, // domestic acquisitions
-      19: { vatDecrease: 0, vatIncrease: 0 }, // acquisition correcting tax invoices
+      19: {
+        vatDecrease: adjustingVatDecrease,
+        vatIncrease: adjustingVatIncrease,
+      }, // acquisition correcting tax invoices (input VAT adjustments)
       20: { vatIncrease: 0, vatDecrease: 0 }, // offset VAT adjustment total
       21: { vat: debitVat }, // total VAT debit (input)
       22: { base: 0, vat: 0 }, // imports per Tax Code art. 79 (independent of 21)
