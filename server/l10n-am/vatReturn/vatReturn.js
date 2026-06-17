@@ -44,10 +44,35 @@ const VAT_RETURN_FORM_LINE_DEFINITIONS = Object.freeze({
     labelHy: 'ԱԱՀ-ի 0-ական դրույքաչափով հարկվող գործարքներ',
     fields: Object.freeze(['base']),
   }),
+  8: Object.freeze({
+    section: 'output',
+    labelHy: 'Ճշգրտող հարկային հաշիվներով գործարքներ',
+    fields: Object.freeze(['baseDecrease', 'baseIncrease']),
+  }),
+  10: Object.freeze({
+    section: 'output',
+    labelHy: 'ԱԱՀ-ի գծով այլ հարկային պարտավորություն',
+    fields: Object.freeze(['vat']),
+  }),
+  11: Object.freeze({
+    section: 'output',
+    labelHy: 'Մատակարարի անունից դուրս գրված ճշգրտող հարկային հաշիվներով գործարքներ',
+    fields: Object.freeze(['vatDecrease', 'vatIncrease']),
+  }),
   13: Object.freeze({
     section: 'output',
     labelHy: 'ԱԱՀ-ից ազատված գործարքներ',
     fields: Object.freeze(['base']),
+  }),
+  14: Object.freeze({
+    section: 'output',
+    labelHy: '27.08.19 N 556-Ն ուժը կորցրել է (REPEALED)',
+    fields: Object.freeze(['base']),
+  }),
+  15: Object.freeze({
+    section: 'output',
+    labelHy: 'Հաշվարկված ԱԱՀ-ի հարկային պարտավորությունների ճշգրտում (Ավելացում/Պակասեցում)',
+    fields: Object.freeze(['vatIncrease', 'vatDecrease']),
   }),
   16: Object.freeze({
     section: 'output-total',
@@ -62,6 +87,21 @@ const VAT_RETURN_FORM_LINE_DEFINITIONS = Object.freeze({
   18: Object.freeze({
     section: 'input',
     labelHy: 'ՀՀ տարածքում ձեռք բերված ապրանքներ և ծառայություններ',
+    fields: Object.freeze(['base', 'vat']),
+  }),
+  19: Object.freeze({
+    section: 'input',
+    labelHy: 'Ձեռքբերումներին վերաբերող ճշգրտող հարկային հաշիվներով գործարքներ',
+    fields: Object.freeze(['vatDecrease', 'vatIncrease']),
+  }),
+  20: Object.freeze({
+    section: 'input',
+    labelHy: 'Հաշվանցման ենթակա ԱԱՀ-ի գումարի ճշգրտման ընդհանուր գումար',
+    fields: Object.freeze(['vatIncrease', 'vatDecrease']),
+  }),
+  22: Object.freeze({
+    section: 'input',
+    labelHy: 'Ներմուծված այն ապրանքների, որոնց մասով հարկային օրենսգրքի 79-րդ հոդված',
     fields: Object.freeze(['base', 'vat']),
   }),
   21: Object.freeze({
@@ -173,13 +213,21 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     lineDefinitions: VAT_RETURN_FORM_LINE_DEFINITIONS,
     lines: {
       7: { base: o.standardBase, vat: o.standardVat }, // 20% taxable transactions
+      8: { baseDecrease: 0, baseIncrease: 0 }, // correcting tax invoices (output base)
       9: { base: o.imputedBase, vat: o.imputedVat }, // 16.67% imputed
+      10: { vat: 0 }, // other VAT liability
+      11: { vatDecrease: 0, vatIncrease: 0 }, // correcting invoices issued outside supplier name
       12: { base: o.zeroBase }, // zero-rated (art. 65)
       13: { base: o.exemptBase }, // exempt (art. 64)
+      14: { base: 0 }, // REPEALED 27.08.19 N 556-Ն (kept for backward compatibility)
+      15: { vatIncrease: 0, vatDecrease: 0 }, // VAT credit adjustment
       16: { base: creditBase, vat: creditVat }, // total VAT credit (output)
       17: { base: importBase, vat: importVat }, // imported goods
       18: { base: domesticBase, vat: domesticVat }, // domestic acquisitions
+      19: { vatDecrease: 0, vatIncrease: 0 }, // acquisition correcting tax invoices
+      20: { vatIncrease: 0, vatDecrease: 0 }, // offset VAT adjustment total
       21: { vat: debitVat }, // total VAT debit (input)
+      22: { base: 0, vat: 0 }, // imports per Tax Code art. 79 (independent of 21)
       23: { payable: Math.max(0, net), recoverable: Math.max(0, -net) }, // net for the period
     },
   };
@@ -196,13 +244,21 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
 const VAT_FORM_REQUIRED_LINES = ['7', '9', '12', '13', '16', '17', '18', '21', '23'];
 const VAT_FORM_LINE_AMOUNT_FIELDS = Object.freeze({
   7: ['base', 'vat'],
+  8: ['baseDecrease', 'baseIncrease'],
   9: ['base', 'vat'],
+  10: ['vat'],
+  11: ['vatDecrease', 'vatIncrease'],
   12: ['base'],
   13: ['base'],
+  14: ['base'],
+  15: ['vatIncrease', 'vatDecrease'],
   16: ['base', 'vat'],
   17: ['base', 'vat'],
   18: ['base', 'vat'],
+  19: ['vatDecrease', 'vatIncrease'],
+  20: ['vatIncrease', 'vatDecrease'],
   21: ['vat'],
+  22: ['base', 'vat'],
   23: ['payable', 'recoverable'],
 });
 
@@ -257,7 +313,14 @@ function validateVatReturnForm(form = {}, { locale = 'en' } = {}) {
   const has = (...ids) => ids.every((id) => lines[id] && typeof lines[id] === 'object');
 
   if (has('16', '7', '9', '12', '13')) {
-    const expected = val('7', 'base') + val('9', 'base') + val('12', 'base') + val('13', 'base');
+    const expected =
+      val('7', 'base') +
+      val('9', 'base') +
+      val('12', 'base') +
+      val('13', 'base') +
+      val('14', 'base') -
+      val('8', 'baseDecrease') +
+      val('8', 'baseIncrease');
     if (val('16', 'base') !== expected) {
       add(
         'lines.16.base',
@@ -270,7 +333,14 @@ function validateVatReturnForm(form = {}, { locale = 'en' } = {}) {
     }
   }
   if (has('16', '7', '9')) {
-    const expected = val('7', 'vat') + val('9', 'vat');
+    const expected =
+      val('7', 'vat') +
+      val('9', 'vat') +
+      val('10', 'vat') -
+      val('11', 'vatDecrease') +
+      val('11', 'vatIncrease') +
+      val('15', 'vatIncrease') -
+      val('15', 'vatDecrease');
     if (val('16', 'vat') !== expected) {
       add(
         'lines.16.vat',
@@ -283,7 +353,13 @@ function validateVatReturnForm(form = {}, { locale = 'en' } = {}) {
     }
   }
   if (has('21', '17', '18')) {
-    const expected = val('17', 'vat') + val('18', 'vat');
+    const expected =
+      val('17', 'vat') +
+      val('18', 'vat') -
+      val('19', 'vatDecrease') +
+      val('19', 'vatIncrease') +
+      val('20', 'vatIncrease') -
+      val('20', 'vatDecrease');
     if (val('21', 'vat') !== expected) {
       add(
         'lines.21.vat',

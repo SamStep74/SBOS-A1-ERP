@@ -141,3 +141,96 @@ test('vat-return-form: line 23 nets credit against debit (payable vs recoverable
   });
   assert.deepEqual(refund.lines['23'], { payable: 0, recoverable: 80000 });
 });
+
+// --- decree N 298-Ն line definitions 8/10/11/14/15/19/20/22 --------------------
+// The remaining output/input adjustment lines per the official VAT return form.
+// Lines 8/11/15/19/20 have multiple sub-cells (decrease/increase); line 14 was
+// repealed (27.08.19 N 556-Ն) but is still in the form layout for backward
+// compatibility; line 22 is independent (Art. 79 imports).
+
+test('vat-return-form: line 8 (correcting tax invoices, output base) has decrease/increase cells', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['8'], 'line 8 definition must exist');
+  assert.equal(f.lineDefinitions['8'].section, 'output');
+  assert.deepEqual(f.lineDefinitions['8'].fields, ['baseDecrease', 'baseIncrease']);
+  assert.match(f.lineDefinitions['8'].labelHy, /Ճշգրտող/);
+  // defaulted to zero when absent — UI/manual entries, not derived from sales
+  assert.deepEqual(f.lines['8'], { baseDecrease: 0, baseIncrease: 0 });
+});
+
+test('vat-return-form: line 10 (other VAT liability) is output VAT only', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['10'], 'line 10 definition must exist');
+  assert.equal(f.lineDefinitions['10'].section, 'output');
+  assert.deepEqual(f.lineDefinitions['10'].fields, ['vat']);
+  assert.match(f.lineDefinitions['10'].labelHy, /այլ հարկային պարտավորություն/);
+  assert.deepEqual(f.lines['10'], { vat: 0 });
+});
+
+test('vat-return-form: line 11 (correcting invoices issued outside supplier name) is output VAT with decrease/increase', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['11'], 'line 11 definition must exist');
+  assert.equal(f.lineDefinitions['11'].section, 'output');
+  assert.deepEqual(f.lineDefinitions['11'].fields, ['vatDecrease', 'vatIncrease']);
+  assert.match(f.lineDefinitions['11'].labelHy, /Մատակարարի անունից/);
+  assert.deepEqual(f.lines['11'], { vatDecrease: 0, vatIncrease: 0 });
+});
+
+test('vat-return-form: line 14 (REPEALED 27.08.19 N 556-Ն) is preserved for backward compatibility', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['14'], 'line 14 definition must exist (repealed but in form)');
+  assert.equal(f.lineDefinitions['14'].section, 'output');
+  assert.deepEqual(f.lineDefinitions['14'].fields, ['base']);
+  // The decree text explicitly notes the line lost force — preserved as base-only
+  assert.match(f.lineDefinitions['14'].labelHy, /(ուժը կորցրել|REPEALED|556-Ն)/);
+  assert.deepEqual(f.lines['14'], { base: 0 });
+});
+
+test('vat-return-form: line 15 (VAT credit adjustment) is output VAT with increase/decrease cells', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['15'], 'line 15 definition must exist');
+  assert.equal(f.lineDefinitions['15'].section, 'output');
+  assert.deepEqual(f.lineDefinitions['15'].fields, ['vatIncrease', 'vatDecrease']);
+  assert.match(f.lineDefinitions['15'].labelHy, /(Ավելացում|Պակասեցում|ճշգրտում)/);
+  assert.deepEqual(f.lines['15'], { vatIncrease: 0, vatDecrease: 0 });
+});
+
+test('vat-return-form: line 19 (acquisition correcting tax invoices) is input VAT with decrease/increase', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['19'], 'line 19 definition must exist');
+  assert.equal(f.lineDefinitions['19'].section, 'input');
+  assert.deepEqual(f.lineDefinitions['19'].fields, ['vatDecrease', 'vatIncrease']);
+  assert.match(f.lineDefinitions['19'].labelHy, /Ձեռքբերումներին/);
+  assert.deepEqual(f.lines['19'], { vatDecrease: 0, vatIncrease: 0 });
+});
+
+test('vat-return-form: line 20 (offset VAT adjustment total) is input VAT with increase/decrease', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['20'], 'line 20 definition must exist');
+  assert.equal(f.lineDefinitions['20'].section, 'input');
+  assert.deepEqual(f.lineDefinitions['20'].fields, ['vatIncrease', 'vatDecrease']);
+  assert.match(f.lineDefinitions['20'].labelHy, /(Հաշվանցման|ընդհանուր գումար)/);
+  assert.deepEqual(f.lines['20'], { vatIncrease: 0, vatDecrease: 0 });
+});
+
+test('vat-return-form: line 22 (imports per Tax Code art. 79) is input base + VAT, independent of line 21', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  assert.ok(f.lineDefinitions['22'], 'line 22 definition must exist');
+  assert.equal(f.lineDefinitions['22'].section, 'input');
+  assert.deepEqual(f.lineDefinitions['22'].fields, ['base', 'vat']);
+  assert.match(f.lineDefinitions['22'].labelHy, /79-րդ հոդված/);
+  assert.deepEqual(f.lines['22'], { base: 0, vat: 0 });
+});
+
+test('vat-return-form: every line definition carries the same shape (section/labelHy/fields)', () => {
+  const f = vatReturnForm({ sales: [], purchases: [] });
+  for (const id of ['8', '10', '11', '14', '15', '19', '20', '22']) {
+    const def = f.lineDefinitions[id];
+    assert.ok(def, `line ${id} definition missing`);
+    assert.ok(['output', 'input'].includes(def.section), `line ${id} section must be output or input`);
+    assert.equal(typeof def.labelHy, 'string');
+    assert.ok(def.labelHy.length > 0, `line ${id} labelHy must be non-empty`);
+    assert.ok(Array.isArray([...def.fields]), `line ${id} fields must be an array`);
+    assert.ok(def.fields.length > 0, `line ${id} must declare at least one field`);
+  }
+});
