@@ -181,6 +181,79 @@ test('validateVatReturnForm: line 18 rate-band skips the check when base is 0 (n
   );
 });
 
+test('validateVatReturnForm: line 17 (imports) is checked against the 20% standard rate', () => {
+  // Sanity: a freshly computed form for a normal period is OK.
+  const okForm = vatReturnForm(payablePeriod);
+  const okResult = validateVatReturnForm(okForm);
+  assert.ok(
+    !codes(okResult).some((c) => c.startsWith('FORM_17_')),
+    `expected no FORM_17_* errors on a fresh form, got ${JSON.stringify(okResult.errors)}`,
+  );
+
+  // Surgical tamper: replace line 17 with a single line at exactly half-rate (10%)
+  // and absorb the difference in line 18 so that EVERY cross-foot still ties:
+  //   - line 21 = 17 + 18           (unchanged because we move 18 down by the same amount)
+  //   - line 23 = 16.vat − 21.vat   (unchanged because 21.vat is unchanged)
+  // The only thing wrong is that line 17's VAT is at ~10% of base, not 20%.
+  // Without the rate-band check, this form passes the validator.
+  const form = clone(okForm);
+  const realBase17 = form.lines['17'].base;
+  const realVat17 = form.lines['17'].vat;
+  const realVat18 = form.lines['18'].vat;
+  const offRateVat17 = Math.round(realBase17 * 0.10); // 10%, well outside the 20% ±1% band
+  const delta = realVat17 - offRateVat17;
+  form.lines['17'].vat = offRateVat17;
+  form.lines['18'].vat = realVat18 + delta; // absorb so line 21 = 17 + 18 still ties
+  // (line 16/21/23 totals unchanged)
+  assert.ok(realBase17 > 0);
+  assert.ok(offRateVat17 < realVat17); // we actually lowered it
+  const result = validateVatReturnForm(form);
+  assert.ok(
+    codes(result).includes('FORM_17_RATE_MISMATCH'),
+    `expected FORM_17_RATE_MISMATCH, got ${JSON.stringify(result.errors)}`,
+  );
+  // the field pinpoints the offending cell
+  const err = result.errors.find((e) => e.code === 'FORM_17_RATE_MISMATCH');
+  assert.equal(err.field, 'lines.17.vat');
+});
+
+test('validateVatReturnForm: line 17 rate-band tolerates the same per-line rounding drift as line 7', () => {
+  // A period that produces line 17 base / VAT consistent with 20% within the
+  // rounding band should NOT trigger FORM_17_RATE_MISMATCH.
+  const period = {
+    sales: [{ netAmount: 100_000, vatRate: 20 }],
+    purchases: [
+      // 5 import purchases of odd net amounts: the per-line VAT rounding can
+      // produce a line-17 VAT that differs from base*0.20 by 1-2 dram without
+      // being wrong. The validator must absorb this drift, not flag it.
+      { netAmount: 33_333, vatRate: 20, source: 'import' },
+      { netAmount: 17_777, vatRate: 20, source: 'import' },
+      { netAmount: 9_999, vatRate: 20, source: 'import' },
+      { netAmount: 12_345, vatRate: 20, source: 'import' },
+      { netAmount: 6_789, vatRate: 20, source: 'import' },
+    ],
+  };
+  const form = vatReturnForm(period);
+  const result = validateVatReturnForm(form);
+  assert.ok(
+    !codes(result).includes('FORM_17_RATE_MISMATCH'),
+    `realistic import-heavy period should not fail the rate band, got ${JSON.stringify(result.errors)}`,
+  );
+});
+
+test('validateVatReturnForm: line 17 rate-band skips the check when base is 0 (no false positive on a no-import period)', () => {
+  const period = {
+    sales: [{ netAmount: 100_000, vatRate: 20 }],
+    purchases: [], // no imports → line 17 base = 0
+  };
+  const form = vatReturnForm(period);
+  const result = validateVatReturnForm(form);
+  assert.ok(
+    !codes(result).some((c) => c.startsWith('FORM_17_')),
+    `zero-base line 17 must not trigger rate-band error, got ${JSON.stringify(result.errors)}`,
+  );
+});
+
 test('validateVatReturnForm: a non-integer (fractional dram) amount is rejected', () => {
   const form = clone(vatReturnForm(payablePeriod));
   form.lines['7'].vat = 199999.5;

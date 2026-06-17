@@ -414,6 +414,7 @@ function validateVatReturnForm(form = {}, { locale = 'en' } = {}) {
   };
   rateBand('7', STANDARD_VAT_RATE); // 20%
   rateBand('9', IMPUTED_VAT_RATE); // 16.67% imputed
+  rateBand('17', STANDARD_VAT_RATE); // 20% imports
   rateBand('18', STANDARD_VAT_RATE); // 20% domestic acquisitions
 
   return { ok: errors.length === 0, errors };
