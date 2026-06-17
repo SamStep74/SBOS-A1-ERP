@@ -41,3 +41,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: l10n-am audit (CLI)
+        run: node server/l10n-am/audit-cli.js --quiet
