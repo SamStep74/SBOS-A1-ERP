@@ -84,6 +84,46 @@ function normalBalance(code) {
   return cls ? cls.normalBalance : null;
 }
 
+// Paged query over the full chart. A UI must not render all 623 accounts at once
+// — this returns one slice plus a complete meta envelope so a Fastify route or a
+// React/Solid query layer can drive a virtualized list / paginator without ever
+// materializing the whole table on the client.
+//
+// All inputs are clamped (no throw on bad input). `type` and `class` filter
+// compose with AND semantics. The slice is taken from a *new* filtered array —
+// STANDARD_ACCOUNTS is never mutated and remains a frozen reference for the
+// other lookup helpers.
+const PAGE_SIZE_DEFAULT = 50;
+const PAGE_SIZE_MAX = 500;
+
+function pagedAccounts({ page, pageSize, type, class: classDigit } = {}) {
+  const rawPage = Number(page);
+  const safePage = Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+  const rawSize = Number(pageSize);
+  const safeSize =
+    Number.isInteger(rawSize) && rawSize >= 1
+      ? Math.min(rawSize, PAGE_SIZE_MAX)
+      : PAGE_SIZE_DEFAULT;
+
+  const filtered = STANDARD_ACCOUNTS.filter((a) => {
+    if (type != null && a.type !== type) return false;
+    if (classDigit != null && !a.code.startsWith(String(classDigit))) return false;
+    return true;
+  });
+
+  const start = (safePage - 1) * safeSize;
+  const data = filtered.slice(start, start + safeSize);
+
+  return Object.freeze({
+    data: Object.freeze(data),
+    meta: Object.freeze({
+      total: filtered.length,
+      page: safePage,
+      limit: safeSize,
+    }),
+  });
+}
+
 export {
   ACCOUNT_CLASSES,
   STANDARD_ACCOUNTS,
@@ -92,4 +132,7 @@ export {
   accountsByType,
   accountsByClass,
   normalBalance,
+  pagedAccounts,
+  PAGE_SIZE_DEFAULT,
+  PAGE_SIZE_MAX,
 };
