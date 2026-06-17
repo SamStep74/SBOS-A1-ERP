@@ -227,15 +227,93 @@ export function auditSource({
   return { issues, tCallCount };
 }
 
+// ---- auditUnusedKeys ------------------------------------------------------
+//
+// Reverse direction: every key in the catalog must be referenced by at least
+// one t() call site. A key that is defined in every locale but never read
+// is "dead" — translation effort was spent but no consumer uses it.
+//
+// Walks the same source tree as auditSource (with the same .js / !.test.js
+// defensive filter) and collects the DISTINCT set of keys referenced by
+// t() calls. A key is "used" if any call site mentions it; duplicate
+// references do not matter.
+
+/**
+ * @param {object}    [opts]
+ * @param {object}    [opts.strings] - catalog map, default STRINGS
+ * @param {string[]}  [opts.locales] - locale codes, default LOCALES
+ * @param {string[]}  [opts.files]   - explicit file list; skipped if not .js
+ *                                      or if basename ends in .test.js
+ * @param {string}    [opts.root]    - default walk root (this module's dir)
+ * @param {Function}  [opts.readFile] - default node:fs readFileSync
+ * @returns {{
+ *   issues: Array,
+ *   catalogKeyCount: number,
+ *   usedKeyCount: number,
+ *   unusedKeyCount: number,
+ * }}
+ */
+export function auditUnusedKeys({
+  strings = STRINGS,
+  locales = LOCALES,
+  files,
+  root = dirname(fileURLToPath(import.meta.url)),
+  readFile = (p) => readFileSync(p, 'utf8'),
+} = {}) {
+  const allCandidates = files ?? walkJsSources(root);
+  // Same defensive filter as auditSource: this function audits production
+  // source, never test files. A test.js that mentions a key does not
+  // count as "consumer code uses this key".
+  const fileList = allCandidates.filter((f) => {
+    if (extname(f) !== '.js') return false;
+    const base = f.split('/').pop();
+    if (base.endsWith('.test.js')) return false;
+    return true;
+  });
+  const usedKeys = new Set();
+  const unreadableFiles = [];
+  for (const file of fileList) {
+    let text;
+    try {
+      text = readFile(file);
+    } catch (err) {
+      unreadableFiles.push({ file, err });
+      continue;
+    }
+    for (const { key } of findTCalls(stripJsComments(text))) {
+      usedKeys.add(key);
+    }
+  }
+  const allKeys = unionAllKeys(strings, locales);
+  const issues = [];
+  for (const key of allKeys) {
+    if (!usedKeys.has(key)) {
+      issues.push({ type: 'catalog-unused-key', key });
+    }
+  }
+  return {
+    issues,
+    catalogKeyCount: allKeys.size,
+    usedKeyCount: usedKeys.size,
+    unusedKeyCount: issues.length,
+    // Surface unreadable files too so a CI run doesn't silently report
+    // a clean unused-key check when half the source was unreadable.
+    unreadableFiles,
+  };
+}
+
 // ---- auditAll -------------------------------------------------------------
 
-/** Convenience: run both scans and return the combined report. */
+/** Convenience: run all three scans and return the combined report. */
 export function auditAll(opts = {}) {
   const catalog = auditCatalog(opts);
   const source = auditSource(opts);
+  const unused = auditUnusedKeys(opts);
   return {
-    issues: [...catalog.issues, ...source.issues],
+    issues: [...catalog.issues, ...source.issues, ...unused.issues],
     catalogKeyCount: catalog.keyCount,
     tCallCount: source.tCallCount,
+    usedKeyCount: unused.usedKeyCount,
+    unusedKeyCount: unused.unusedKeyCount,
   };
 }

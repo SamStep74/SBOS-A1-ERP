@@ -9,7 +9,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { auditAll, auditCatalog, auditSource } from './audit.js';
+import { auditAll, auditCatalog, auditSource, auditUnusedKeys } from './audit.js';
 import { STRINGS, LOCALES } from './i18n.js';
 
 describe('auditCatalog', () => {
@@ -132,5 +132,117 @@ describe('auditAll — live l10n-am regression', () => {
       `live repo should be clean but found: ${JSON.stringify(result.issues, null, 2)}`);
     assert.ok(result.catalogKeyCount > 0, 'live catalog should have keys');
     assert.ok(result.tCallCount > 0, 'live source should have t() calls');
+    // Reverse direction: every catalog key is used at least once.
+    assert.equal(result.unusedKeyCount, 0,
+      `live repo should have no unused keys but found: ${result.unusedKeyCount}`);
+  });
+});
+
+// ---- auditUnusedKeys (reverse direction) ----------------------------------
+//
+// Detects keys defined in the catalog that no t() call site ever references.
+// These are "dead" keys: translation effort was spent, but no consumer is
+// using them. Either the consumer was removed, or the key was added in
+// anticipation of a feature that never landed.
+
+describe('auditUnusedKeys', () => {
+  test('flags a catalog key that no source file references', () => {
+    const syntheticStrings = {
+      hy: { 'used.key': 'A', 'unused.one': 'B' },
+      en: { 'used.key': 'A', 'unused.one': 'B' },
+      ru: { 'used.key': 'A', 'unused.one': 'B' },
+    };
+    const syntheticFiles = {
+      '/fake/root/only-uses-one.js': "t('en', 'used.key');",
+    };
+    const result = auditUnusedKeys({
+      strings: syntheticStrings,
+      locales: ['hy', 'en', 'ru'],
+      files: Object.keys(syntheticFiles),
+      readFile: (p) => syntheticFiles[p],
+    });
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0].type, 'catalog-unused-key');
+    assert.equal(result.issues[0].key, 'unused.one');
+    assert.equal(result.usedKeyCount, 1);
+    assert.equal(result.catalogKeyCount, 2);
+  });
+
+  test('flags every unused key when source uses none of them', () => {
+    const syntheticStrings = {
+      en: { 'a': 'A', 'b': 'B', 'c': 'C' },
+    };
+    const syntheticFiles = {
+      '/fake/root/empty.js': "// no t() calls in here",
+    };
+    const result = auditUnusedKeys({
+      strings: syntheticStrings,
+      locales: ['en'],
+      files: Object.keys(syntheticFiles),
+      readFile: (p) => syntheticFiles[p],
+    });
+    assert.equal(result.issues.length, 3);
+    const keys = result.issues.map((i) => i.key).sort();
+    assert.deepEqual(keys, ['a', 'b', 'c']);
+  });
+
+  test('zero issues when every catalog key is used at least once', () => {
+    const syntheticStrings = {
+      en: { 'x': 'X', 'y': 'Y' },
+    };
+    const syntheticFiles = {
+      '/fake/root/a.js': "t('en', 'x');",
+      '/fake/root/b.js': "t('en', 'y');",
+    };
+    const result = auditUnusedKeys({
+      strings: syntheticStrings,
+      locales: ['en'],
+      files: Object.keys(syntheticFiles),
+      readFile: (p) => syntheticFiles[p],
+    });
+    assert.equal(result.issues.length, 0);
+    assert.equal(result.usedKeyCount, 2);
+    assert.equal(result.unusedKeyCount, 0);
+  });
+
+  test('counts a key as used even when referenced by multiple call sites', () => {
+    // Three call sites to 'shared', one to 'lonely'. lonely is the only unused.
+    const syntheticStrings = {
+      en: { 'shared': 'S', 'lonely': 'L' },
+    };
+    const syntheticFiles = {
+      '/fake/root/a.js': "t('en', 'shared'); t('en', 'shared');",
+      '/fake/root/b.js': "t('en', 'shared');",
+    };
+    const result = auditUnusedKeys({
+      strings: syntheticStrings,
+      locales: ['en'],
+      files: Object.keys(syntheticFiles),
+      readFile: (p) => syntheticFiles[p],
+    });
+    // 3 t() calls total but only 1 distinct key referenced; lonely unused
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0].key, 'lonely');
+    assert.equal(result.usedKeyCount, 1);
+  });
+
+  test('skips test files so test-fixture keys do not look "used"', () => {
+    // A test.js references a key that is NOT in the production source.
+    // The function audits production source, so the key is unused.
+    const syntheticStrings = {
+      en: { 'only.in.test': 'X' },
+    };
+    const syntheticFiles = {
+      '/fake/root/real.js': "// no t() calls",
+      '/fake/root/real.test.js': "t('en', 'only.in.test');",
+    };
+    const result = auditUnusedKeys({
+      strings: syntheticStrings,
+      locales: ['en'],
+      files: Object.keys(syntheticFiles),
+      readFile: (p) => syntheticFiles[p],
+    });
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0].key, 'only.in.test');
   });
 });
