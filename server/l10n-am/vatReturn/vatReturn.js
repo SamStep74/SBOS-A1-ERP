@@ -275,6 +275,14 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // These purchases do NOT roll into lines 17/18 (current-period acquisitions).
     adjustingVatDecrease = 0,
     adjustingVatIncrease = 0,
+    // Input VAT offset adjustment total — decree N 298-Ն line 20 (INPUT side).
+    // Mirrors line 15's `adjustingToCredit` on the output side: a period-total
+    // adjustment (NOT per-acquisition). Triggered by `adjustingToDebit: true`
+    // (paired with `adjusting: 'decrease' | 'increase'` for direction).
+    // Must pre-branch BEFORE the line-19 `adjusting` branch because both share
+    // the `adjusting` flag — line 20 must win to avoid leaking into line 19.
+    offsetAdjustingVatDecrease = 0,
+    offsetAdjustingVatIncrease = 0,
     // Imports per Tax Code art. 79 — decree N 298-Ն line 22 (INPUT side,
     // INDEPENDENT liability). The VAT is paid at customs, not via the regular
     // input-credit path; line 22 reports base + VAT for reconciliation only.
@@ -284,6 +292,19 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     art79Base = 0,
     art79Vat = 0;
   for (const p of purchases) {
+    // Line 20 takes precedence over line 19 when both flags are set: a purchase
+    // flagged with `adjustingToDebit: true` is a period-total offset adjustment,
+    // not a per-acquisition correcting invoice. Both share the `adjusting` flag
+    // for direction, so the line-20 branch must run first to claim those inputs.
+    if (
+      p.adjustingToDebit === true &&
+      (p.adjusting === 'decrease' || p.adjusting === 'increase')
+    ) {
+      const { vat } = lineVat(p);
+      if (p.adjusting === 'decrease') offsetAdjustingVatDecrease += vat;
+      else offsetAdjustingVatIncrease += vat;
+      continue;
+    }
     if (p.adjusting === 'decrease' || p.adjusting === 'increase') {
       const { vat } = lineVat(p);
       if (p.adjusting === 'decrease') adjustingVatDecrease += vat;
@@ -310,7 +331,13 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
   }
   // Line 22 is intentionally OUTSIDE the line 21 cross-foot: it is a
   // separately-calculated liability, not an input credit.
-  const debitVat = importVat + domesticVat - adjustingVatDecrease + adjustingVatIncrease;
+  const debitVat =
+    importVat +
+    domesticVat -
+    adjustingVatDecrease +
+    adjustingVatIncrease +
+    offsetAdjustingVatIncrease -
+    offsetAdjustingVatDecrease;
   const net = creditVat - debitVat;
 
   return {
@@ -347,7 +374,10 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
         vatDecrease: adjustingVatDecrease,
         vatIncrease: adjustingVatIncrease,
       }, // acquisition correcting tax invoices (input VAT adjustments)
-      20: { vatIncrease: 0, vatDecrease: 0 }, // offset VAT adjustment total
+      20: {
+        vatIncrease: offsetAdjustingVatIncrease,
+        vatDecrease: offsetAdjustingVatDecrease,
+      }, // offset VAT adjustment total (input VAT, decree N 298-Ն)
       21: { vat: debitVat }, // total VAT debit (input)
       22: { base: art79Base, vat: art79Vat }, // imports per Tax Code art. 79 (independent of 21)
       23: { payable: Math.max(0, net), recoverable: Math.max(0, -net) }, // net for the period
