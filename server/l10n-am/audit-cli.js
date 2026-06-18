@@ -135,6 +135,24 @@ function printTextReport(result, out) {
     out(`  unused keys:  ${result.unusedKeyCount}`);
   }
   out(`  issues:       ${issues.length}`);
+  // rbac sub-scanner section: same pattern, different registry. The
+  // permission-registry drift can show up even when the i18n side is
+  // clean, so render it as a distinct block rather than folding into
+  // the i18n counts above.
+  if (typeof result.rbacCatalogKeyCount === 'number') {
+    out('');
+    out(`rbac permissions audit`);
+    out(`  catalog keys: ${result.rbacCatalogKeyCount}`);
+    if (typeof result.rbacReferencedKeyCount === 'number') {
+      out(`  referenced:   ${result.rbacReferencedKeyCount}`);
+    }
+    if (typeof result.rbacOrphanCount === 'number') {
+      out(`  orphan keys:  ${result.rbacOrphanCount}`);
+    }
+    if (typeof result.rbacUnknownUsageCount === 'number') {
+      out(`  unknown uses: ${result.rbacUnknownUsageCount}`);
+    }
+  }
   if (issues.length === 0) {
     out('');
     out('OK — no issues.');

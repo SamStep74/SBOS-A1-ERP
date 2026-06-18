@@ -16,6 +16,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STRINGS, LOCALES } from './i18n.js';
+import { auditOrphanPermissions } from '../rbac/permissions-audit.js';
 
 // ---- helpers --------------------------------------------------------------
 
@@ -309,11 +310,22 @@ export function auditAll(opts = {}) {
   const catalog = auditCatalog(opts);
   const source = auditSource(opts);
   const unused = auditUnusedKeys(opts);
+  // rbac/permissions-audit mirrors the i18n shape: catalog-side
+  // orphan-permission-key + source-side unknown-permission-usage. The
+  // scanner is pure and DI-shaped, so we pass the same opts through.
+  const rbac = auditOrphanPermissions(opts);
   return {
-    issues: [...catalog.issues, ...source.issues, ...unused.issues],
+    issues: [...catalog.issues, ...source.issues, ...unused.issues, ...rbac.issues],
     catalogKeyCount: catalog.keyCount,
     tCallCount: source.tCallCount,
     usedKeyCount: unused.usedKeyCount,
     unusedKeyCount: unused.unusedKeyCount,
+    // Rbac sub-scanner counts surfaced under their own names so the CLI
+    // text/JSON output can render them as a distinct section without
+    // colliding with the i18n fields.
+    rbacCatalogKeyCount: rbac.catalogKeyCount,
+    rbacReferencedKeyCount: rbac.referencedKeyCount,
+    rbacOrphanCount: rbac.orphanCount,
+    rbacUnknownUsageCount: rbac.unknownUsageCount,
   };
 }
