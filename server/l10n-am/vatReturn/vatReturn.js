@@ -186,9 +186,27 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // Per direction: 'decrease' → vatDecrease, 'increase' → vatIncrease.
     adjustingVatDecrease: 0,
     adjustingVatIncrease: 0,
+    // Output VAT credit-adjustment invoices — decree N 298-Ն line 15
+    // ("Հաշվարկված ԱԱՀ-ի հարկային պարտավորությունների ճշգրտում"). These adjust
+    // the period-end VAT credit TOTAL itself (not a specific supplier's invoice,
+    // distinguishing from line 11). Same `adjusting` flag, distinguished by
+    // `adjustingToCredit: true`. Per direction: 'decrease' → vatDecrease
+    // (reduce the credit), 'increase' → vatIncrease (raise the credit).
+    creditAdjustingVatDecrease: 0,
+    creditAdjustingVatIncrease: 0,
   };
   for (const s of sales) {
     if (s.adjusting === 'decrease' || s.adjusting === 'increase') {
+      // Line 15 takes precedence: if the adjusting invoice is a credit
+      // adjustment (output VAT credit adjustment per decree N 298-Ն), VAT
+      // (not base) flows to line 15 — independent of line 11's agent/commission
+      // semantics and line 8's seller-issued base flow.
+      if (s.adjustingToCredit === true) {
+        const { vat } = lineVat(s);
+        if (s.adjusting === 'decrease') o.creditAdjustingVatDecrease += vat;
+        else o.creditAdjustingVatIncrease += vat;
+        continue;
+      }
       // Line 11 takes precedence: if the correcting invoice was issued in the
       // supplier's name (agent/commission), VAT (not base) flows to line 11.
       if (s.adjustingInSupplierName === true) {
@@ -213,7 +231,17 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     else o.exemptBase += c.net;
   }
   const creditBase = o.standardBase + o.imputedBase + o.zeroBase + o.exemptBase;
-  const creditVat = o.standardVat + o.imputedVat;
+  // Total VAT credit = current-period standard + imputed ± line 11 (agent-issued
+  // correcting VAT) ± line 15 (output VAT credit adjustments). Line 8 (seller-issued
+  // correcting BASE) does not contribute to the VAT total — it adjusts the base
+  // side of line 16 only. This mirrors the input-side `debitVat` pattern below.
+  const creditVat =
+    o.standardVat +
+    o.imputedVat -
+    o.adjustingVatDecrease +
+    o.adjustingVatIncrease -
+    o.creditAdjustingVatDecrease +
+    o.creditAdjustingVatIncrease;
 
   let importBase = 0,
     importVat = 0,
@@ -281,7 +309,10 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       12: { base: o.zeroBase }, // zero-rated (art. 65)
       13: { base: o.exemptBase }, // exempt (art. 64)
       14: { base: 0 }, // REPEALED 27.08.19 N 556-Ն (kept for backward compatibility)
-      15: { vatIncrease: 0, vatDecrease: 0 }, // VAT credit adjustment
+      15: {
+        vatIncrease: o.creditAdjustingVatIncrease,
+        vatDecrease: o.creditAdjustingVatDecrease,
+      }, // VAT credit adjustment (output VAT, decree N 298-Ն)
       16: {
         // Cross-foot per decree N 298-Ն: 7+9+12+13+14 bases − 8.dec + 8.inc.
         // creditBase already excludes adjusting invoices (they route to line 8).

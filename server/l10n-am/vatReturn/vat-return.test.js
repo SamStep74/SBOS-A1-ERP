@@ -387,6 +387,44 @@ test('vat-return-form: a sale with adjustingInSupplierName routes VAT to line 11
   assert.equal(inc.lines['8'].baseIncrease, 0);
 });
 
+test('vat-return-form: a sale with adjustingToCredit routes VAT to line 15 sub-cell per direction (output VAT credit-adjustment invoices)', () => {
+  // A Ճշգրտող հարկային հաշիվ that adjusts the period-end VAT credit (decree N 298-Ն
+  // line 15 — "Հաշվարկված ԱԱՀ-ի հարկային պարտավորությունների ճշգրտում (Ավելացում/Պակասեցում)").
+  // Like line 11, it routes VAT (not base); distinct from line 11 because line 15
+  // adjusts the VAT credit TOTAL itself (not a specific supplier's invoice).
+  // Schema flag: `adjustingToCredit: true` (mirrors `adjustingInSupplierName`).
+  // Per decree N 298-Ն:
+  //   adjusting=increase + adjustingToCredit → line 15.vatIncrease
+  //   adjusting=decrease + adjustingToCredit → line 15.vatDecrease
+  const dec = vatReturnForm({
+    sales: [
+      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'decrease', adjustingToCredit: true },
+    ],
+    purchases: [],
+  });
+  assert.equal(dec.lines['15'].vatDecrease, 20000);
+  assert.equal(dec.lines['15'].vatIncrease, 0);
+  // credit-adjusting must NOT leak into line 8 (seller-issued base adjustments)
+  assert.equal(dec.lines['8'].baseDecrease, 0);
+  assert.equal(dec.lines['8'].baseIncrease, 0);
+  // credit-adjusting must NOT leak into line 11 (agent-issued supplier adjustments)
+  assert.equal(dec.lines['11'].vatDecrease, 0);
+  assert.equal(dec.lines['11'].vatIncrease, 0);
+
+  const inc = vatReturnForm({
+    sales: [
+      { netAmount: 50000, vatRate: 20, vatAmount: 10000, adjusting: 'increase', adjustingToCredit: true },
+    ],
+    purchases: [],
+  });
+  assert.equal(inc.lines['15'].vatDecrease, 0);
+  assert.equal(inc.lines['15'].vatIncrease, 10000);
+  assert.equal(inc.lines['8'].baseDecrease, 0);
+  assert.equal(inc.lines['8'].baseIncrease, 0);
+  assert.equal(inc.lines['11'].vatDecrease, 0);
+  assert.equal(inc.lines['11'].vatIncrease, 0);
+});
+
 test('vat-return-form: regular (line 8) and agent-issued (line 11) adjusting invoices coexist independently', () => {
   // Both routing buckets must work side-by-side in the same period: regular
   // adjusting sales → line 8 base; agent-issued adjusting sales → line 11 VAT.
@@ -412,6 +450,43 @@ test('vat-return-form: regular (line 8) and agent-issued (line 11) adjusting inv
   assert.equal(f.lines['11'].vatIncrease, 0);
   // line 16 base cross-foot unchanged: 5,000,000 − 200,000 = 4,800,000
   assert.equal(f.lines['16'].base, 4800000);
+});
+
+test('vat-return-form: regular (8), agent-issued (11), and credit-adjusting (15) invoices coexist; line 16 VAT cross-foots 7+9 − 11.dec + 11.inc + 15.inc − 15.dec', () => {
+  // Cross-foot invariant from decree N 298-Ն for the output side, now including line 15:
+  //   line 16.vat = 7.vat + 9.vat + 10.vat − 11.vatDecrease + 11.vatIncrease
+  //                 + 15.vatIncrease − 15.vatDecrease
+  //   line 16.base = 7.base + 9.base + 12.base + 13.base + 14.base
+  //                  − 8.baseDecrease + 8.baseIncrease
+  // Pick a mix where only line 7 is present (9/10/12/13/14 are zero):
+  //   7:  5,000,000 base / 1,000,000 vat
+  //   8:  200,000 base dec
+  //   11: 30,000 vat dec
+  //   15: 20,000 vat inc
+  // line 16.vat = 1,000,000 − 30,000 + 20,000 = 990,000
+  const f = vatReturnForm({
+    sales: [
+      { netAmount: 5000000, vatRate: 20 }, // line 7
+      { netAmount: 200000, vatRate: 20, adjusting: 'decrease' }, // line 8 (base)
+      { netAmount: 150000, vatRate: 20, vatAmount: 30000, adjusting: 'decrease', adjustingInSupplierName: true }, // line 11
+      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'increase', adjustingToCredit: true }, // line 15
+    ],
+    purchases: [],
+  });
+  assert.equal(f.lines['7'].base, 5000000);
+  assert.equal(f.lines['7'].vat, 1000000);
+  assert.equal(f.lines['8'].baseDecrease, 200000);
+  assert.equal(f.lines['8'].baseIncrease, 0);
+  assert.equal(f.lines['11'].vatDecrease, 30000);
+  assert.equal(f.lines['11'].vatIncrease, 0);
+  assert.equal(f.lines['15'].vatDecrease, 0);
+  assert.equal(f.lines['15'].vatIncrease, 20000);
+  // base cross-foot: 5,000,000 − 200,000 = 4,800,000
+  assert.equal(f.lines['16'].base, 4800000);
+  // VAT cross-foot: 1,000,000 − 30,000 + 20,000 = 990,000
+  assert.equal(f.lines['16'].vat, 990000);
+  const v = validateVatReturnForm(f);
+  assert.equal(v.ok, true, `unexpected errors: ${JSON.stringify(v.errors)}`);
 });
 
 test('vat-return-form: line 21 VAT reflects purchase correcting-invoice adjustments (17+18 − 19.dec + 19.inc)', () => {
