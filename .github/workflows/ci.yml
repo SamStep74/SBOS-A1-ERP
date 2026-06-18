@@ -71,3 +71,10 @@ jobs:
       # threshold (80% lines/funcs, 70% branches by default).
       - name: Coverage threshold gate
         run: npm run coverage:check
+
+      # Mirror the build-and-test job: the l10n-am audit CLI enforces
+      # catalog/issue parity. Running it on the coverage job means a
+      # push that fails only the coverage gate still surfaces i18n
+      # regressions in the same PR, instead of reaching main.
+      - name: l10n-am audit (CLI)
+        run: node server/l10n-am/audit-cli.js --quiet

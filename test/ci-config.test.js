@@ -35,6 +35,30 @@ function extractNodeMatrix(ciText) {
     .filter(Boolean);
 }
 
+/**
+ * Return the YAML block for a single top-level job, bounded by the next
+ * top-level key (no leading whitespace beyond the jobs-block indent) or
+ * end-of-file. Tolerates blank lines and `#` comments inside the job.
+ * The job key itself must match `^\s*<name>:\s*$` (i.e., the entire
+ * trimmed line content is `<name>:`). Leading whitespace is allowed
+ * because GitHub Actions nests job keys under `jobs:` at column 2.
+ */
+function extractJobBlock(ciText, jobName) {
+  const lines = ciText.split('\n');
+  const startIdx = lines.findIndex(
+    (l) => new RegExp(`^\\s*${jobName}:\\s*$`).test(l),
+  );
+  if (startIdx === -1) return '';
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i += 1) {
+    const l = lines[i];
+    if (l === '' || l.startsWith(' ') || l.startsWith('\t') || l.startsWith('#')) continue;
+    endIdx = i;
+    break;
+  }
+  return lines.slice(startIdx, endIdx).join('\n');
+}
+
 test('ci.yml: node matrix has at least 2 LTS versions', () => {
   const versions = extractNodeMatrix(readCi());
   assert.ok(
@@ -128,4 +152,19 @@ test('scripts/check-coverage.mjs exists and is executable (>=1 byte)', () => {
 test('package.json: coverage/ is ignored from version control', () => {
   const gitignore = readFileSync(resolve(repoRoot, '.gitignore'), 'utf8');
   assert.match(gitignore, /^coverage\/?$/m, '.gitignore must ignore the coverage/ directory');
+});
+
+test('ci.yml: coverage-gate job runs the l10n-am audit CLI', () => {
+  // The audit CLI (server/l10n-am/audit-cli.js) is the project-wide check
+  // for catalog/issue parity; a missing i18n key in the form is a silent
+  // regression the audit catches. It must run on every push so a missing
+  // key never reaches main. The build-and-test job already runs it (see
+  // b33636e); the coverage-gate job must too, otherwise a push that only
+  // fails the coverage job will be merged without an audit run.
+  const job = extractJobBlock(readCi(), 'coverage-gate');
+  assert.ok(job.length > 0, 'ci.yml has no coverage-gate job — cannot verify audit step');
+  assert.ok(
+    /audit-cli\.js/.test(job),
+    `coverage-gate job must run the audit CLI (node server/l10n-am/audit-cli.js --quiet); got:\n${job}`,
+  );
 });
