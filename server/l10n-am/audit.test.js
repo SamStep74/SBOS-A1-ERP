@@ -9,7 +9,13 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { auditAll, auditCatalog, auditSource, auditUnusedKeys } from './audit.js';
+import {
+  auditAll,
+  auditCatalog,
+  auditSource,
+  auditUnusedKeys,
+  stripJsComments,
+} from './audit.js';
 import { STRINGS, LOCALES } from './i18n.js';
 // Note: auditAll now also calls auditOrphanPermissions, but we pass
 // synthetic `permissions`, `files`, and `readFile` so the tests never
@@ -366,5 +372,178 @@ describe('auditUnusedKeys', () => {
     });
     assert.equal(result.issues.length, 1);
     assert.equal(result.issues[0].key, 'only.in.test');
+  });
+});
+
+// ---- stripJsComments -----------------------------------------------------
+//
+// The linter relies on stripJsComments to remove every character inside
+// `//` and `/* */` regions BEFORE its regex patterns run. If stripJsComments
+// mistakenly leaves content inside a comment region untouched, every
+// scanner downstream (auditSource, auditUnusedKeys, auditOrphanPermissions)
+// reports a false positive — it matches syntax that is documentation, not
+// real code.
+//
+// The classic failure mode: backticks, single quotes, and double quotes
+// appear inside `//` comments very commonly (inline-code references in
+// JSDoc). stripJsComments must treat the entire comment as opaque — i.e.
+// it must NOT enter string-literal state when it encounters one of these
+// delimiters inside an already-detected comment.
+
+describe('stripJsComments', () => {
+  test('strips `//` line comments even when they contain backticks', () => {
+    // Backticks inside a // comment are documentation, not template literals.
+    // The scanner must not enter template-literal state on the backtick.
+    const src = [
+      'const real = 1;',
+      '// call `foo()` to refresh the cache',
+      'const other = 2;',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    // Real code survives intact.
+    assert.ok(stripped.includes('const real = 1;'),
+      'real code must survive');
+    assert.ok(stripped.includes('const other = 2;'),
+      'real code after the comment must survive');
+    // The backtick and parens inside the comment are replaced with spaces.
+    // Crucially, the NEWLINE is preserved so line numbers stay accurate.
+    const lines = stripped.split('\n');
+    assert.equal(lines.length, 3, 'newline count must be preserved');
+    assert.ok(!lines[1].includes('`'),
+      'backticks inside // comments must be stripped: ' + JSON.stringify(lines[1]));
+    assert.ok(!lines[1].includes('foo()'),
+      'code inside // comments must be stripped: ' + JSON.stringify(lines[1]));
+    // The comment line is replaced with spaces of the same length (modulo \n).
+    assert.equal(lines[1].trim(), '',
+      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]));
+  });
+
+  test('strips `//` line comments even when they contain single or double quotes', () => {
+    const src = [
+      "const real = 'keep';",
+      "// example: foo('bar', \"baz\") is the call shape",
+      'const other = "keep";',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const lines = stripped.split('\n');
+    // Quoted strings in real code survive.
+    assert.ok(lines[0].includes("'keep'"), 'single-quoted string must survive');
+    assert.ok(lines[2].includes('"keep"'), 'double-quoted string must survive');
+    // The comment is wiped.
+    assert.ok(!lines[1].includes("'bar'"),
+      'single quotes inside // must be stripped: ' + JSON.stringify(lines[1]));
+    assert.ok(!lines[1].includes('"baz"'),
+      'double quotes inside // must be stripped: ' + JSON.stringify(lines[1]));
+    assert.equal(lines[1].trim(), '',
+      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]));
+  });
+
+  test('strips `/* */` block comments even when they contain string delimiters', () => {
+    const src = [
+      'const real = 1;',
+      '/* example: foo(`bar`) and baz("qux") */',
+      'const other = 2;',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const lines = stripped.split('\n');
+    assert.ok(lines[0].includes('const real = 1;'));
+    assert.ok(lines[2].includes('const other = 2;'));
+    assert.ok(!lines[1].includes('`'),
+      'backticks inside block comments must be stripped: ' + JSON.stringify(lines[1]));
+    assert.ok(!lines[1].includes('"qux"'),
+      'double quotes inside block comments must be stripped: ' + JSON.stringify(lines[1]));
+  });
+
+  test('end-to-end: array literal inside a // comment does NOT match the permission audit pattern', () => {
+    // This is the exact failure mode that surfaced as 4 unknown-permission-usage
+    // false positives in permissions-audit.js (the scanner reading its own
+    // docstring). The scanner relies on stripJsComments to wipe the comment
+    // before ARRAY_REFERENCE_PATTERN runs.
+    const PERM_ARRAY_PATTERN =
+      /\brequire(?:Any|All)Permission\s*\(\s*\w+\s*,\s*\[([^\]]+)\]/g;
+    const src = [
+      '// requireAnyPermission(user, [\'k1\',\'k2\']) and',
+      '// requireAllPermission(user, [\'k1\',\'k2\']) pass the keys as an array.',
+      "requirePermFastify('real.key');",
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const matches = [...stripped.matchAll(PERM_ARRAY_PATTERN)];
+    assert.equal(matches.length, 0,
+      `array literal inside // comments must not match: ` +
+      `stripped=${JSON.stringify(stripped)} matches=${JSON.stringify(matches.map(m=>m[0]))}`);
+    // Sanity: the real call site does survive and is still detectable by a
+    // single-key pattern (out of scope for this test but worth asserting
+    // the surrounding lines were not damaged).
+    assert.ok(stripped.includes("requirePermFastify"),
+      'real code on the next line must survive stripping');
+  });
+
+  test('preserves newline count so downstream line numbers stay accurate', () => {
+    // The scanner relies on line numbers computed from the ORIGINAL source
+    // being usable to jump to the offending line in an editor. If stripJsComments
+    // changes the number of newlines, those line numbers point to the wrong place.
+    const src = 'a\nb\nc\nd';
+    assert.equal(stripJsComments(src).split('\n').length, src.split('\n').length);
+  });
+
+  test('strips // comments that follow a regex literal containing string delimiters', () => {
+    // The original bug: stripJsComments does NOT understand regex literals.
+    // When the parser sees `/\b...\s*['"]...['"]/gi;` the `'` inside the
+    // character class `['"]` is treated as opening a string literal. The
+    // parser never resets its `inStr` state cleanly, so every subsequent
+    // `//` comment is passed through unmodified. This test reproduces
+    // the live failure on permissions-audit.js line 51.
+    const src = [
+      "const RE = /\\brequirePerm(?:Fastify|Any|All)?\\s*\\(\\s*['\"]([a-z][a-z0-9_.-]*)['\"]/gi;",
+      '// this comment MUST be stripped after the regex literal above',
+      'const after = 1;',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const lines = stripped.split('\n');
+    assert.equal(lines.length, 3, 'newline count must be preserved');
+    assert.ok(lines[0].includes('const RE = /'),
+      'regex literal must survive stripping: ' + JSON.stringify(lines[0]));
+    assert.ok(!lines[1].includes('// this comment'),
+      '// comment after a regex literal MUST be stripped: ' + JSON.stringify(lines[1]));
+    assert.equal(lines[1].trim(), '',
+      'line after regex must be whitespace-only: ' + JSON.stringify(lines[1]));
+    assert.ok(lines[2].includes('const after = 1;'),
+      'real code after the comment must survive stripping');
+  });
+
+  test('strips // comments that follow a regex literal containing backticks', () => {
+    // Backtick inside a regex character class is also a real-world shape
+    // (template-literal-like delimiters in patterns). The same regex-literal
+    // tracking must swallow the backtick without entering template state.
+    const src = [
+      'const RE = /[\\`]/;',
+      '// comment with `backticks` after a regex',
+      'const after = 1;',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const lines = stripped.split('\n');
+    assert.ok(lines[0].includes('const RE = /'),
+      'regex literal must survive: ' + JSON.stringify(lines[0]));
+    assert.ok(!lines[1].includes('`'),
+      'backticks after a regex literal in a // comment must be stripped: '
+        + JSON.stringify(lines[1]));
+    assert.equal(lines[1].trim(), '');
+  });
+
+  test('strips // comments after a division operator (not a regex)', () => {
+    // Regression guard: the fix must NOT mistake division for a regex start.
+    // A `/` after an identifier, number, or `)` is division, not a regex.
+    const src = [
+      'const x = 10 / 2;',
+      '// this comment must still be stripped',
+      'const y = x + 1;',
+    ].join('\n');
+    const stripped = stripJsComments(src);
+    const lines = stripped.split('\n');
+    assert.ok(lines[0].includes('const x = 10 / 2;'),
+      'division must survive as-is: ' + JSON.stringify(lines[0]));
+    assert.equal(lines[1].trim(), '',
+      'comment after division must be wiped: ' + JSON.stringify(lines[1]));
+    assert.ok(lines[2].includes('const y = x + 1;'));
   });
 });
