@@ -489,6 +489,105 @@ test('vat-return-form: regular (8), agent-issued (11), and credit-adjusting (15)
   assert.equal(v.ok, true, `unexpected errors: ${JSON.stringify(v.errors)}`);
 });
 
+test('vat-return-form: a sale flagged otherLiability routes VAT to line 10 (other VAT liability), with no leak to 7/8/9/11/15', () => {
+  // Per decree N 298-Ն line 10 ("ԱԱՀ-ի գծով այլ հարկային պարտավորություն") is the
+  // catch-all for OUTPUT VAT liabilities that do not fit any other bucket:
+  // not a current-period 20% sale (line 7), not imputed (line 9), not zero-rated
+  // (line 12), not exempt (line 13), and not a correcting invoice (lines 8/11/15).
+  // Typical use: VAT self-assessed under a special regime, VAT on gambling/
+  // lottery, or any other passthrough VAT liability the taxpayer owes on a
+  // transaction that is not in the standard sale scope. Schema flag:
+  // `otherLiability: true` (mirrors the boolean-pre-branch pattern used by
+  // `art79` on the input side). The sale's net amount is intentionally NOT
+  // tracked on line 10 (it carries VAT only); the base is irrelevant to this
+  // bucket by decree design.
+  const f = vatReturnForm({
+    sales: [
+      {
+        netAmount: 250000,
+        vatRate: 0, // explicit vatAmount overrides derived rate
+        vatAmount: 50000,
+        otherLiability: true,
+      },
+    ],
+    purchases: [],
+  });
+  assert.equal(f.lines['10'].vat, 50000);
+  // must NOT have leaked into the standard buckets
+  assert.equal(f.lines['7'].base, 0);
+  assert.equal(f.lines['7'].vat, 0);
+  assert.equal(f.lines['9'].base, 0);
+  assert.equal(f.lines['9'].vat, 0);
+  assert.equal(f.lines['12'].base, 0);
+  assert.equal(f.lines['13'].base, 0);
+  // must NOT have leaked into the adjusting buckets
+  assert.equal(f.lines['8'].baseDecrease, 0);
+  assert.equal(f.lines['8'].baseIncrease, 0);
+  assert.equal(f.lines['11'].vatDecrease, 0);
+  assert.equal(f.lines['11'].vatIncrease, 0);
+  assert.equal(f.lines['15'].vatDecrease, 0);
+  assert.equal(f.lines['15'].vatIncrease, 0);
+});
+
+test('vat-return-form: lines 7/8/11/15/10 coexist; line 16 VAT cross-foots 7+9+10 − 11.dec + 11.inc + 15.inc − 15.dec', () => {
+  // Cross-foot invariant from decree N 298-Ն for the output side, now with line 10:
+  //   line 16.vat = 7.vat + 9.vat + 10.vat
+  //                 − 11.vatDecrease + 11.vatIncrease
+  //                 + 15.vatIncrease − 15.vatDecrease
+  //   line 16.base = 7.base + 9.base + 12.base + 13.base + 14.base
+  //                  − 8.baseDecrease + 8.baseIncrease
+  // Pick a mix with line 10 contributing its VAT — additive only (no sub-cell
+  // balance, no offsetting direction — line 10 has a single VAT cell per decree).
+  //   7:  5,000,000 base / 1,000,000 vat
+  //   8:  200,000 base dec
+  //   10: 50,000 vat (other liability, passthrough)
+  //   11: 30,000 vat dec
+  //   15: 20,000 vat inc
+  // line 16.vat = 1,000,000 + 50,000 − 30,000 + 20,000 = 1,040,000
+  const f = vatReturnForm({
+    sales: [
+      { netAmount: 5000000, vatRate: 20 }, // line 7
+      { netAmount: 200000, vatRate: 20, adjusting: 'decrease' }, // line 8 (base)
+      {
+        netAmount: 250000,
+        vatRate: 0,
+        vatAmount: 50000,
+        otherLiability: true,
+      }, // line 10 (other VAT liability)
+      {
+        netAmount: 150000,
+        vatRate: 20,
+        vatAmount: 30000,
+        adjusting: 'decrease',
+        adjustingInSupplierName: true,
+      }, // line 11
+      {
+        netAmount: 100000,
+        vatRate: 20,
+        vatAmount: 20000,
+        adjusting: 'increase',
+        adjustingToCredit: true,
+      }, // line 15
+    ],
+    purchases: [],
+  });
+  assert.equal(f.lines['7'].base, 5000000);
+  assert.equal(f.lines['7'].vat, 1000000);
+  assert.equal(f.lines['8'].baseDecrease, 200000);
+  assert.equal(f.lines['8'].baseIncrease, 0);
+  assert.equal(f.lines['10'].vat, 50000);
+  assert.equal(f.lines['11'].vatDecrease, 30000);
+  assert.equal(f.lines['11'].vatIncrease, 0);
+  assert.equal(f.lines['15'].vatDecrease, 0);
+  assert.equal(f.lines['15'].vatIncrease, 20000);
+  // base cross-foot: 5,000,000 − 200,000 = 4,800,000
+  assert.equal(f.lines['16'].base, 4800000);
+  // VAT cross-foot: 1,000,000 + 50,000 − 30,000 + 20,000 = 1,040,000
+  assert.equal(f.lines['16'].vat, 1040000);
+  const v = validateVatReturnForm(f);
+  assert.equal(v.ok, true, `unexpected errors: ${JSON.stringify(v.errors)}`);
+});
+
 test('vat-return-form: line 21 VAT reflects purchase correcting-invoice adjustments (17+18 − 19.dec + 19.inc)', () => {
   // Cross-foot invariant from decree N 298-Ն for the input side:
   //   line 21.vat = 17.vat + 18.vat − 19.vatDecrease + 19.vatIncrease + 20.inc − 20.dec

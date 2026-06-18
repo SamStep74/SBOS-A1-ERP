@@ -194,6 +194,16 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // (reduce the credit), 'increase' → vatIncrease (raise the credit).
     creditAdjustingVatDecrease: 0,
     creditAdjustingVatIncrease: 0,
+    // Other VAT liability — decree N 298-Ն line 10 (output side, passthrough).
+    // Catch-all for output VAT that does NOT fit any other output bucket: not a
+    // 20% sale (line 7), not imputed (line 9), not zero-rated (line 12), not
+    // exempt (line 13), not a correcting invoice (lines 8/11/15). Typical use:
+    // VAT self-assessed under a special regime, gambling/lottery VAT, etc.
+    // The sale's net amount is intentionally NOT tracked (line 10 carries VAT
+    // only); the base is irrelevant to this bucket by decree design.
+    // Schema flag: `otherLiability: true` (independent, NOT an adjusting flag —
+    // mirrors the boolean-pre-branch pattern proven by `art79` on the input side).
+    otherLiabilityVat: 0,
   };
   for (const s of sales) {
     if (s.adjusting === 'decrease' || s.adjusting === 'increase') {
@@ -220,6 +230,17 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
       else o.adjustingBaseIncrease += adjBase;
       continue;
     }
+    // Line 10 (other VAT liability) takes precedence over the standard/
+    // imputed/zero/exempt classification — by decree design, line 10 is a
+    // passthrough bucket for output VAT that does not fit any other line.
+    // Placed AFTER the adjusting branches (15 > 11 > 8) because line 10 is
+    // non-adjusting, and BEFORE classifySale so the net amount does not leak
+    // into line 7 / 9 / 12 / 13 base or VAT.
+    if (s.otherLiability === true) {
+      const { vat } = lineVat(s);
+      o.otherLiabilityVat += vat;
+      continue;
+    }
     const c = classifySale(s);
     if (c.bucket === 'standard') {
       o.standardBase += c.net;
@@ -237,7 +258,8 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
   // side of line 16 only. This mirrors the input-side `debitVat` pattern below.
   const creditVat =
     o.standardVat +
-    o.imputedVat -
+    o.imputedVat +
+    o.otherLiabilityVat -
     o.adjustingVatDecrease +
     o.adjustingVatIncrease -
     o.creditAdjustingVatDecrease +
@@ -301,7 +323,7 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
         baseIncrease: o.adjustingBaseIncrease,
       }, // correcting tax invoices (output base)
       9: { base: o.imputedBase, vat: o.imputedVat }, // 16.67% imputed
-      10: { vat: 0 }, // other VAT liability
+      10: { vat: o.otherLiabilityVat }, // other VAT liability (passthrough)
       11: {
         vatDecrease: o.adjustingVatDecrease,
         vatIncrease: o.adjustingVatIncrease,
