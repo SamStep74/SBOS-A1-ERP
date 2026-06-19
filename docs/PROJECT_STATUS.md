@@ -542,3 +542,39 @@ Workers A and B both touch `server/app.js` but on disjoint line ranges (Worker A
 - **Mirror date:** 2026-06-16
 - **Worktree:** `/Users/samvelstepanyan/dev/SBOS-A1-ERP/.claude/worktrees/seed-from-a1-erp-hy`
 - **Bytes (mirrored body, pre-provenance):** 29389
+
+
+## SBOS-A1-ERP Wave 3 — PLANNED (2026-06-19)
+
+Adds three orthogonal hardening passes to the live SBOS-A1-ERP platform.
+Lives on `main`; the orchestrator-foundation work (`plan30/orch-foundation-2`
++ `plan30/orch-foundation-2-stamp-duty`) is tracked separately. The plan
+itself is `.orchestration/sbos-a1-erp-wave-3.json`; the closeout template
+is `docs/WAVE-3-SUMMARY.md`.
+
+| Worker | Scope | Deliverable |
+|---|---|---|
+| `l10n-audit-hardening` | `server/l10n-am/audit.js` + `audit-cli.js` | 3 new check functions (`findHardcodedRates`, `findEvalLike`, `findStringConcatSql`) + 3 new CLI flags (`--check-rates`, `--check-eval`, `--check-sql`) + 12+ new tests |
+| `rbac-fastify-coverage` | `server/rbac/rbac.test.js` (+ tiny `guards.js` / `routes.js` fixes if needed) | 10+ new tests covering impersonation policy, FLS edge cases, role-hierarchy cross-cuts; ≥80% coverage on `server/rbac/` |
+| `docs-walkthrough` | `docs/sales/WALKTHROUGH.md` + `CONSOLE.md` | 30-minute operator walkthrough + console narrative (the `README.md` §3 promise); brand-stripped |
+
+Disjoint file groups: `l10n-audit-hardening` owns `server/l10n-am/audit*.js`;
+`rbac-fastify-coverage` owns `server/rbac/`; `docs-walkthrough` owns `docs/sales/`.
+No file is touched by more than one worker. No post-merge integration fix
+expected (ESM stable since wave 1).
+
+**Test baseline target:** 460+ (l10n-am 214 + rbac 55 + 12+ new audit tests
++ 10+ new rbac tests + sanity 4 + a buffer for the stamp-duty module's 21
+tests if `plan30/orch-foundation-2-stamp-duty` lands first).
+
+**Carries forward from wave 2:** the `audit-cli --check-eval` and
+`--check-sql` flags introduced in this wave are the machine-readable
+counterparts to the `eval`/string-concat-SQL hardening greps. After wave 3,
+the integrator should add a CI step that runs
+`node server/l10n-am/audit-cli.js --check-eval --check-sql --check-rates --quiet`
+as a release gate.
+
+**Open questions (carry into wave 4):** CRM + Finance + Reporting layers
+remain the next pipeline entries per `README.md` §1. Catalog drift detection
+across the new audit checks is file-level regex today; a future wave can
+lift it to AST-based if the false-positive rate becomes a problem.
