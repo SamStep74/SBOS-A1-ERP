@@ -61,13 +61,19 @@ test('stamp_duty: zero_amount — 0-AMD transaction yields 0 duty', () => {
 // 4. Rounding to whole dram
 // ---------------------------------------------------------------------------
 test('stamp_duty: rounds_to_whole_dram — percent rate yields integer drams', () => {
-  // Use court_filing_monetary at 3%: 12345 × 0.03 = 370.35 → rounds to 370.
-  // The result must be an integer with no fractional dram.
-  const duty = stampDutyFor('court_filing_monetary', 12345);
-  assert.equal(duty, 370);
+  // Use court_filing_monetary at 3%, with values large enough to clear the
+  // 6×-base floor (6,000 AMD) so the percent math is what we observe:
+  //   250,000 × 0.03 = 7,500.00 — exact, but pinned as a whole integer.
+  //   1,234,567 × 0.03 = 37,037.01 → rounds to 37,037. Still a whole
+  //   integer with no fractional dram.
+  let duty = stampDutyFor('court_filing_monetary', 250000);
+  assert.equal(duty, 7500);
   assert.equal(Number.isInteger(duty), true);
-  // Different amount that produces another non-trivial rounding:
-  assert.equal(stampDutyFor('court_filing_monetary', 100001), 3000);
+  duty = stampDutyFor('court_filing_monetary', 1234567);
+  assert.equal(duty, 37037);
+  assert.equal(Number.isInteger(duty), true);
+  // Pin the percent result for an exact multiple too.
+  assert.equal(stampDutyFor('court_filing_monetary', 1000000), 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -228,11 +234,12 @@ test('stamp_duty: notarized_document — general contract certification = 2× ba
 
 test('stamp_duty: court_filing_monetary — 3% of claim value', () => {
   // Art. 9.1(a): statement of claim with monetary claim = 3% of the claim
-  // value. For an amount well above the min and below the cap, this is the
-  // simple percentage. (Min 6× base, max 25,000× base are tested implicitly
-  // by tests 4 and the contract below; explicit min/max boundaries below.)
-  assert.equal(stampDutyFor('court_filing_monetary', 100000), 3000);
+  // value. Values above the 6×-base floor and below the 25,000×-base cap
+  // yield a clean percentage. (Min/max boundaries pinned by the next test.)
+  // 1,000,000 × 3% = 30,000 (above floor 6,000, well under cap 25,000,000).
   assert.equal(stampDutyFor('court_filing_monetary', 1000000), 30000);
+  // 5,000,000 × 3% = 150,000.
+  assert.equal(stampDutyFor('court_filing_monetary', 5000000), 150000);
 });
 
 test('stamp_duty: court_filing_monetary — floored at 6× base, capped at 25,000× base', () => {
