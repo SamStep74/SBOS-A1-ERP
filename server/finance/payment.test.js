@@ -526,3 +526,90 @@ describe('sqlite dispatch (smoke)', () => {
     assert.equal(recon.status, 'paid');
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tests — input-shape and invoice_id validation (branch coverage)
+//
+// These three tests push the branch coverage above the 80% floor by
+// exercising the previously-uncovered input-validation guards:
+//   - recordPayment's `!input || typeof input !== 'object'` (lines 275-277)
+//   - recordPayment's invoice_id type/positivity guard (lines 281-286)
+//   - listPaymentsForInvoice's invoice_id guard (lines 350-355)
+//   - reconcileInvoice's invoice_id guard (lines 367-372) and
+//     invoice-not-found branch (lines 373-376)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('input-shape and id-validation guards (branch coverage)', () => {
+  test('14. recordPayment rejects null/undefined/non-object input', async () => {
+    const db = makePgMock();
+    const { recordPayment } = await import('./payment.js');
+    for (const bad of [null, undefined, 'invoice-1', 42, true]) {
+      await assert.rejects(
+        () => recordPayment(db, bad),
+        (err) => {
+          assert.equal(err.name, 'ValueError');
+          assert.match(err.message, /input/i);
+          return true;
+        },
+        `expected ValueError for input=${String(bad)}`,
+      );
+    }
+  });
+
+  test('15. recordPayment rejects non-positive / non-integer invoice_id', async () => {
+    const db = makePgMock();
+    const { recordPayment } = await import('./payment.js');
+    for (const badId of [0, -1, 'abc', 1.5, NaN, null]) {
+      await assert.rejects(
+        () => recordPayment(db, { invoice_id: badId, amount_amd: 1000 }),
+        (err) => {
+          assert.equal(err.name, 'ValueError');
+          assert.match(err.message, /invoice_id/i);
+          return true;
+        },
+        `expected ValueError for invoice_id=${String(badId)}`,
+      );
+    }
+  });
+
+  test('16. listPaymentsForInvoice + reconcileInvoice reject invalid id and missing invoice', async () => {
+    const db = makePgMock();
+    const { listPaymentsForInvoice, reconcileInvoice } = await import('./payment.js');
+
+    // listPaymentsForInvoice guards: non-positive / non-integer invoice_id
+    for (const badId of [0, -7, 'xyz', 2.5]) {
+      await assert.rejects(
+        () => listPaymentsForInvoice(db, badId),
+        (err) => {
+          assert.equal(err.name, 'ValueError');
+          assert.match(err.message, /invoice_id/i);
+          return true;
+        },
+        `listPaymentsForInvoice expected ValueError for id=${String(badId)}`,
+      );
+    }
+
+    // reconcileInvoice guards: non-positive / non-integer invoice_id
+    for (const badId of [0, -3, 'qrs', 4.5]) {
+      await assert.rejects(
+        () => reconcileInvoice(db, badId),
+        (err) => {
+          assert.equal(err.name, 'ValueError');
+          assert.match(err.message, /invoice_id/i);
+          return true;
+        },
+        `reconcileInvoice expected ValueError for id=${String(badId)}`,
+      );
+    }
+
+    // reconcileInvoice guard: invoice_id is valid but invoice does not exist
+    await assert.rejects(
+      () => reconcileInvoice(db, 9_999_999),
+      (err) => {
+        assert.equal(err.name, 'ValueError');
+        assert.match(err.message, /not found/i);
+        return true;
+      },
+    );
+  });
+});
