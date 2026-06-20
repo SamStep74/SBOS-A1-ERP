@@ -32,6 +32,11 @@ for the plan.
 5. `AGENTS.md` (in repo root, written by the `repo-foundation` worker in
    wave 0) — TDD, 80% coverage, immutable data, conventional commits, no
    hardcoded secrets, prefer porting A1-ERP-HY over net-new invention.
+6. [`sales/WALKTHROUGH.md`](./sales/WALKTHROUGH.md) — the 30-minute
+   operator walkthrough (prospect-facing). Pair with
+   [`sales/CONSOLE.md`](./sales/CONSOLE.md) for the expected on-screen
+   output. Useful even for non-sales contexts: it is the fastest tour
+   of the live state of the repo.
 
 ## Conventions
 
