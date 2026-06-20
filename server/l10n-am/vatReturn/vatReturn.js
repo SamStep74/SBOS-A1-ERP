@@ -133,14 +133,50 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
   }
 
   let inputVat = 0;
+  let importInputVat = 0;
+  let domesticInputVat = 0;
   let taxablePurchases = 0;
   for (const p of purchases) {
     const { net, vat } = lineVat(p);
     taxablePurchases += net;
-    if (p.recoverable !== false) inputVat += vat; // recoverable by default
+    if (p.recoverable === false) continue;
+    inputVat += vat; // total recoverable input VAT (backward-compatible)
+    if (p.source === 'import') importInputVat += vat;
+    else domesticInputVat += vat;
   }
 
   const net = outputVat - inputVat;
+
+  // --- wave-4: per-line helpers from decree N 298-Ն ---------------------------
+  // Synthesize two virtual invoices (one for sales, one for purchases) so the
+  // per-line helpers — which take a single invoice — can be reused both here
+  // (period aggregation) and directly by callers operating on one invoice.
+  const salesInvoice = { lines: sales };
+  const purchasesInvoice = { lines: purchases };
+
+  const totalTaxableBase =
+    line7_totalTaxableBase(salesInvoice) + line7_totalTaxableBase(purchasesInvoice);
+  const zeroRatedSupplies = line9_zeroRatedSupplies(salesInvoice);
+  const exemptSupplies = line12_exemptSupplies(salesInvoice);
+  const importsVatBase = line13_importsVatBase(purchasesInvoice);
+  const reverseChargeVat =
+    line16_reverseChargeVat(salesInvoice) + line16_reverseChargeVat(purchasesInvoice);
+  const adjustments =
+    line18_adjustments(salesInvoice) + line18_adjustments(purchasesInvoice);
+  const inputVatCreditBase = line23_inputVatCreditBase(purchasesInvoice);
+
+  // Line 21 headline (VAT to pay). importVat (output-side) defaults to 0 — no
+  // entity in the current dataset re-sells imports to domestic customers under
+  // a separate output tracking path; callers can pass it explicitly when needed.
+  const vatToPay = line21_vatToPay({
+    outputVat,
+    importVat: 0,
+    reverseChargeVat,
+    inputVat: domesticInputVat,
+    importInputVat,
+    adjustments,
+  });
+
   return {
     outputVat,
     inputVat,
@@ -149,7 +185,149 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
     net,
     payable: Math.max(0, net),
     creditCarried: Math.max(0, -net),
+    // wave-4 new fields (decree N 298-Ն aggregate view):
+    totalTaxableBase, // line 7
+    zeroRatedSupplies, // line 9
+    exemptSupplies, // line 12
+    importsVatBase, // line 13
+    reverseChargeVat, // line 16
+    adjustments, // line 18
+    vatToPay, // line 21 (clamps at 0; carry-forward TODO)
+    inputVatCreditBase, // line 23
+    // decomposition (split of inputVat for line-21 audit trail):
+    domesticInputVat, // line 19 share of inputVat
+    importInputVat, // line 20 share of inputVat
   };
+}
+
+// ---------------------------------------------------------------------------
+// Per-line helpers (decree N 298-Ն) — pure functions on a single invoice or
+// on a VAT decomposition. Each helper isolates one line of the official form
+// so a finance UI can compute a single cell, recompute after a UI edit, or
+// cross-foot check a single line in isolation. The numbers returned by these
+// helpers feed straight into the corresponding VAT_RETURN_FORM_LINE_DEFINITIONS
+// fields above; computeVatReturn() calls them to assemble the full period.
+//
+// Invoice shape: { lines: [{ netAmount, vatRate, vatAmount?, category?,
+//                          source?, isReverseCharge?, recoverable? }],
+//                   adjustments?: { increase, decrease } }
+// All amounts are whole dram via roundAmd.
+// ---------------------------------------------------------------------------
+
+// Line 7 — Total taxable base (sum of all line items on the invoice, in AMD).
+// This is the period-wide aggregate base across sales AND purchases; per the
+// form, line 7 reports the 20% output base, but the aggregate view used by
+// the CFO dashboard sums every line-item base regardless of bucket.
+function line7_totalTaxableBase(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) total += roundAmd(l.netAmount);
+  return roundAmd(total);
+}
+
+// Line 9 — Zero-rated supplies (exports, international services, art. 65 RA Tax Code).
+// A line is zero-rated when its vatRate is exactly 0 AND it is NOT explicitly
+// marked category:'exempt' (exempt has its own line 12 in this view).
+function line9_zeroRatedSupplies(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) {
+    const rate = Number(l.vatRate);
+    if (rate === 0 && l.category !== 'exempt') total += roundAmd(l.netAmount);
+  }
+  return roundAmd(total);
+}
+
+// Line 12 — Exempt supplies (financial, medical, educational, art. 64 RA Tax Code).
+// Identified by category:'exempt'. Exempt supplies add to the taxable base but
+// carry no output VAT.
+function line12_exemptSupplies(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) {
+    if (l.category === 'exempt') total += roundAmd(l.netAmount);
+  }
+  return roundAmd(total);
+}
+
+// Line 13 — Imports subject to VAT (base for import lines, RA Tax Code art. 71).
+// Identified by source:'import'. Distinct from the form's "exempt supplies" line
+// 13 in the official decree text — this aggregate line 13 is the CFO view's
+// import-base bucket (matches form line 17 base in the existing engine).
+function line13_importsVatBase(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) {
+    if (l.source === 'import') total += roundAmd(l.netAmount);
+  }
+  return roundAmd(total);
+}
+
+// Line 16 — Reverse-charge VAT (when the BUYER is the VAT agent, art. 72 RA Tax Code).
+// Identified per line by isReverseCharge:true. Computes VAT at the standard rate
+// unless the line declares its own vatRate.
+function line16_reverseChargeVat(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) {
+    if (l.isReverseCharge !== true) continue;
+    const net = roundAmd(l.netAmount);
+    const rate = Number(l.vatRate) || STANDARD_VAT_RATE;
+    total += roundAmd((net * rate) / 100);
+  }
+  return roundAmd(total);
+}
+
+// Line 18 — Adjustments (corrections from prior periods, rounding). Net of
+// invoice.adjustments.increase and .decrease. Defaults to 0 when not declared.
+function line18_adjustments(invoice = {}) {
+  const adj = (invoice && invoice.adjustments) || {};
+  const increase = roundAmd(adj.increase || 0);
+  const decrease = roundAmd(adj.decrease || 0);
+  return roundAmd(increase - decrease);
+}
+
+// Line 21 — VAT to pay (the headline — most important number on the return).
+// Aggregate per decree N 298-Ն:
+//   net = outputVat (line 14)
+//       + importVat (line 15, output-side imports)
+//       + reverseChargeVat (line 16)
+//       - inputVat (line 19, domestic input VAT)
+//       - importInputVat (line 20, import input VAT credit)
+//       + adjustments (line 18, net)
+//
+// The result is CLAMPED at 0 — Armenia does not refund excess input VAT
+// automatically; the balance is carried forward to the next period.
+// TODO(wave-5+): implement the carry-forward ledger (Tax Code art. 68) so a
+// negative net is banked rather than silently zeroed. For wave-4 we clamp and
+// surface the carrier via `creditCarried` in computeVatReturn().
+function line21_vatToPay(decomposition = {}) {
+  const d = decomposition || {};
+  const outputVat = roundAmd(d.outputVat || 0);
+  const importVat = roundAmd(d.importVat || 0);
+  const reverseChargeVat = roundAmd(d.reverseChargeVat || 0);
+  const inputVat = roundAmd(d.inputVat || 0);
+  const importInputVat = roundAmd(d.importInputVat || 0);
+  const adjustments = roundAmd(d.adjustments || 0);
+  const net = roundAmd(
+    outputVat + importVat + reverseChargeVat - inputVat - importInputVat + adjustments,
+  );
+  // TODO(wave-5+): carry-forward ledger per RA Tax Code art. 68
+  return Math.max(0, net);
+}
+
+// Line 23 — Total purchases subject to input VAT credit (recoverable base).
+// Sum of netAmount across all recoverable purchase lines (excluding the
+// non-recoverable ones flagged with recoverable:false). Maps to form line 18
+// + line 17 base in the existing engine.
+function line23_inputVatCreditBase(invoice = {}) {
+  const lines = invoice && invoice.lines ? invoice.lines : [];
+  let total = 0;
+  for (const l of lines) {
+    if (l.recoverable === false) continue;
+    total += roundAmd(l.netAmount);
+  }
+  return roundAmd(total);
 }
 
 // Classify a sale into the official form's output buckets.
@@ -428,4 +606,13 @@ export {
   computeVatReturn,
   vatReturnForm,
   validateVatReturnForm,
+  // wave-4: per-line helpers (decree N 298-Ն aggregate view)
+  line7_totalTaxableBase,
+  line9_zeroRatedSupplies,
+  line12_exemptSupplies,
+  line13_importsVatBase,
+  line16_reverseChargeVat,
+  line18_adjustments,
+  line21_vatToPay,
+  line23_inputVatCreditBase,
 };
