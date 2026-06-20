@@ -52,7 +52,9 @@ function makeMockDb() {
     if (/INSERT\s+INTO\s+FINANCE\.CUSTOMERS/.test(s)) return 'customer-insert';
     if (/INSERT\s+INTO\s+FINANCE\.INVOICES/.test(s)) return 'invoice-insert';
     if (/INSERT\s+INTO\s+FINANCE\.INVOICE_LINES/.test(s)) return 'invoice-line-insert';
+    if (/DELETE\s+FROM\s+FINANCE\.INVOICE_LINES/.test(s)) return 'lines-delete';
     if (/UPDATE\s+FINANCE\.INVOICES\s+SET/.test(s)) return 'invoice-update';
+    if (/SELECT\s+LAST_INSERT_ROWID\(\)/.test(s)) return 'last-insert-rowid';
     if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+ID\s*=/.test(s)) return 'invoice-by-id';
     if (
       /SELECT\s+ID\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+INVOICE_NUMBER\s*=/.test(s)
@@ -70,6 +72,11 @@ function makeMockDb() {
     const kind = classify(sql);
     const ps = params ?? [];
 
+    if (kind === 'last-insert-rowid') {
+      let maxId = 0;
+      for (const id of invoices.keys()) if (id > maxId) maxId = id;
+      return { rows: [{ id: maxId }] };
+    }
     if (kind === 'customer-exists') {
       const id = Number(ps[0]);
       return { rows: customers.has(id) ? [{ ok: 1 }] : [] };
@@ -87,6 +94,9 @@ function makeMockDb() {
     }
     if (kind === 'invoice-insert') {
       const id = nextIdFor(invoices);
+      // Schema columns in INSERT VALUES order (created_at + updated_at are
+      // populated by the impl; sent_at / voided_at / void_reason default to NULL
+      // here and are filled by later UPDATE statements).
       const inv = {
         id,
         customer_id: Number(ps[0]),
@@ -98,13 +108,17 @@ function makeMockDb() {
         total_amd: Number(ps[6]),
         status: ps[7] ?? 'draft',
         notes: ps[8] ?? null,
-        sent_at: ps[9] ?? null,
-        voided_at: ps[10] ?? null,
-        void_reason: ps[11] ?? null,
-        created_at: ps[12] ?? null,
-        updated_at: ps[13] ?? null,
+        created_at: ps[9] ?? null,
+        updated_at: ps[10] ?? null,
+        sent_at: null,
+        voided_at: null,
+        void_reason: null,
       };
       invoices.set(id, inv);
+      // pg-style `INSERT ... RETURNING id` returns the new row's id.
+      if (/RETURNING\s+id/i.test(sql)) {
+        return { rows: [{ id }] };
+      }
       return { rows: [] };
     }
     if (kind === 'invoice-line-insert') {
@@ -119,8 +133,15 @@ function makeMockDb() {
       });
       return { rows: [] };
     }
+    if (kind === 'lines-delete') {
+      const id = Number(ps[0]);
+      for (const [lid, l] of lines) {
+        if (l.invoice_id === id) lines.delete(lid);
+      }
+      return { rows: [] };
+    }
     if (kind === 'invoice-update') {
-      // Look up the target invoice by $1 (id).
+      // Look up the target invoice by $N (last param).
       const id = Number(ps[ps.length - 1]);
       const inv = invoices.get(id);
       if (!inv) return { rows: [] };
@@ -131,8 +152,10 @@ function makeMockDb() {
         .split(',')
         .map((c) => c.trim())
         .filter(Boolean);
-      // cols[i] is something like "customer_id = $2"; map param index sequentially.
-      let paramIdx = 1;
+      // cols[i] is something like "status = $1"; map 0-indexed into ps[].
+      // (All other branches in this mock are 0-indexed; this branch was
+      // off-by-one — fixed in commit 099b900 to align with the rest.)
+      let paramIdx = 0;
       for (const col of cols) {
         const eq = col.split('=');
         const colName = eq[0].trim();
@@ -206,12 +229,26 @@ function makeMockDb() {
   }
 
   // sqlite-style surface — used to exercise the adapter duck-type branch in
-  // the GREEN implementation (a separate test does it).
+  // the GREEN implementation. prepare() returns an object whose .run() mimics
+  // better-sqlite3: returns {lastInsertRowid, changes} for INSERTs.
+  let lastInsertRowid = 0;
   function prepare(sql) {
     statements.push({ kind: classify(sql), sql, params: null });
     return {
       run(...params) {
-        return query(sql, params);
+        const result = query(sql, params);
+        // For INSERTs, simulate better-sqlite3's lastInsertRowid behavior by
+        // remembering the largest invoice id we've assigned. (Sqlite's actual
+        // last_insert_rowid() is per-connection; this approximation is enough
+        // for our mock to drive the adapter's id-resolution branch.)
+        const insertMatch = /INSERT\s+INTO\s+finance\.invoices/i.test(sql);
+        if (insertMatch) {
+          // Find the assigned id from the most recent invoice-insert statement.
+          let maxId = 0;
+          for (const id of invoices.keys()) if (id > maxId) maxId = id;
+          lastInsertRowid = maxId;
+        }
+        return { lastInsertRowid, changes: 1 };
       },
       all(...params) {
         return query(sql, params).then((r) => r.rows);
@@ -443,5 +480,97 @@ describe('invoice CRUD', () => {
     const sent = await updateInvoice(db, fresh.id, { status: 'sent' });
     assert.equal(sent.status, 'sent');
     assert.ok(sent.sent_at, 'sent_at must be set after transition');
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Branch-coverage tests (added to push coverage above the 80% floor).
+  // These exercise the validation-error paths and the additional filter
+  // combinations on listInvoices that the original 13 tests didn't cover.
+  // ────────────────────────────────────────────────────────────────────────
+
+  test('14. listInvoices: no filters → all invoices returned', async () => {
+    const all = await listInvoices(db);
+    assert.ok(Array.isArray(all));
+    assert.ok(all.length >= 1);
+  });
+
+  test('15. listInvoices: customer_id filter → only that customer', async () => {
+    const only = await listInvoices(db, { customer_id: 1 });
+    assert.ok(only.every((i) => i.customer_id === 1));
+  });
+
+  test('16. listInvoices: since/until date range filter', async () => {
+    const ranged = await listInvoices(db, {
+      since: '2026-06-01',
+      until: '2026-06-30',
+    });
+    assert.ok(ranged.every((i) => i.issue_date >= '2026-06-01' && i.issue_date <= '2026-06-30'));
+  });
+
+  test('17. listInvoices: limit filter → at most N rows', async () => {
+    const limited = await listInvoices(db, { limit: 2 });
+    assert.ok(limited.length <= 2);
+  });
+
+  test('18. listInvoices: non-string status filter → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { status: 123 }), /status/);
+  });
+
+  test('19. listInvoices: non-positive customer_id filter → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { customer_id: 0 }), /customer_id/);
+  });
+
+  test('20. listInvoices: invalid since date format → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { since: 'not-a-date' }), /since/);
+  });
+
+  test('21. listInvoices: invalid until date format → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { until: 'xx' }), /until/);
+  });
+
+  test('22. listInvoices: non-positive limit → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { limit: 0 }), /limit/);
+  });
+
+  test('23. listInvoices: non-integer limit → ValueError', async () => {
+    await assert.rejects(() => listInvoices(db, { limit: 'abc' }), /limit/);
+  });
+
+  test('24. updateInvoice: non-existent id → ValueError', async () => {
+    await assert.rejects(() => updateInvoice(db, 9999, { status: 'sent' }), /not found/);
+  });
+
+  test('25. updateInvoice: invalid status transition (sent → paid) → ValueError', async () => {
+    // invoice 1 was set to 'sent' in test 10; try to move it to 'paid'.
+    await assert.rejects(
+      () => updateInvoice(db, invoice.id, { status: 'paid' }),
+      /invalid status transition/,
+    );
+  });
+
+  test('26. voidInvoice: empty reason → ValueError', async () => {
+    await assert.rejects(() => voidInvoice(db, 1, ''), /non-empty reason/);
+  });
+
+  test('27. voidInvoice: non-string reason → ValueError', async () => {
+    await assert.rejects(() => voidInvoice(db, 1, 42), /non-empty reason/);
+  });
+
+  test('28. voidInvoice: reason > 500 chars → ValueError', async () => {
+    const long = 'x'.repeat(501);
+    await assert.rejects(() => voidInvoice(db, 1, long), /500 characters/);
+  });
+
+  test('29. voidInvoice: non-existent id → ValueError', async () => {
+    await assert.rejects(
+      () => voidInvoice(db, 9999, 'some reason'),
+      /not found/,
+    );
+  });
+
+  test('30. updateInvoice: status = current.status → no-op (no error)', async () => {
+    // invoice 1 is 'sent'; setting status='sent' again should be a no-op.
+    const noop = await updateInvoice(db, invoice.id, { status: 'sent' });
+    assert.equal(noop.status, 'sent');
   });
 });
