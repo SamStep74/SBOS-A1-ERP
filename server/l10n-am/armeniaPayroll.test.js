@@ -39,6 +39,20 @@ test('payroll: stamp duty is a flat 1,000/mo (2026 revision), zero for no salary
   assert.equal(stampDuty(0), 0);
 });
 
+test('payroll: stamp duty is exempt for amounts strictly below the minimum-wage threshold (delegates to stampDuty.js)', () => {
+  // The payroll stamp duty delegates to stampDutyFor('payroll', gross), which
+  // applies the documented exemption for payroll strictly below the RA
+  // minimum-wage threshold (AMD 75,000). This pins the cross-module contract
+  // (refactor commit refactor/armenia-payroll-stamp-duty) so a future drift
+  // in either module fails loud here.
+  assert.equal(stampDuty(1), 0);
+  assert.equal(stampDuty(50000), 0);
+  assert.equal(stampDuty(74999), 0);
+  // At or above the threshold, the flat 1,000 kicks in.
+  assert.equal(stampDuty(75000), 1000);
+  assert.equal(stampDuty(75001), 1000);
+});
+
 test('payroll: health insurance follows the Dec-2025 200001/500001 salary bands', () => {
   assert.equal(healthInsurance(200000), 0);
   assert.equal(healthInsurance(200001), 4800);
