@@ -28,14 +28,34 @@ function runInTx(db, fn) {
   }
   if (typeof db.beginTransaction === 'function') {
     db.beginTransaction();
+    // We can't use try/catch here because fn() may return a promise
+    // (the seed steps are async). We need to .then() the result so
+    // commitTransaction runs on success and rollbackTransaction runs
+    // on rejection. This is the only way to make runInTx work for
+    // both sync and async fns without changing the seed step code.
+    let r;
     try {
-      const r = fn();
-      db.commitTransaction && db.commitTransaction();
-      return r;
-    } catch (e) {
+      r = fn();
+    } catch (syncErr) {
       db.rollbackTransaction && db.rollbackTransaction();
-      throw e;
+      throw syncErr;
     }
+    // fn returned a thenable — wire up the async paths.
+    if (r && typeof r.then === 'function') {
+      return r.then(
+        (v) => {
+          db.commitTransaction && db.commitTransaction();
+          return v;
+        },
+        (e) => {
+          db.rollbackTransaction && db.rollbackTransaction();
+          throw e;
+        },
+      );
+    }
+    // Sync result.
+    db.commitTransaction && db.commitTransaction();
+    return r;
   }
   // Fallback: run outside a transaction (drivers without tx support).
   return fn();
@@ -179,22 +199,30 @@ async function seedRBAC(db, opts = {}) {
   }
 
   return runInTx(db, () => {
-    runMigrations(db);
-    seedPermissions(db);
-    seedRoles(db);
-    seedPermissionSets(db);
-    seedRolePermissionSets(db);
-    return {
-      permissions_seeded: listKeys().length,
-      roles_seeded: Object.keys(ROLES).length,
-      permission_sets_seeded: Object.keys(PERMISSION_SETS).length,
-      role_default_links_seeded: Object.values(ROLE_MATRIX).reduce((a, b) => a + b.length, 0),
-      versions: {
-        permissions: PERMISSIONS_VERSION,
-        roles: ROLES_VERSION,
-        permission_sets: PERMISSION_SETS_VERSION,
-      },
-    };
+    // The seed steps are async because node:sqlite's prepare/run is
+    // sync but we keep the door open for async drivers (e.g. when
+    // wrapped in a real pg adapter). Awaiting each step is the only
+    // way runInTx can catch errors thrown mid-seed — without these
+    // awaits, a failing seed would surface as an unhandled rejection
+    // and the transaction would commit, leaving the DB half-seeded.
+    return (async () => {
+      await runMigrations(db);
+      await seedPermissions(db);
+      await seedRoles(db);
+      await seedPermissionSets(db);
+      await seedRolePermissionSets(db);
+      return {
+        permissions_seeded: listKeys().length,
+        roles_seeded: Object.keys(ROLES).length,
+        permission_sets_seeded: Object.keys(PERMISSION_SETS).length,
+        role_default_links_seeded: Object.values(ROLE_MATRIX).reduce((a, b) => a + b.length, 0),
+        versions: {
+          permissions: PERMISSIONS_VERSION,
+          roles: ROLES_VERSION,
+          permission_sets: PERMISSION_SETS_VERSION,
+        },
+      };
+    })();
   });
 }
 

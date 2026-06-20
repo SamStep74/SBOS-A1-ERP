@@ -2513,4 +2513,175 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     );
     assert.equal(members.c, expected, 'all PS permissions became members');
   });
+
+  test('runMigrations: re-running swallows "duplicate column" / "already exists" but rethrows others', async () => {
+    // The migration runner runs each statement and treats
+    // "duplicate column" / "already exists" errors as no-ops (idempotent).
+    // Any other error must be rethrown.
+    //
+    // Note: runMigrations reads server/rbac/schema.sql directly, which
+    // has a redundant composite PK on sbos_rbac_approvals that
+    // node:sqlite refuses. So we can't use node:sqlite here — we use
+    // a mock db that simulates the driver behavior.
+    const { runMigrations } = await import('./seed.js');
+    const calls = [];
+    const db = {
+      exec(sql) {
+        calls.push(sql);
+        // First time the table CREATE runs: succeed.
+        // Second time: throw "already exists" to exercise the filter.
+        // The migration runner is per-statement, so we look at the
+        // table name in the SQL.
+        if (/already exists|duplicate column/i.test(sql)) {
+          throw new Error('already exists');
+        }
+        // Always fail non-duplicate errors so we can re-throw branch.
+        if (/^CREATE TABLE/.test(sql)) {
+          // Record first occurrence, fail second.
+          if (!calls.seenTables) calls.seenTables = new Set();
+          const m = sql.match(/CREATE TABLE[^A]+(sbos_\w+)/);
+          const tbl = m && m[1];
+          if (tbl && calls.seenTables.has(tbl)) {
+            throw new Error('already exists');
+          }
+          if (tbl) calls.seenTables.add(tbl);
+          return undefined;
+        }
+        return undefined;
+      },
+    };
+    // First call: every CREATE succeeds. Some statements may still
+    // throw (e.g. CREATE INDEX on a non-existent table) but the
+    // migration runner swallows those errors as "already exists"
+    // because the regex is broad. We're just exercising the swallow
+    // path; the exact error pattern doesn't matter for this test.
+    await runMigrations(db);
+    // Second call on the SAME db mock: every CREATE now hits the
+    // "already exists" filter and is swallowed. runMigrations should
+    // not throw.
+    await runMigrations(db);
+
+    // Non-duplicate errors propagate. Build a db that throws a
+    // non-duplicate error.
+    const dbBad = {
+      exec() {
+        throw new Error('syntax error near "PRAGMA"');
+      },
+    };
+    await assert.rejects(() => runMigrations(dbBad), /syntax error/);
+  });
+
+  test('seedRBAC: throws when given a non-sqlite DB (no .prepare/.exec)', async () => {
+    // The first guard in seedRBAC rejects anything that doesn't look
+    // like a sqlite driver. Closes the line-165..167 branch.
+    const fake = { transaction: () => () => null, query: () => null };
+    await assert.rejects(
+      () => seedRBAC(fake),
+      /must be a sqlite-compatible instance/,
+    );
+  });
+
+  test('seedRBAC: pg-style db with beginTransaction/commitTransaction path', async () => {
+    // Exercises the second branch of runInTx (line 29-38). A pg-style
+    // db that has beginTransaction/commitTransaction but no .transaction.
+    // We need the seed steps to actually run, so we back the
+    // "queries" with a real node:sqlite handle via a fake driver.
+    const real = new DatabaseSync(':memory:');
+    // Load the schema so seed INSERTs work. The schema has a redundant
+    // composite PK on sbos_rbac_approvals that node:sqlite refuses.
+    const rbacDir = dirname(fileURLToPath(import.meta.url));
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
+      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    real.exec(schema);
+
+    // Mock db: a sqlite-compatible facade that wraps the real handle,
+    // so .prepare / .exec / .run work, but exposes beginTransaction +
+    // commitTransaction + rollbackTransaction so the second branch of
+    // runInTx is taken.
+    const statements = [];
+    let inTx = false;
+    let txRolledBack = false;
+    const db = {
+      prepare(sql) {
+        const stmt = real.prepare(sql);
+        return {
+          run(...args) { return stmt.run(...args); },
+          get(...args) { return stmt.get(...args); },
+          all(...args) { return stmt.all(...args); },
+        };
+      },
+      exec(sql) { real.exec(sql); statements.push(sql); },
+      beginTransaction() { inTx = true; },
+      commitTransaction() { inTx = false; },
+      rollbackTransaction() { inTx = false; txRolledBack = true; },
+    };
+    // Force runInTx to take the beginTransaction branch by removing .transaction.
+    // Our db has no .transaction method, so it falls through to beginTransaction.
+
+    // Seed should succeed.
+    const v = await seedRBAC(db);
+    assert.equal(v.permissions_seeded, listKeys().length);
+    assert.equal(v.roles_seeded, listRoleIds().length);
+    assert.equal(inTx, false, 'commitTransaction was called');
+
+    // Now exercise the rollback branch by forcing the first INSERT
+    // (permissions) to throw mid-transaction. The seed SQL is wrapped
+    // in beginTransaction/commitTransaction, so any throw inside the
+    // body should trigger rollbackTransaction().
+    let throwCount = 0;
+    const db2 = {
+      ...db,
+      prepare(sql) {
+        const stmt = real.prepare(sql);
+        return {
+          run(...args) {
+            if (/INSERT INTO sbos_rbac_permissions/i.test(sql)) {
+              throwCount++;
+              throw new Error('forced: permissions insert failed');
+            }
+            return stmt.run(...args);
+          },
+          get(...args) { return stmt.get(...args); },
+          all(...args) { return stmt.all(...args); },
+        };
+      },
+    };
+    txRolledBack = false;
+    await assert.rejects(() => seedRBAC(db2), /forced: permissions insert failed/);
+    assert.equal(txRolledBack, true, 'rollbackTransaction was called on error');
+    assert.ok(throwCount > 0, 'mock throw was actually invoked');
+  });
+
+  test('seedRBAC: db with both .transaction and .beginTransaction prefers .transaction', async () => {
+    // The first branch of runInTx (line 26-28). A driver that has
+    // .transaction should use that, not the beginTransaction path.
+    const real = new DatabaseSync(':memory:');
+    const rbacDir = dirname(fileURLToPath(import.meta.url));
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
+      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    real.exec(schema);
+
+    let txUsed = false;
+    let beginTxUsed = false;
+    const db = {
+      prepare(sql) {
+        const stmt = real.prepare(sql);
+        return {
+          run(...args) { return stmt.run(...args); },
+          get(...args) { return stmt.get(...args); },
+          all(...args) { return stmt.all(...args); },
+        };
+      },
+      exec(sql) { real.exec(sql); },
+      transaction(fn) {
+        txUsed = true;
+        return () => fn();
+      },
+      beginTransaction() { beginTxUsed = true; },
+    };
+    const v = await seedRBAC(db);
+    assert.equal(v.permissions_seeded, listKeys().length);
+    assert.equal(txUsed, true, '.transaction was used');
+    assert.equal(beginTxUsed, false, 'beginTransaction was NOT used');
+  });
 });
