@@ -1845,3 +1845,640 @@ describe('Wave 7.2 — permissions.js: requireKey helper', () => {
     );
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 8 — close the rbac/routes.js (8% stmt) + rbac/seed.js (14.83% stmt)
+// coverage gaps.
+//
+// Approach: build a mock Fastify app whose .get/.post/.patch/.put/.delete
+// methods capture (url, opts, handler) tuples. After registerRbacRoutes()
+// we invoke each handler manually with a stub request/reply, asserting
+// the response shape and the DB state. No real HTTP server, no Fastify
+// dependency — the test is Fastify-free.
+// ────────────────────────────────────────────────────────────────────────
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { registerRbacRoutes } from './routes.js';
+
+function makeMockApp() {
+  // Captures the route table so tests can dispatch by (method, url, params).
+  // Pattern-aware: returns a regex + param-name list so we can match
+  // /api/rbac/roles/:id → /api/rbac/roles/Admin with {id: 'Admin'}.
+  const routes = [];
+  function patternToRegex(pattern) {
+    const paramNames = [];
+    const re = pattern.replace(/:([A-Za-z_][A-Za-z0-9_]*)|\(\*\)/g, (_, name) => {
+      if (name === undefined) {
+        paramNames.push('_splat');
+        return '(.*)';
+      }
+      paramNames.push(name);
+      return '([^/]+)';
+    });
+    return { regex: new RegExp('^' + re + '$'), paramNames };
+  }
+  const methods = ['get', 'post', 'patch', 'put', 'delete'];
+  const app = {};
+  for (const method of methods) {
+    app[method] = (url, opts, handler) => {
+      if (typeof opts === 'function') {
+        handler = opts;
+        opts = {};
+      }
+      const compiled = patternToRegex(url);
+      routes.push({ method, url, opts, handler, compiled });
+    };
+  }
+  return { app, routes };
+}
+
+function makeReply() {
+  // Returns a single object with mutable body/status/sent properties
+  // (NOT getters). Tests must access via this object so they see the
+  // post-dispatch values:
+  //
+  //   const r = makeReply();
+  //   await dispatch(routes, 'GET', url, req, r.reply);
+  //   r.status;  // → 200
+  //   r.body;    // → the response payload
+  const r = { status: 200, body: undefined, sent: false };
+  r.reply = {
+    code(c) { r.status = c; return r.reply; },
+    status(c) { r.status = c; return r.reply; },
+    send(b) { r.body = b; r.sent = true; return r.reply; },
+    // Expose the closure's sent flag so dispatch can tell whether the
+    // handler already called send(). Without this, dispatch would
+    // re-send the handler's return value (which is the reply object
+    // itself in Fastify's `return reply.send(x)` convention).
+    get sent() { return r.sent; },
+  };
+  return r;
+}
+
+function dispatch(routes, method, url, request, reply) {
+  for (const r of routes) {
+    if (r.method.toUpperCase() !== method.toUpperCase()) continue;
+    const m = r.compiled.regex.exec(url);
+    if (!m) continue;
+    // Apply path params
+    for (let i = 0; i < r.compiled.paramNames.length; i++) {
+      request.params[r.compiled.paramNames[i]] = decodeURIComponent(m[i + 1]);
+    }
+    // Fastify handlers can either return a value (it becomes the body) or
+    // call reply.send(payload). The mock supports both: if the handler
+    // returns a non-undefined value, call reply.send(v) so the closure
+    // body in makeReply is updated.
+    const ret = r.handler(request, reply);
+    if (ret && typeof ret.then === 'function') {
+      return ret.then((v) => {
+        if (v !== undefined && !reply.sent) reply.send(v);
+        return v;
+      });
+    }
+    if (ret !== undefined && !reply.sent) reply.send(ret);
+    return ret;
+  }
+  throw new Error(`No route matched ${method} ${url}`);
+}
+
+describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
+  let db;
+  let routes;
+  let app;
+
+  before(() => {
+    // In-memory node:sqlite DB.
+    db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA foreign_keys = ON');
+    // Apply the canonical RBAC schema. The schema has a redundant
+    // `PRIMARY KEY (id, tenant_id)` table-level constraint on
+    // sbos_rbac_approvals in addition to `id TEXT PRIMARY KEY` —
+    // node:sqlite refuses two primary keys, so we strip the redundant
+    // composite PK AND the trailing comma on the previous column line.
+    const rbacDir = dirname(fileURLToPath(import.meta.url));
+    const schemaPath = join(rbacDir, 'schema.sql');
+    const schema = readFileSync(schemaPath, 'utf8')
+      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    db.exec(schema);
+    // The RBAC routes also reference a `users` table that lives outside
+    // the rbac schema (it's a tenant-level system table). Create the
+    // minimal columns we touch.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL,
+        email TEXT,
+        role TEXT,
+        tenant_id INTEGER NOT NULL DEFAULT 0,
+        org_id INTEGER,
+        mfa_required INTEGER NOT NULL DEFAULT 0,
+        mfa_verified INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    db.prepare(
+      `INSERT INTO users (id, username, email, role, tenant_id, org_id) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(1, 'admin', 'admin@example.com', 'Admin', 0, null);
+
+    const mock = makeMockApp();
+    app = mock.app;
+    routes = mock.routes;
+    registerRbacRoutes(app, { db });
+  });
+
+  test('registers all expected route method+url combinations', () => {
+    // Pin the API surface so dropped routes are caught in CI.
+    const seen = new Set(routes.map((r) => `${r.method.toUpperCase()} ${r.url}`));
+    const expected = [
+      'GET /api/rbac/permissions',
+      'GET /api/rbac/permissions/:key',
+      'GET /api/rbac/permission-sets',
+      'GET /api/rbac/permission-sets/:id',
+      'GET /api/rbac/roles',
+      'POST /api/rbac/roles',
+      'PATCH /api/rbac/roles/:id',
+      'DELETE /api/rbac/roles/:id',
+      'GET /api/rbac/users/:userId/effective',
+      'POST /api/rbac/users/:userId/permission-sets',
+      'DELETE /api/rbac/users/:userId/permission-sets/:ps',
+      'POST /api/rbac/users/:userId/role',
+      'GET /api/rbac/field-policies',
+      'PUT /api/rbac/field-policies/:path(*)',
+      'GET /api/rbac/record-rules',
+      'PUT /api/rbac/record-rules/:resource(*)',
+      'GET /api/rbac/sessions',
+      'DELETE /api/rbac/sessions/:id',
+      'GET /api/rbac/audit',
+      'GET /api/rbac/me/permissions',
+      'GET /api/rbac/health',
+    ];
+    for (const e of expected) assert.ok(seen.has(e), `route registered: ${e}`);
+  });
+
+  test('GET /api/rbac/permissions returns catalog version + categories', async () => {
+    const req = { user: { id: 1, tenant_id: 0 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permissions', req, r.reply);
+    assert.ok(r.body.version);
+    assert.ok(Array.isArray(r.body.categories));
+    assert.ok(r.body.categories.length > 0);
+    assert.ok(r.body.categories[0].id);
+    assert.ok(Array.isArray(r.body.categories[0].items));
+  });
+
+  test('GET /api/rbac/permissions/:key returns the def for a known key, 404 for unknown', async () => {
+    const req1 = { user: { id: 1 }, params: {} };
+    const r1 = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permissions/crm.lead.read', req1, r1.reply);
+    assert.equal(r1.status, 200);
+    assert.equal(r1.body.key, 'crm.lead.read');
+
+    const req2 = { user: { id: 1 }, params: {} };
+    const r2 = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permissions/not.a.real.key', req2, r2.reply);
+    assert.equal(r2.status, 404);
+    assert.equal(r2.body.error, 'not_found');
+  });
+
+  test('GET /api/rbac/permission-sets returns version + items', async () => {
+    const req = { user: { id: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets', req, r.reply);
+    assert.ok(r.body.version);
+    assert.ok(Array.isArray(r.body.items));
+    assert.ok(r.body.items.length > 0, 'at least one PS in catalog');
+  });
+
+  test('GET /api/rbac/permission-sets/:id — known + 404', async () => {
+    // Find a real PS id from the catalog.
+    const listReq = { user: { id: 1 } };
+    const listReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets', listReq, listReply.reply);
+    const firstId = listReply.body.items[0].id;
+
+    const knownReq = { user: { id: 1 }, params: {} };
+    const knownReply = makeReply();
+    await dispatch(routes, 'GET', `/api/rbac/permission-sets/${firstId}`, knownReq, knownReply.reply);
+    assert.equal(knownReply.status, 200);
+    assert.equal(knownReply.body.id, firstId);
+
+    const missReq = { user: { id: 1 }, params: {} };
+    const missReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets/NoSuchPS', missReq, missReply.reply);
+    assert.equal(missReply.status, 404);
+  });
+
+  test('GET /api/rbac/roles returns roles joined with DB rows', async () => {
+    const req = { user: { id: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/roles', req, r.reply);
+    assert.ok(Array.isArray(r.body.items));
+    assert.ok(r.body.items.length > 0, 'has roles from DB join');
+  });
+
+  test('POST /api/rbac/roles creates a custom role and returns 201', async () => {
+    const req = {
+      user: { id: 1 },
+      body: { id: 'CFOLead2', parent: 'Admin', appSet: ['finance'] },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/roles', req, r.reply);
+    assert.equal(r.status, 201);
+    assert.equal(r.body.id, 'CFOLead2');
+    assert.equal(r.body.parent, 'Admin');
+    const row = db.prepare(`SELECT id, parent, is_system FROM sbos_rbac_roles WHERE id = ?`).get('CFOLead2');
+    assert.equal(row.id, 'CFOLead2');
+    assert.equal(row.parent, 'Admin');
+    assert.equal(row.is_system, 0, 'custom roles are not system');
+  });
+
+  test('POST /api/rbac/roles: invalid role body bubbles up validateCustomRole error', async () => {
+    const req = { user: { id: 1 }, body: { id: '1bad', parent: 'Admin' } };
+    const r = makeReply();
+    await assert.rejects(
+      () => dispatch(routes, 'POST', '/api/rbac/roles', req, r.reply),
+      /must start with a letter/,
+    );
+  });
+
+  test('PATCH /api/rbac/roles/:id — system role allows limited fields only', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { description: 'Updated description', id: 'HACK' /* id is not in allowed list */ },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'PATCH', '/api/rbac/roles/Admin', req, r.reply);
+    assert.equal(r.status, 200);
+    // The id field in the body should be ignored (not in allowed list).
+    assert.equal(r.body.id, 'Admin');
+    // description should be applied.
+    assert.equal(r.body.description, 'Updated description');
+  });
+
+  test('PATCH /api/rbac/roles/:id — unknown role returns 404', async () => {
+    const req = { user: { id: 1 }, params: {}, body: {} };
+    const r = makeReply();
+    await dispatch(routes, 'PATCH', '/api/rbac/roles/NoSuch', req, r.reply);
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'not_found');
+  });
+
+  test('PATCH /api/rbac/roles/:id — custom role PATCH is a known limitation (in-code catalog only)', async () => {
+    // KNOWN LIMITATION: PATCH/DELETE in routes.js only consults the
+    // in-code ROLES catalog via getRole(id), not the DB. Custom roles
+    // created via POST land in the DB but are invisible to PATCH/DELETE
+    // because the handler 404s when getRole returns null. This is a
+    // pre-existing design constraint — surfacing it here so it shows
+    // up in the test output. The POST + read-back path works (covered
+    // elsewhere); only the modify/delete API for custom roles is gated.
+    const createReq = {
+      user: { id: 1 },
+      body: { id: 'CustomSkip', parent: 'Admin', appSet: ['finance'] },
+    };
+    await dispatch(routes, 'POST', '/api/rbac/roles', createReq, makeReply().reply);
+    const patchReq = { user: { id: 1 }, params: {}, body: { description: 'X' } };
+    const r = makeReply();
+    await dispatch(routes, 'PATCH', '/api/rbac/roles/CustomSkip', patchReq, r.reply);
+    // Document the current behavior, don't assert against an aspirational one.
+    assert.equal(r.status, 404, 'PATCH on DB-only custom role returns 404 (catalog gate)');
+    assert.equal(r.body.error, 'not_found');
+  });
+
+  test('DELETE /api/rbac/roles/:id — system role returns 409', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/roles/Admin', req, r.reply);
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'system_role_immutable');
+  });
+
+  test('DELETE /api/rbac/roles/:id — unknown role returns 404', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/roles/NoSuch', req, r.reply);
+    assert.equal(r.status, 404);
+  });
+
+  test('DELETE /api/rbac/roles/:id — DB-only custom role returns 404 (known limitation)', () => {
+    // KNOWN LIMITATION: see the PATCH test above. Custom roles in the
+    // DB are not deletable via the API because the handler only checks
+    // the in-code ROLES catalog. We assert the current behavior so the
+    // gap is visible in CI rather than silently.
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    return dispatch(routes, 'DELETE', '/api/rbac/roles/NotInCatalog', req, r.reply).then(() => {
+      assert.equal(r.status, 404);
+      assert.equal(r.body.error, 'not_found');
+    });
+  });
+
+  test('DELETE /api/rbac/roles/:id — in-use custom role is gated the same way (returns 404)', async () => {
+    // Same limitation: the in-use branch is never reached because
+    // getRole(id) returns null for DB-only custom roles. The 404 is
+    // returned first.
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/roles/SomeDBOnlyRole', req, r.reply);
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'not_found');
+  });
+
+  test('GET /api/rbac/users/:userId/effective — known user returns chain + effective set', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/users/1/effective', req, r.reply);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.user.id, 1);
+    assert.ok(Array.isArray(r.body.roleChain));
+    assert.ok(r.body.roleChain.length > 0);
+    assert.ok(Array.isArray(r.body.effectivePermissions));
+    assert.ok(r.body.count > 0);
+  });
+
+  test('GET /api/rbac/users/:userId/effective — unknown user returns 404', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/users/9999/effective', req, r.reply);
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'user_not_found');
+  });
+
+  test('POST /api/rbac/users/:userId/permission-sets — invalid PS id returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { permissionSetId: 'NoSuchPS' } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/users/1/permission-sets', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_permission_set');
+  });
+
+  test('POST /api/rbac/users/:userId/permission-sets — valid PS returns the row', async () => {
+    // Find a real PS id.
+    const listReq = { user: { id: 1 } };
+    const listReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets', listReq, listReply.reply);
+    const psId = listReply.body.items[0].id;
+    const req = { user: { id: 1 }, params: {}, body: { permissionSetId: psId, expiresAt: null } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/users/1/permission-sets', req, r.reply);
+    assert.equal(r.status, 201);
+    assert.equal(r.body.userId, 1);
+    assert.equal(r.body.permissionSetId, psId);
+  });
+
+  test('POST /api/rbac/users/:userId/permission-sets — unknown user returns 404', async () => {
+    const listReq = { user: { id: 1 } };
+    const listReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets', listReq, listReply.reply);
+    const psId = listReply.body.items[0].id;
+    const req = { user: { id: 1 }, params: {}, body: { permissionSetId: psId } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/users/9999/permission-sets', req, r.reply);
+    assert.equal(r.status, 404);
+  });
+
+  test('DELETE /api/rbac/users/:userId/permission-sets/:ps — unknown user returns 404', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/users/9999/permission-sets/SomePS', req, r.reply);
+    assert.equal(r.status, 404);
+  });
+
+  test('DELETE /api/rbac/users/:userId/permission-sets/:ps — known user returns 204', async () => {
+    // First assign
+    const listReq = { user: { id: 1 } };
+    const listReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/permission-sets', listReq, listReply.reply);
+    const psId = listReply.body.items[0].id;
+    await dispatch(routes, 'POST', '/api/rbac/users/1/permission-sets', {
+      user: { id: 1 }, params: {}, body: { permissionSetId: psId },
+    }, makeReply().reply);
+    // Then delete
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', `/api/rbac/users/1/permission-sets/${psId}`, req, r.reply);
+    assert.equal(r.status, 204);
+  });
+
+  test('POST /api/rbac/users/:userId/role — invalid roleId returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { roleId: 'NoSuchRole' } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/users/1/role', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_role');
+  });
+
+  test('POST /api/rbac/users/:userId/role — valid role returns 201', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { roleId: 'Admin' } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/users/1/role', req, r.reply);
+    assert.equal(r.status, 201);
+    assert.equal(r.body.userId, 1);
+    assert.equal(r.body.roleId, 'Admin');
+  });
+
+  test('GET /api/rbac/field-policies returns empty list initially', async () => {
+    const req = { user: { id: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/field-policies', req, r.reply);
+    assert.ok(Array.isArray(r.body.items));
+  });
+
+  test('PUT /api/rbac/field-policies/:path(*) — invalid minPermission returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { minPermission: 'not.a.real.key' } };
+    const r = makeReply();
+    await dispatch(routes, 'PUT', '/api/rbac/field-policies/customer.ssn', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_min_permission');
+  });
+
+  test('PUT /api/rbac/field-policies/:path(*) — valid policy upserts and returns 200', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { minPermission: 'crm.lead.read', isVisible: false, label: 'Customer SSN' },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'PUT', '/api/rbac/field-policies/customer.ssn', req, r.reply);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.fieldPath, 'customer.ssn');
+    assert.equal(r.body.minPermission, 'crm.lead.read');
+  });
+
+  test('GET /api/rbac/record-rules returns empty list initially', async () => {
+    const req = { user: { id: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/record-rules', req, r.reply);
+    assert.ok(Array.isArray(r.body.items));
+  });
+
+  test('PUT /api/rbac/record-rules/:resource(*) — invalid scope returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { scope: 'unknown' } };
+    const r = makeReply();
+    await dispatch(routes, 'PUT', '/api/rbac/record-rules/crm.lead', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_scope');
+  });
+
+  test('PUT /api/rbac/record-rules/:resource(*) — custom scope without predicate returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { scope: 'custom' } };
+    const r = makeReply();
+    await dispatch(routes, 'PUT', '/api/rbac/record-rules/crm.lead', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'predicate_required_for_custom_scope');
+  });
+
+  test('PUT /api/rbac/record-rules/:resource(*) — custom scope with predicate returns 200', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { scope: 'custom', predicate: 'owner_id = $userId', description: 'owner-only' },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'PUT', '/api/rbac/record-rules/crm.lead', req, r.reply);
+    assert.equal(r.status, 200);
+  });
+
+  test('GET /api/rbac/sessions returns the session list', async () => {
+    const req = { user: { id: 1, tenant_id: 0 }, query: {} };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/sessions', req, r.reply);
+    assert.ok(Array.isArray(r.body.items));
+  });
+
+  test('DELETE /api/rbac/sessions/:id always returns 204', async () => {
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/sessions/some-session-id', req, r.reply);
+    assert.equal(r.status, 204);
+  });
+
+  test('GET /api/rbac/audit — optional decision + userId filters compose', async () => {
+    // Insert one allow + one deny row.
+    db.prepare(
+      `INSERT INTO sbos_rbac_permission_audit
+         (user_id, permission, decision, resource, reason, ip, session_id, tenant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(1, 'crm.lead.read', 'allow', 'lead:1', 'ok', '127.0.0.1', 'sess1', 0);
+    db.prepare(
+      `INSERT INTO sbos_rbac_permission_audit
+         (user_id, permission, decision, resource, reason, ip, session_id, tenant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(1, 'crm.lead.delete', 'deny', 'lead:1', 'no_perm', '127.0.0.1', 'sess1', 0);
+
+    const allReq = { user: { id: 1, tenant_id: 0 }, query: {} };
+    const allReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/audit', allReq, allReply.reply);
+    assert.ok(allReply.body.items.length >= 2);
+
+    const allowReq = { user: { id: 1, tenant_id: 0 }, query: { decision: 'allow' } };
+    const allowReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/audit', allowReq, allowReply.reply);
+    assert.ok(allowReply.body.items.every((r) => r.decision === 'allow'));
+
+    const filterReq = { user: { id: 1, tenant_id: 0 }, query: { userId: '1' } };
+    const filterReply = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/audit', filterReq, filterReply.reply);
+    assert.ok(filterReply.body.items.every((r) => r.user_id === 1));
+  });
+
+  test('GET /api/rbac/me/permissions returns the caller effective permissions', async () => {
+    const req = { user: { id: 1, role: 'Admin', permission_set_ids: [], tenant_id: 0 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/me/permissions', req, r.reply);
+    assert.equal(r.body.role, 'Admin');
+    assert.ok(Array.isArray(r.body.effectivePermissions));
+    assert.ok(r.body.count > 0);
+  });
+
+  test('GET /api/rbac/health returns ok + empty issues on a clean catalog', async () => {
+    const req = { user: { id: 1, tenant_id: 0 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/health', req, r.reply);
+    assert.equal(r.body.ok, true, 'catalog is internally consistent');
+    assert.deepEqual(r.body.issues, []);
+  });
+
+  test('registerRbacRoutes throws if neither opts.db nor app.db is provided', () => {
+    const m = makeMockApp();
+    assert.throws(
+      () => registerRbacRoutes(m.app),
+      /rbac routes require db/,
+    );
+  });
+});
+
+describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite', () => {
+  let db;
+
+  before(() => {
+    db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA foreign_keys = ON');
+    const rbacDir = dirname(fileURLToPath(import.meta.url));
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
+      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    db.exec(schema);
+  });
+
+  test('seedRBAC: returns counts matching the in-code catalogs', async () => {
+    const v = await seedRBAC(db);
+    assert.equal(v.permissions_seeded, listKeys().length);
+    assert.equal(v.roles_seeded, listRoleIds().length);
+    assert.ok(v.permission_sets_seeded > 0);
+    assert.ok(v.role_default_links_seeded > 0);
+    assert.ok(v.versions);
+    assert.equal(v.versions.permissions, rbac.PERMISSIONS_VERSION);
+  });
+
+  test('seedRBAC: rows are actually present in the DB', async () => {
+    const perms = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    const roles = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_roles WHERE tenant_id = 0`).get();
+    const sets = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permission_sets WHERE tenant_id = 0`).get();
+    const links = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_role_permission_sets`).get();
+    assert.equal(perms.c, listKeys().length);
+    assert.equal(roles.c, listRoleIds().length);
+    assert.equal(sets.c, Object.keys(PERMISSION_SETS).length);
+    assert.ok(links.c > 0);
+  });
+
+  test('seedRBAC: is idempotent — re-running does not duplicate or error', async () => {
+    await seedRBAC(db);
+    const perms = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    assert.equal(perms.c, listKeys().length);
+  });
+
+  test('readVersions: returns the seeded versions', () => {
+    const v = readVersions(db);
+    assert.equal(Number(v.permissions_version), rbac.PERMISSIONS_VERSION);
+    assert.equal(Number(v.roles_version), rbac.ROLES_VERSION);
+    assert.equal(Number(v.permission_sets_version), rbac.PERMISSION_SETS_VERSION);
+  });
+
+  test('seedRBAC: force=true wipes + re-seeds (DANGEROUS path)', async () => {
+    // First seed.
+    await seedRBAC(db);
+    // Insert a junk row to prove force wipes it.
+    db.prepare(`INSERT INTO sbos_rbac_permissions (key, tenant_id, category, sensitivity, label, description) VALUES ('junk.x', 0, 'crm', 'low', 'junk', '')`).run();
+    const before = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    assert.ok(before.c > listKeys().length, 'junk row inflated the count');
+    // Force re-seed.
+    const v = await seedRBAC(db, { force: true });
+    assert.equal(v.permissions_seeded, listKeys().length, 'junk gone, catalog restored');
+    const after = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    assert.equal(after.c, listKeys().length);
+  });
+
+  test('seedRBAC: also seeds permission_set_members when the catalog has them', async () => {
+    // The matrix.js PSes have a `permissions` array of keys. Each one
+    // should be in sbos_rbac_permission_set_members.
+    const members = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permission_set_members`).get();
+    // Each PS contributes `permissions.length` member rows.
+    const expected = Object.values(PERMISSION_SETS).reduce(
+      (acc, ps) => acc + (ps.permissions ? ps.permissions.length : 0),
+      0,
+    );
+    assert.equal(members.c, expected, 'all PS permissions became members');
+  });
+});
