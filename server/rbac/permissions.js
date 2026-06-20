@@ -325,11 +325,29 @@ const PERMISSIONS = Object.freeze({
     label: 'View profiles',
     description: 'View profiles (role + permission set bundles).',
   },
+  'security.profile.create': {
+    category: 'security',
+    sensitivity: 'high',
+    label: 'Create profile',
+    description: 'Define a new profile (role + permission set bundle) in the tenant.',
+  },
   'security.profile.update': {
     category: 'security',
     sensitivity: 'high',
     label: 'Manage profiles',
     description: 'Create or modify profiles.',
+  },
+  'security.profile.delete': {
+    category: 'security',
+    sensitivity: 'critical',
+    label: 'Delete profile',
+    description: 'Delete a profile (refused while any user still has it applied).',
+  },
+  'security.profile.assign': {
+    category: 'security',
+    sensitivity: 'high',
+    label: 'Assign profile',
+    description: 'Apply a profile (role + permission set bundle) to a user.',
   },
   'security.session.list': {
     category: 'security',
