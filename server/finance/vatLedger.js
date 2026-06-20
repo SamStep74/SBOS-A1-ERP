@@ -125,7 +125,12 @@ export async function clearCurrentCarryForward(db) {
  *   reflecting the prior credit, plus the persisted bank as
  *   `carryForward`.
  */
-export async function computeAndCloseVatPeriod(db, yearMonth, salesInvoice = {}, purchasesInvoice = {}) {
+export async function computeAndCloseVatPeriod(
+  db,
+  yearMonth,
+  salesInvoice = {},
+  purchasesInvoice = {},
+) {
   assertYearMonth(yearMonth);
   // 1. Read prior.
   const prior = await getCurrentCarryForward(db);
@@ -138,5 +143,9 @@ export async function computeAndCloseVatPeriod(db, yearMonth, salesInvoice = {},
   // 3. Persist the new bank.
   await setCurrentCarryForward(db, result.carryForward, yearMonth);
   // 4. Decorate the result with the prior period so callers can audit.
-  return { ...result, priorPeriodCarryForward: prior.balance_amd, priorAsOfPeriod: prior.as_of_period };
+  return {
+    ...result,
+    priorPeriodCarryForward: prior.balance_amd,
+    priorAsOfPeriod: prior.as_of_period,
+  };
 }

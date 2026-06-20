@@ -151,13 +151,17 @@ function renderOverdueSection(locale, rows) {
       <th class="right">${t(locale, 'dashboard.th.balance')}</th>
       <th class="right">${t(locale, 'dashboard.th.daysOverdue')}</th>
     </tr>
-    ${rows.map((r) => `
+    ${rows
+      .map(
+        (r) => `
     <tr>
       <td>${escapeHtml(r.invoice_number)}</td>
       <td>${escapeHtml(r.customer_name)}</td>
       <td class="num">${escapeHtml(fmtAmd(r.balance_amd))}</td>
       <td class="num">${r.days_overdue}</td>
-    </tr>`).join('')}
+    </tr>`,
+      )
+      .join('')}
   </table>
   `;
 }
@@ -205,14 +209,18 @@ function renderTopCustomersSection(locale, rows) {
       <th class="right">${t(locale, 'dashboard.th.paidAmount')}</th>
       <th class="right">${t(locale, 'dashboard.th.invoiceCount')}</th>
     </tr>
-    ${rows.map((r) => `
+    ${rows
+      .map(
+        (r) => `
     <tr>
       <td>${escapeHtml(r.customer_name)}</td>
       <td>${escapeHtml(r.hvhh || '—')}</td>
       <td class="num">${escapeHtml(fmtAmd(r.total_billed_amd))}</td>
       <td class="num">${escapeHtml(fmtAmd(r.total_paid_amd))}</td>
       <td class="num">${r.invoice_count}</td>
-    </tr>`).join('')}
+    </tr>`,
+      )
+      .join('')}
   </table>
   `;
 }
@@ -331,7 +339,7 @@ export function serveDashboard(db, opts = {}) {
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
       // Tiny router — only GET / is supported.
-      if (req.method !== 'GET' || req.url !== '/' && !req.url.startsWith('/?')) {
+      if (req.method !== 'GET' || (req.url !== '/' && !req.url.startsWith('/?'))) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found\n');
         return;

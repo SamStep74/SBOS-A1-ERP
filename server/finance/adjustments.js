@@ -42,9 +42,7 @@ export class ValueError extends Error {
 
 function assertKind(kind) {
   if (!ADJUSTMENT_KINDS.includes(kind)) {
-    throw new ValueError(
-      `kind must be one of ${ADJUSTMENT_KINDS.join(', ')}; got "${kind}"`,
-    );
+    throw new ValueError(`kind must be one of ${ADJUSTMENT_KINDS.join(', ')}; got "${kind}"`);
   }
 }
 
@@ -101,10 +99,7 @@ export async function recordAdjustment(db, input) {
 
   // Verify the invoice exists; FK will catch it on INSERT but a
   // friendly error is better than a raw SQL constraint violation.
-  const inv = await db.query(
-    'SELECT id FROM finance.invoices WHERE id = $1',
-    [input.invoice_id],
-  );
+  const inv = await db.query('SELECT id FROM finance.invoices WHERE id = $1', [input.invoice_id]);
   if (!inv.rows || inv.rows.length === 0) {
     throw new ValueError(`invoice ${input.invoice_id} not found`);
   }
@@ -118,7 +113,15 @@ export async function recordAdjustment(db, input) {
   );
   return result.rows && result.rows[0]
     ? result.rows[0]
-    : { id: null, invoice_id: input.invoice_id, kind: input.kind, amount_amd: amount, reason: input.reason, approved_by: approvedBy, created_at: new Date().toISOString() };
+    : {
+        id: null,
+        invoice_id: input.invoice_id,
+        kind: input.kind,
+        amount_amd: amount,
+        reason: input.reason,
+        approved_by: approvedBy,
+        created_at: new Date().toISOString(),
+      };
 }
 
 /**

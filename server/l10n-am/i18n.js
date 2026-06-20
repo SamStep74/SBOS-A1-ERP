@@ -76,7 +76,8 @@ const STRINGS = Object.freeze({
     'dashboard.section.topCustomers': 'Լավագույն հաճախորդներ',
     'dashboard.section.vat': 'ԱԱՀ ամփոփում (տարեսկզբից)',
     'dashboard.meta.arAging': '{{date}} — չվճարված պարտքերը՝ ըստ ժամկետի բաց թողման օրերի։',
-    'dashboard.meta.overdue': 'Վճարման ժամկետը լրացած հաշիվ-ապրանքագրերը ըստ ժամկետի բաց թողման օրերի (նվազման կարգով)։',
+    'dashboard.meta.overdue':
+      'Վճարման ժամկետը լրացած հաշիվ-ապրանքագրերը ըստ ժամկետի բաց թողման օրերի (նվազման կարգով)։',
     'dashboard.meta.monthly': '{{yearMonth}} — ժամանակահատվածի շրջանառություն և հավաքագրում։',
     'dashboard.meta.topCustomers': 'Ըստ ընդհանուր գանձված գումարի ընտրված ժամանակահատվածում։',
     'dashboard.meta.vat': '{{since}} → {{until}} — ելքային ԱԱՀ-ի ամփոփում։',
@@ -241,7 +242,8 @@ const STRINGS = Object.freeze({
     'dashboard.section.topCustomers': 'Топ клиентов',
     'dashboard.section.vat': 'Сводка НДС (с начала года)',
     'dashboard.meta.arAging': '{{date}} — неоплаченная задолженность по дням просрочки.',
-    'dashboard.meta.overdue': 'Просроченные счета, отсортированные по дням просрочки (по убыванию).',
+    'dashboard.meta.overdue':
+      'Просроченные счета, отсортированные по дням просрочки (по убыванию).',
     'dashboard.meta.monthly': '{{yearMonth}} — выручка и сборы за период.',
     'dashboard.meta.topCustomers': 'По общей выставленной сумме в выбранном окне.',
     'dashboard.meta.vat': '{{since}} → {{until}} — сводка исходящего НДС.',

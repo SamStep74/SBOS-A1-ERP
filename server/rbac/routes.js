@@ -32,7 +32,7 @@
 //   - app.authenticate preHandler in place (sets request.user)
 //   - this.db (sqlite) on the app instance OR injected via opts.db
 import { PERMISSIONS, PERMISSIONS_VERSION, getDefinition, byCategory } from './permissions.js';
-import { ROLES, validateCustomRole, getRole, listRoleIds } from './roles.js';
+import { ROLES, validateCustomRole, listRoleIds } from './roles.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
 import {
   ROLE_MATRIX,
@@ -175,7 +175,9 @@ function registerRbacRoutes(app, opts = {}) {
         `SELECT id, label, description, parent, is_system,
                 app_set_json, mfa_required, session_hard_limit_minutes, can_be_impersonated
            FROM sbos_rbac_roles
-          WHERE id NOT IN (${listRoleIds().map(() => '?').join(',')})`,
+          WHERE id NOT IN (${listRoleIds()
+            .map(() => '?')
+            .join(',')})`,
       )
       .all(...listRoleIds());
     for (const row of customRows) {
