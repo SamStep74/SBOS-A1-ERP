@@ -11,12 +11,60 @@ that mirror the local `npm run <script>` experience.
 | Step                          | Local command                       | Why it's in CI                                                                                              |
 | ----------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | **Lint**                      | `npm run lint`                      | ESLint 9 with `typescript-eslint` strict-type-checked. Catches dead imports, `no-undef` (e.g. `fetch`), and style regressions before they reach review. |
+| **Lint check (new only)**     | `npm run lint:check-new`            | Baseline-aware lint: compares the current tree's lint output against `.lint-baseline.json` and fails ONLY on violations not already in the baseline. Lets `npm run lint` stay the canonical "clean tree" gate while giving the orchestrator a way to gate PRs against pre-existing drift across multi-worker integrations. See [Lint baseline mechanism](#lint-baseline-mechanism) below. |
 | **Typecheck**                 | `npm run typecheck`                 | Runs `tsc --noEmit` if any `.ts` source exists; otherwise the wrapper script (`scripts/typecheck-if-typescript.mjs`) prints a one-line "no TS source, skipping" message and exits 0. The repo is currently JS-only; the stub stays so the moment a `.ts` file lands, the gate activates automatically. |
 | **Format check**              | `npm run format`                    | `prettier --check .` on the whole tree. Drift in `*.test.{js,ts}` is pre-existing (see [Open issues](#open-issues)); the step is `continue-on-error: true` so production-code drift still fails the run, but a test-only cosmetic mismatch is non-blocking. |
 | **Open-core boundary check**  | `npm run boundary-check`            | The single most important guardrail. See [The open-core boundary contract](#the-open-core-boundary-contract) below. |
 | **Test**                      | `npm test`                          | `node --test` across the whole repo, 4-way concurrency, 60s per-test timeout. 776 tests at the time of writing. |
 | **l10n-am audit (CLI)**       | `node server/l10n-am/audit-cli.js --quiet` | Static audit of the l10n-am catalog: missing-key detection, hardcoded Armenian strings, parity vs. the i18n catalog. |
 | **All-in-one check**          | `npm run check`                     | Chains `lint && typecheck && test && boundary-check` exactly as a developer would run it locally. Catches ordering / shell-only bugs that the per-step view hides. |
+
+## Lint baseline mechanism
+
+When a multi-worker integration merges branches that were each clean in
+isolation, the merged tree often surfaces lint warnings from workers
+that haven't yet swept their code (unused imports, `console.log` in
+boot scripts, etc.). A strict `npm run lint` on the merged tree fails
+red, even though no single PR introduced the failures.
+
+The baseline mechanism captures the *current* set of lint findings
+into a checked-in file, `.lint-baseline.json`, and lets
+`npm run lint:check-new` fail only on violations NOT already in the
+baseline:
+
+```bash
+# 1. Capture the current lint state. Run this on the integrated
+#    tree after a merge wave is complete, then commit the result.
+npm run lint:baseline         # writes .lint-baseline.json
+
+# 2. In a follow-up PR (e.g. a worker that's still cleaning up), the
+#    baseline-aware gate runs in CI and fails ONLY if the PR
+#    introduces NEW violations.
+npm run lint:check-new        # exits 1 only on new violations
+
+# 3. Dry-run reports the delta without exiting non-zero — useful for
+#    the smoke tests under test/ci-scripts.test.mjs and for
+#    "how bad is this PR?" reports.
+node scripts/lint-baseline.mjs check --dry-run
+```
+
+The baseline is a sorted JSON array of `(filePath, ruleId, line,
+column)` tuples. We intentionally drop the message text so the
+baseline survives message-text reflows. A "new violation" is one
+where the tuple is not in the baseline — severity is baseline-recorded
+too so a future `--max-warnings 0` policy is a one-line update, not a
+baseline re-capture.
+
+**When to refresh the baseline:** after a wave of pre-existing-drift
+cleanup PRs land and `npm run lint` is green on the integrated tree.
+Treat the baseline as a moving target, not a permanent contract.
+
+**What the baseline is NOT:** the baseline does NOT silence
+`scripts/check-open-core-boundary-contract.mjs` or `npm test`. The
+boundary check has its own allowlist (intentional, tiny, and
+documented), and the test runner is unrelated to lint. If you want a
+test-tree lint suppression, edit `eslint.config.js` (see the test
+override block) — don't add it to the baseline.
 
 ## The open-core boundary contract
 
@@ -69,6 +117,7 @@ strip the brand from the test fixture / comment.
    ```bash
    npm ci
    npm run lint                  # → Lint
+   npm run lint:check-new        # → Lint check (new only)
    npm run typecheck             # → Typecheck
    npm run format                # → Format check
    npm run boundary-check        # → Open-core boundary check
@@ -82,6 +131,7 @@ strip the brand from the test fixture / comment.
    ```bash
    npm run lint:fix              # eslint . --fix
    npm run format:fix            # prettier --write .
+   npm run lint:baseline         # refresh .lint-baseline.json after a wave of cleanup
    ```
 
 4. **For ESLint** the error message includes the file path and a rule

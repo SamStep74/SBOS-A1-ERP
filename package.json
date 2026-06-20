@@ -13,6 +13,8 @@
     "test:unit": "node --test --test-concurrency=4 --test-timeout=60000",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "lint:baseline": "node scripts/lint-baseline.mjs create",
+    "lint:check-new": "node scripts/lint-baseline.mjs check",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
     "typecheck": "node scripts/typecheck-if-typescript.mjs",

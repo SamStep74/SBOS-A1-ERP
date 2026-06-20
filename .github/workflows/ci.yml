@@ -38,6 +38,16 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Lint check (new violations only)
+        # Baseline-aware lint: compares the current tree's lint output
+        # against the checked-in `.lint-baseline.json` and fails ONLY on
+        # violations not already in the baseline. Lets the strict
+        # `npm run lint` step above remain the canonical "clean tree"
+        # gate while giving the orchestrator a way to gate new PRs
+        # against pre-existing drift across multi-worker integrations.
+        # See scripts/lint-baseline.mjs and docs/CI.md for the contract.
+        run: npm run lint:check-new
+
       - name: Typecheck
         run: npm run typecheck
 

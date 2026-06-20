@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -103,4 +103,48 @@ test('smoke: `npm run boundary-check` script is wired in package.json', () => {
     'package.json `check` script must chain lint, typecheck, test, and boundary-check',
   );
   assert.equal(pkg.scripts['lint:fix'], 'eslint . --fix');
+});
+
+test('smoke: lint-baseline script runs in --dry-run mode without modifying the baseline', () => {
+  // The lint-baseline script's `check --dry-run` is the canonical
+  // "report what would fail, exit 0" path. The smoke test pins two
+  // things: (1) the script can start and read the baseline, (2) it
+  // exits 0 in dry-run even when there are lint findings to report,
+  // so CI's per-step `lint:check-new` is the only thing that decides
+  // red/green (the dry-run path is for diagnostic dashboards).
+  const baselineFile = resolve(repoRoot, '.lint-baseline.json');
+  assert.ok(existsSync(baselineFile), 'baseline file must exist (created on first commit)');
+  const before = readFileSync(baselineFile, 'utf8');
+  const result = runScript(['scripts/lint-baseline.mjs', 'check', '--dry-run']);
+  assert.equal(result.status, 0, `stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
+  assert.match(result.stdout, /baseline_records=/);
+  assert.match(result.stdout, /dry_run=1/);
+  const after = readFileSync(baselineFile, 'utf8');
+  assert.equal(after, before, 'dry-run must NOT mutate the baseline file');
+});
+
+test('smoke: lint-baseline script `show` subcommand prints the baseline summary', () => {
+  // Sanity check for the human-facing summary path. If `show` ever
+  // throws or returns garbage, a developer running `npm run lint:baseline`
+  // followed by `git diff .lint-baseline.json` won't be able to tell
+  // whether their refresh was successful.
+  const result = runScript(['scripts/lint-baseline.mjs', 'show']);
+  assert.equal(result.status, 0, `stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
+  assert.match(result.stdout, /baseline_records=\d+/);
+});
+
+test('smoke: lint-baseline is wired in package.json with create + check subcommands', () => {
+  // Regression guard for the script wiring — same shape as the
+  // boundary-check wiring guard above, but for the baseline script.
+  const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
+  assert.equal(
+    pkg.scripts['lint:baseline'],
+    'node scripts/lint-baseline.mjs create',
+    '`lint:baseline` script must capture the current lint state into .lint-baseline.json',
+  );
+  assert.equal(
+    pkg.scripts['lint:check-new'],
+    'node scripts/lint-baseline.mjs check',
+    '`lint:check-new` script must run the baseline-aware check (CI uses this)',
+  );
 });
