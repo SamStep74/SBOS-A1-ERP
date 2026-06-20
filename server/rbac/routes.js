@@ -19,6 +19,11 @@
 //   POST   /api/rbac/users/:userId/permission-sets    (security.role.assign)
 //   DELETE /api/rbac/users/:userId/permission-sets/:ps (security.role.assign)
 //   POST   /api/rbac/users/:userId/role               (security.role.assign)
+//   GET    /api/rbac/profiles                          (security.profile.read)
+//   POST   /api/rbac/profiles                          (security.profile.create)
+//   GET    /api/rbac/profiles/:id                      (security.profile.read)
+//   POST   /api/rbac/profiles/:id/apply                (security.profile.assign)
+//   DELETE /api/rbac/profiles/:id                      (security.profile.delete)
 //   GET    /api/rbac/field-policies                   (security.permission_set.read)
 //   PUT    /api/rbac/field-policies/:path             (security.permission_set.update)
 //   GET    /api/rbac/record-rules                     (security.permission_set.read)
@@ -41,6 +46,16 @@ import {
   getParentChain,
 } from './roleMatrix.js';
 import { requirePermFastify, requireAnyPerm, resolveEffectivePermissions } from './guards.js';
+import {
+  createProfile,
+  getProfile,
+  listProfiles,
+  applyProfile,
+  deleteProfile,
+  ValueError as ProfileValueError,
+  NotFoundError as ProfileNotFoundError,
+  ConflictError as ProfileConflictError,
+} from './profiles.js';
 function registerRbacRoutes(app, opts = {}) {
   const db = opts.db || app.db;
   if (!db) {
@@ -175,7 +190,9 @@ function registerRbacRoutes(app, opts = {}) {
         `SELECT id, label, description, parent, is_system,
                 app_set_json, mfa_required, session_hard_limit_minutes, can_be_impersonated
            FROM sbos_rbac_roles
-          WHERE id NOT IN (${listRoleIds().map(() => '?').join(',')})`,
+          WHERE id NOT IN (${listRoleIds()
+            .map(() => '?')
+            .join(',')})`,
       )
       .all(...listRoleIds());
     for (const row of customRows) {
@@ -414,6 +431,99 @@ function registerRbacRoutes(app, opts = {}) {
         /* users.role may not exist in some deployments */
       }
       return reply.code(201).send({ userId, roleId });
+    },
+  );
+
+  // ───── Profiles (Phase 0.3) ─────
+  //
+  // Reusable role + permission-set bundles for new users. Catalog stays
+  // in code; profiles are tenant data. The CRUD surface mirrors
+  // /api/rbac/roles so admins have a consistent mental model.
+
+  // Translate a profile-domain error into the right HTTP status. Kept
+  // here (not in profiles.js) so the module stays HTTP-agnostic.
+  function replyProfileError(reply, err) {
+    if (err instanceof ProfileConflictError) {
+      return reply
+        .code(err.statusCode || 409)
+        .send({ error: 'profile_in_use', message: err.message });
+    }
+    if (err instanceof ProfileNotFoundError) {
+      return reply
+        .code(err.statusCode || 404)
+        .send({ error: 'profile_not_found', message: err.message });
+    }
+    if (err instanceof ProfileValueError) {
+      return reply
+        .code(err.statusCode || 400)
+        .send({ error: 'invalid_profile', message: err.message });
+    }
+    // Unknown error type — let Fastify's default error handler turn it
+    // into a 500. Re-throwing keeps the error class and stack trace intact.
+    throw err;
+  }
+
+  app.get(
+    '/api/rbac/profiles',
+    { preHandler: requirePermFastify('security.profile.read') },
+    async () => {
+      return { items: listProfiles(db) };
+    },
+  );
+
+  app.post(
+    '/api/rbac/profiles',
+    { preHandler: requirePermFastify('security.profile.create') },
+    async (request, reply) => {
+      try {
+        const row = createProfile(db, {
+          ...(request.body || {}),
+          created_by: request.user ? String(request.user.id || '') : null,
+        });
+        return reply.code(201).send(row);
+      } catch (err) {
+        return replyProfileError(reply, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/rbac/profiles/:id',
+    { preHandler: requirePermFastify('security.profile.read') },
+    async (request, reply) => {
+      const row = getProfile(db, request.params.id);
+      if (!row) return reply.code(404).send({ error: 'profile_not_found' });
+      return row;
+    },
+  );
+
+  app.post(
+    '/api/rbac/profiles/:id/apply',
+    { preHandler: requirePermFastify('security.profile.assign') },
+    async (request, reply) => {
+      try {
+        const userId = Number((request.body || {}).userId);
+        if (!Number.isInteger(userId) || userId <= 0) {
+          return reply.code(400).send({ error: 'invalid_user_id' });
+        }
+        const result = applyProfile(db, request.params.id, userId);
+        return reply.code(200).send(result);
+      } catch (err) {
+        return replyProfileError(reply, err);
+      }
+    },
+  );
+
+  app.delete(
+    '/api/rbac/profiles/:id',
+    { preHandler: requirePermFastify('security.profile.delete') },
+    async (request, reply) => {
+      try {
+        deleteProfile(db, request.params.id);
+        return reply.code(204).send();
+      } catch (err) {
+        return replyProfileError(reply, err);
+      }
     },
   );
 

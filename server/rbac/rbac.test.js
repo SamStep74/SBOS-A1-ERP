@@ -1711,8 +1711,12 @@ describe('Wave 7.2 — role catalog helpers (roles.js + roleMatrix.js coverage)'
   test('validateCustomRole: rejects empty / malformed id', () => {
     assert.throws(() => validateCustomRole({ id: '' }), { statusCode: 400 });
     assert.throws(() => validateCustomRole({ id: '   ' }), { statusCode: 400 });
-    assert.throws(() => validateCustomRole({ id: '1abc' }), /must start with a letter/, { statusCode: 400 });
-    assert.throws(() => validateCustomRole({ id: 'a'.repeat(81) }), /must start with a letter/, { statusCode: 400 });
+    assert.throws(() => validateCustomRole({ id: '1abc' }), /must start with a letter/, {
+      statusCode: 400,
+    });
+    assert.throws(() => validateCustomRole({ id: 'a'.repeat(81) }), /must start with a letter/, {
+      statusCode: 400,
+    });
   });
 
   test('validateCustomRole: rejects id that collides with a system role', () => {
@@ -1720,21 +1724,16 @@ describe('Wave 7.2 — role catalog helpers (roles.js + roleMatrix.js coverage)'
   });
 
   test('validateCustomRole: rejects unknown parent', () => {
-    assert.throws(
-      () => validateCustomRole({ id: 'CustomRole1', parent: 'NoSuchRole' }),
-      { statusCode: 400 },
-    );
-    assert.throws(
-      () => validateCustomRole({ id: 'CustomRole2', parent: '' }),
-      { statusCode: 400 },
-    );
+    assert.throws(() => validateCustomRole({ id: 'CustomRole1', parent: 'NoSuchRole' }), {
+      statusCode: 400,
+    });
+    assert.throws(() => validateCustomRole({ id: 'CustomRole2', parent: '' }), { statusCode: 400 });
   });
 
   test('validateCustomRole: rejects invalid app id in appSet', () => {
-    assert.throws(
-      () => validateCustomRole({ id: 'CR3', parent: 'Admin', appSet: [123] }),
-      { statusCode: 400 },
-    );
+    assert.throws(() => validateCustomRole({ id: 'CR3', parent: 'Admin', appSet: [123] }), {
+      statusCode: 400,
+    });
     assert.throws(
       () => validateCustomRole({ id: 'CR4', parent: 'Admin', appSet: ['x'.repeat(41)] }),
       { statusCode: 400 },
@@ -1849,7 +1848,10 @@ describe('Wave 7.2 — permissions.js: requireKey helper', () => {
   test('requireKey: throws on unknown key with statusCode 500 + code unknown_permission', () => {
     assert.throws(
       () => requireKey('not.a.real.permission'),
-      (err) => err.statusCode === 500 && err.code === 'unknown_permission' && /Unknown permission/.test(err.message),
+      (err) =>
+        err.statusCode === 500 &&
+        err.code === 'unknown_permission' &&
+        /Unknown permission/.test(err.message),
     );
   });
 });
@@ -1869,20 +1871,18 @@ describe('Wave 10 — rbac/guards.js branch coverage', () => {
     const user = { id: 1, role: 'SalesRep', permission_set_ids: [] };
     assert.throws(
       () => requireAllPermissions(user, ['crm.lead.read', 'system.org.update']),
-      (err) => err.statusCode === 403
-        && err.code === 'rbac_forbidden'
-        && Array.isArray(err.requiredAll)
-        && err.requiredAll.includes('system.org.update'),
+      (err) =>
+        err.statusCode === 403 &&
+        err.code === 'rbac_forbidden' &&
+        Array.isArray(err.requiredAll) &&
+        err.requiredAll.includes('system.org.update'),
     );
   });
 
   test('requireAllPermissions: returns undefined when all perms are held', () => {
     const user = { id: 1, role: 'Owner', permission_set_ids: [] };
     // Owner should have everything.
-    assert.equal(
-      requireAllPermissions(user, ['crm.lead.read', 'crm.lead.delete']),
-      undefined,
-    );
+    assert.equal(requireAllPermissions(user, ['crm.lead.read', 'crm.lead.delete']), undefined);
   });
 
   test('checkSensitivity: returns no_user when user is null/undefined', () => {
@@ -1958,10 +1958,7 @@ describe('Wave 10 — rbac/guards.js branch coverage', () => {
 
   test('requirePermissionWithSensitivity: returns undefined on success', () => {
     const user = { id: 1, role: 'Owner', permission_set_ids: [] };
-    assert.equal(
-      requirePermissionWithSensitivity(user, 'crm.lead.read'),
-      undefined,
-    );
+    assert.equal(requirePermissionWithSensitivity(user, 'crm.lead.read'), undefined);
   });
 
   test('recordLevelClause: team scope returns the team-membership SQL', () => {
@@ -2077,7 +2074,10 @@ describe('Wave 10 — rbac/guards.js branch coverage', () => {
 
   test('canImpersonate: returns false for unknown actor + target', () => {
     // canImpersonate has multiple branches — exercise a few.
-    assert.equal(canImpersonate({ id: 9999, role: 'NoSuchRole' }, { id: 1, role: 'NoSuchRole' }), false);
+    assert.equal(
+      canImpersonate({ id: 9999, role: 'NoSuchRole' }, { id: 1, role: 'NoSuchRole' }),
+      false,
+    );
   });
 });
 
@@ -2208,14 +2208,26 @@ function makeReply() {
   //   r.body;    // → the response payload
   const r = { status: 200, body: undefined, sent: false };
   r.reply = {
-    code(c) { r.status = c; return r.reply; },
-    status(c) { r.status = c; return r.reply; },
-    send(b) { r.body = b; r.sent = true; return r.reply; },
+    code(c) {
+      r.status = c;
+      return r.reply;
+    },
+    status(c) {
+      r.status = c;
+      return r.reply;
+    },
+    send(b) {
+      r.body = b;
+      r.sent = true;
+      return r.reply;
+    },
     // Expose the closure's sent flag so dispatch can tell whether the
     // handler already called send(). Without this, dispatch would
     // re-send the handler's return value (which is the reply object
     // itself in Fastify's `return reply.send(x)` convention).
-    get sent() { return r.sent; },
+    get sent() {
+      return r.sent;
+    },
   };
   return r;
 }
@@ -2262,8 +2274,10 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     // composite PK AND the trailing comma on the previous column line.
     const rbacDir = dirname(fileURLToPath(import.meta.url));
     const schemaPath = join(rbacDir, 'schema.sql');
-    const schema = readFileSync(schemaPath, 'utf8')
-      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    const schema = readFileSync(schemaPath, 'utf8').replace(
+      /,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m,
+      '\n  );',
+    );
     db.exec(schema);
     // The RBAC routes also reference a `users` table that lives outside
     // the rbac schema (it's a tenant-level system table). Create the
@@ -2306,6 +2320,11 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
       'POST /api/rbac/users/:userId/permission-sets',
       'DELETE /api/rbac/users/:userId/permission-sets/:ps',
       'POST /api/rbac/users/:userId/role',
+      'GET /api/rbac/profiles',
+      'POST /api/rbac/profiles',
+      'GET /api/rbac/profiles/:id',
+      'POST /api/rbac/profiles/:id/apply',
+      'DELETE /api/rbac/profiles/:id',
       'GET /api/rbac/field-policies',
       'PUT /api/rbac/field-policies/:path(*)',
       'GET /api/rbac/record-rules',
@@ -2362,7 +2381,13 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
 
     const knownReq = { user: { id: 1 }, params: {} };
     const knownReply = makeReply();
-    await dispatch(routes, 'GET', `/api/rbac/permission-sets/${firstId}`, knownReq, knownReply.reply);
+    await dispatch(
+      routes,
+      'GET',
+      `/api/rbac/permission-sets/${firstId}`,
+      knownReq,
+      knownReply.reply,
+    );
     assert.equal(knownReply.status, 200);
     assert.equal(knownReply.body.id, firstId);
 
@@ -2383,10 +2408,16 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
   test('GET /api/rbac/roles includes custom roles created via POST', async () => {
     // Create a custom role and verify it appears in the list response
     // (the wave 8 fix extends GET to read DB rows too).
-    await dispatch(routes, 'POST', '/api/rbac/roles', {
-      user: { id: 1 },
-      body: { id: 'CustomListMe', parent: 'Admin', appSet: ['finance'] },
-    }, makeReply().reply);
+    await dispatch(
+      routes,
+      'POST',
+      '/api/rbac/roles',
+      {
+        user: { id: 1 },
+        body: { id: 'CustomListMe', parent: 'Admin', appSet: ['finance'] },
+      },
+      makeReply().reply,
+    );
     const r = makeReply();
     await dispatch(routes, 'GET', '/api/rbac/roles', { user: { id: 1 } }, r.reply);
     const found = r.body.items.find((it) => it.id === 'CustomListMe');
@@ -2394,7 +2425,11 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     assert.equal(found.isSystem, false);
     assert.equal(found.parent, 'Admin');
     assert.deepEqual(found.appSet, ['finance']);
-    assert.deepEqual(found.defaultPermissionSets, [], 'custom roles have no default PSs in the role matrix');
+    assert.deepEqual(
+      found.defaultPermissionSets,
+      [],
+      'custom roles have no default PSs in the role matrix',
+    );
   });
 
   test('POST /api/rbac/roles creates a custom role and returns 201', async () => {
@@ -2407,7 +2442,9 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     assert.equal(r.status, 201);
     assert.equal(r.body.id, 'CFOLead2');
     assert.equal(r.body.parent, 'Admin');
-    const row = db.prepare(`SELECT id, parent, is_system FROM sbos_rbac_roles WHERE id = ?`).get('CFOLead2');
+    const row = db
+      .prepare(`SELECT id, parent, is_system FROM sbos_rbac_roles WHERE id = ?`)
+      .get('CFOLead2');
     assert.equal(row.id, 'CFOLead2');
     assert.equal(row.parent, 'Admin');
     assert.equal(row.is_system, 0, 'custom roles are not system');
@@ -2455,7 +2492,11 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     };
     await dispatch(routes, 'POST', '/api/rbac/roles', createReq, makeReply().reply);
 
-    const patchReq = { user: { id: 1 }, params: {}, body: { description: 'X', appSet: ['finance', 'rpt'] } };
+    const patchReq = {
+      user: { id: 1 },
+      params: {},
+      body: { description: 'X', appSet: ['finance', 'rpt'] },
+    };
     const r = makeReply();
     await dispatch(routes, 'PATCH', '/api/rbac/roles/CustomSkip', patchReq, r.reply);
     assert.equal(r.status, 200);
@@ -2488,10 +2529,16 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
 
   test('DELETE /api/rbac/roles/:id — unused custom role is deletable via DB fallback', async () => {
     // After the wave 8 fix, loadRole() also fixes DELETE.
-    await dispatch(routes, 'POST', '/api/rbac/roles', {
-      user: { id: 1 },
-      body: { id: 'ToDelete2', parent: 'Admin' },
-    }, makeReply().reply);
+    await dispatch(
+      routes,
+      'POST',
+      '/api/rbac/roles',
+      {
+        user: { id: 1 },
+        body: { id: 'ToDelete2', parent: 'Admin' },
+      },
+      makeReply().reply,
+    );
     // Confirm the row is there pre-delete.
     assert.ok(db.prepare(`SELECT id FROM sbos_rbac_roles WHERE id = ?`).get('ToDelete2'));
     const req = { user: { id: 1 }, params: {} };
@@ -2506,12 +2553,19 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
   });
 
   test('DELETE /api/rbac/roles/:id — in-use custom role returns 409 role_in_use', async () => {
-    await dispatch(routes, 'POST', '/api/rbac/roles', {
-      user: { id: 1 },
-      body: { id: 'InUse2', parent: 'Admin' },
-    }, makeReply().reply);
-    db.prepare(`INSERT INTO sbos_rbac_user_roles (user_id, role_id, tenant_id) VALUES (?, ?, ?)`)
-      .run(1, 'InUse2', 0);
+    await dispatch(
+      routes,
+      'POST',
+      '/api/rbac/roles',
+      {
+        user: { id: 1 },
+        body: { id: 'InUse2', parent: 'Admin' },
+      },
+      makeReply().reply,
+    );
+    db.prepare(
+      `INSERT INTO sbos_rbac_user_roles (user_id, role_id, tenant_id) VALUES (?, ?, ?)`,
+    ).run(1, 'InUse2', 0);
     const req = { user: { id: 1 }, params: {} };
     const r = makeReply();
     await dispatch(routes, 'DELETE', '/api/rbac/roles/InUse2', req, r.reply);
@@ -2586,9 +2640,17 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     const listReply = makeReply();
     await dispatch(routes, 'GET', '/api/rbac/permission-sets', listReq, listReply.reply);
     const psId = listReply.body.items[0].id;
-    await dispatch(routes, 'POST', '/api/rbac/users/1/permission-sets', {
-      user: { id: 1 }, params: {}, body: { permissionSetId: psId },
-    }, makeReply().reply);
+    await dispatch(
+      routes,
+      'POST',
+      '/api/rbac/users/1/permission-sets',
+      {
+        user: { id: 1 },
+        params: {},
+        body: { permissionSetId: psId },
+      },
+      makeReply().reply,
+    );
     // Then delete
     const req = { user: { id: 1 }, params: {} };
     const r = makeReply();
@@ -2737,10 +2799,179 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
 
   test('registerRbacRoutes throws if neither opts.db nor app.db is provided', () => {
     const m = makeMockApp();
-    assert.throws(
-      () => registerRbacRoutes(m.app),
-      /rbac routes require db/,
+    assert.throws(() => registerRbacRoutes(m.app), /rbac routes require db/);
+  });
+
+  // ───── Profile routes (Phase 0.3) ─────
+  //
+  // Endpoints:
+  //   GET    /api/rbac/profiles
+  //   POST   /api/rbac/profiles
+  //   GET    /api/rbac/profiles/:id
+  //   POST   /api/rbac/profiles/:id/apply   (body: { userId })
+  //   DELETE /api/rbac/profiles/:id
+
+  test('GET /api/rbac/profiles — empty list when no profiles defined', async () => {
+    const req = { user: { id: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/profiles', req, r.reply);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.items, []);
+  });
+
+  test('POST /api/rbac/profiles — creates a profile and returns 201', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: {
+        id: 'SalesFloor',
+        label: 'Sales Floor',
+        description: 'Default for new sales reps',
+        role_id: 'SalesRep',
+        permission_set_ids: ['UserAdmin'],
+      },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles', req, r.reply);
+    assert.equal(r.status, 201);
+    assert.equal(r.body.id, 'SalesFloor');
+    assert.equal(r.body.role_id, 'SalesRep');
+    assert.deepEqual(r.body.permission_set_ids, ['UserAdmin']);
+    // Persisted in DB.
+    const row = db
+      .prepare(`SELECT id, role_id, permission_set_ids_json FROM sbos_rbac_profiles WHERE id = ?`)
+      .get('SalesFloor');
+    assert.equal(row.role_id, 'SalesRep');
+    assert.deepEqual(JSON.parse(row.permission_set_ids_json), ['UserAdmin']);
+  });
+
+  test('POST /api/rbac/profiles — invalid id returns 400 invalid_profile', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { id: '1bad', label: 'x', role_id: 'SalesRep', permission_set_ids: [] },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_profile');
+  });
+
+  test('POST /api/rbac/profiles — unknown role returns 400', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { id: 'BadRole', label: 'x', role_id: 'NoSuchRole', permission_set_ids: [] },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_profile');
+  });
+
+  test('POST /api/rbac/profiles — unknown PS returns 400', async () => {
+    const req = {
+      user: { id: 1 },
+      params: {},
+      body: { id: 'BadPS', label: 'x', role_id: 'SalesRep', permission_set_ids: ['NoSuchPS'] },
+    };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_profile');
+  });
+
+  test('GET /api/rbac/profiles — lists all created profiles', async () => {
+    // Create a second profile (POST /api/rbac/profiles is exercised above
+    // and added SalesFloor).
+    await dispatch(
+      routes,
+      'POST',
+      '/api/rbac/profiles',
+      {
+        user: { id: 1 },
+        params: {},
+        body: {
+          id: 'FinanceLead',
+          label: 'Finance Lead',
+          role_id: 'Accountant',
+          permission_set_ids: [],
+        },
+      },
+      makeReply().reply,
     );
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/profiles', { user: { id: 1 } }, r.reply);
+    const ids = r.body.items.map((it) => it.id);
+    assert.ok(ids.includes('SalesFloor'));
+    assert.ok(ids.includes('FinanceLead'));
+  });
+
+  test('GET /api/rbac/profiles/:id — known id returns the row, unknown returns 404', async () => {
+    const known = makeReply();
+    await dispatch(
+      routes,
+      'GET',
+      '/api/rbac/profiles/SalesFloor',
+      { user: { id: 1 }, params: {} },
+      known.reply,
+    );
+    assert.equal(known.status, 200);
+    assert.equal(known.body.id, 'SalesFloor');
+
+    const miss = makeReply();
+    await dispatch(
+      routes,
+      'GET',
+      '/api/rbac/profiles/NoSuchProfile',
+      { user: { id: 1 }, params: {} },
+      miss.reply,
+    );
+    assert.equal(miss.status, 404);
+    assert.equal(miss.body.error, 'profile_not_found');
+  });
+
+  test('POST /api/rbac/profiles/:id/apply — assigns role + PSs and returns the summary', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { userId: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles/SalesFloor/apply', req, r.reply);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.role_assigned, true);
+    assert.ok(Array.isArray(r.body.ps_assigned));
+  });
+
+  test('POST /api/rbac/profiles/:id/apply — unknown profile returns 404', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { userId: 1 } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles/NoSuchProfile/apply', req, r.reply);
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'profile_not_found');
+  });
+
+  test('POST /api/rbac/profiles/:id/apply — invalid userId returns 400', async () => {
+    const req = { user: { id: 1 }, params: {}, body: { userId: 'abc' } };
+    const r = makeReply();
+    await dispatch(routes, 'POST', '/api/rbac/profiles/SalesFloor/apply', req, r.reply);
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_user_id');
+  });
+
+  test('DELETE /api/rbac/profiles/:id — refuses with 409 profile_in_use when a user has the profile', async () => {
+    // SalesFloor was applied to user 1 in the prior test. Deleting
+    // must now refuse.
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/profiles/SalesFloor', req, r.reply);
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'profile_in_use');
+  });
+
+  test('DELETE /api/rbac/profiles/:id — succeeds (204) when no user has the profile', async () => {
+    // FinanceLead was never applied. Deleting should succeed.
+    const req = { user: { id: 1 }, params: {} };
+    const r = makeReply();
+    await dispatch(routes, 'DELETE', '/api/rbac/profiles/FinanceLead', req, r.reply);
+    assert.equal(r.status, 204);
   });
 });
 
@@ -2751,8 +2982,10 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     db = new DatabaseSync(':memory:');
     db.exec('PRAGMA foreign_keys = ON');
     const rbacDir = dirname(fileURLToPath(import.meta.url));
-    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
-      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8').replace(
+      /,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m,
+      '\n  );',
+    );
     db.exec(schema);
   });
 
@@ -2767,9 +3000,13 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
   });
 
   test('seedRBAC: rows are actually present in the DB', async () => {
-    const perms = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    const perms = db
+      .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`)
+      .get();
     const roles = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_roles WHERE tenant_id = 0`).get();
-    const sets = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permission_sets WHERE tenant_id = 0`).get();
+    const sets = db
+      .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permission_sets WHERE tenant_id = 0`)
+      .get();
     const links = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_role_permission_sets`).get();
     assert.equal(perms.c, listKeys().length);
     assert.equal(roles.c, listRoleIds().length);
@@ -2779,7 +3016,9 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
 
   test('seedRBAC: is idempotent — re-running does not duplicate or error', async () => {
     await seedRBAC(db);
-    const perms = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    const perms = db
+      .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`)
+      .get();
     assert.equal(perms.c, listKeys().length);
   });
 
@@ -2794,13 +3033,19 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     // First seed.
     await seedRBAC(db);
     // Insert a junk row to prove force wipes it.
-    db.prepare(`INSERT INTO sbos_rbac_permissions (key, tenant_id, category, sensitivity, label, description) VALUES ('junk.x', 0, 'crm', 'low', 'junk', '')`).run();
-    const before = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    db.prepare(
+      `INSERT INTO sbos_rbac_permissions (key, tenant_id, category, sensitivity, label, description) VALUES ('junk.x', 0, 'crm', 'low', 'junk', '')`,
+    ).run();
+    const before = db
+      .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`)
+      .get();
     assert.ok(before.c > listKeys().length, 'junk row inflated the count');
     // Force re-seed.
     const v = await seedRBAC(db, { force: true });
     assert.equal(v.permissions_seeded, listKeys().length, 'junk gone, catalog restored');
-    const after = db.prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`).get();
+    const after = db
+      .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0`)
+      .get();
     assert.equal(after.c, listKeys().length);
   });
 
@@ -2877,10 +3122,7 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     // The first guard in seedRBAC rejects anything that doesn't look
     // like a sqlite driver. Closes the line-165..167 branch.
     const fake = { transaction: () => () => null, query: () => null };
-    await assert.rejects(
-      () => seedRBAC(fake),
-      /must be a sqlite-compatible instance/,
-    );
+    await assert.rejects(() => seedRBAC(fake), /must be a sqlite-compatible instance/);
   });
 
   test('seedRBAC: pg-style db with beginTransaction/commitTransaction path', async () => {
@@ -2892,8 +3134,10 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     // Load the schema so seed INSERTs work. The schema has a redundant
     // composite PK on sbos_rbac_approvals that node:sqlite refuses.
     const rbacDir = dirname(fileURLToPath(import.meta.url));
-    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
-      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8').replace(
+      /,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m,
+      '\n  );',
+    );
     real.exec(schema);
 
     // Mock db: a sqlite-compatible facade that wraps the real handle,
@@ -2907,15 +3151,31 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
       prepare(sql) {
         const stmt = real.prepare(sql);
         return {
-          run(...args) { return stmt.run(...args); },
-          get(...args) { return stmt.get(...args); },
-          all(...args) { return stmt.all(...args); },
+          run(...args) {
+            return stmt.run(...args);
+          },
+          get(...args) {
+            return stmt.get(...args);
+          },
+          all(...args) {
+            return stmt.all(...args);
+          },
         };
       },
-      exec(sql) { real.exec(sql); statements.push(sql); },
-      beginTransaction() { inTx = true; },
-      commitTransaction() { inTx = false; },
-      rollbackTransaction() { inTx = false; txRolledBack = true; },
+      exec(sql) {
+        real.exec(sql);
+        statements.push(sql);
+      },
+      beginTransaction() {
+        inTx = true;
+      },
+      commitTransaction() {
+        inTx = false;
+      },
+      rollbackTransaction() {
+        inTx = false;
+        txRolledBack = true;
+      },
     };
     // Force runInTx to take the beginTransaction branch by removing .transaction.
     // Our db has no .transaction method, so it falls through to beginTransaction.
@@ -2943,8 +3203,12 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
             }
             return stmt.run(...args);
           },
-          get(...args) { return stmt.get(...args); },
-          all(...args) { return stmt.all(...args); },
+          get(...args) {
+            return stmt.get(...args);
+          },
+          all(...args) {
+            return stmt.all(...args);
+          },
         };
       },
     };
@@ -2959,8 +3223,10 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     // .transaction should use that, not the beginTransaction path.
     const real = new DatabaseSync(':memory:');
     const rbacDir = dirname(fileURLToPath(import.meta.url));
-    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8')
-      .replace(/,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m, '\n  );');
+    const schema = readFileSync(join(rbacDir, 'schema.sql'), 'utf8').replace(
+      /,\s*--[^\n]*\n\s*PRIMARY KEY \(id, tenant_id\)\n\s*\);/m,
+      '\n  );',
+    );
     real.exec(schema);
 
     let txUsed = false;
@@ -2969,17 +3235,27 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
       prepare(sql) {
         const stmt = real.prepare(sql);
         return {
-          run(...args) { return stmt.run(...args); },
-          get(...args) { return stmt.get(...args); },
-          all(...args) { return stmt.all(...args); },
+          run(...args) {
+            return stmt.run(...args);
+          },
+          get(...args) {
+            return stmt.get(...args);
+          },
+          all(...args) {
+            return stmt.all(...args);
+          },
         };
       },
-      exec(sql) { real.exec(sql); },
+      exec(sql) {
+        real.exec(sql);
+      },
       transaction(fn) {
         txUsed = true;
         return () => fn();
       },
-      beginTransaction() { beginTxUsed = true; },
+      beginTransaction() {
+        beginTxUsed = true;
+      },
     };
     const v = await seedRBAC(db);
     assert.equal(v.permissions_seeded, listKeys().length);
