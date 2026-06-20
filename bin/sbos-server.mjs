@@ -9,15 +9,16 @@
 //   SBOS_DB=./finance.db node bin/sbos-server.mjs
 //   PORT=8080 node bin/sbos-server.mjs
 //
-// The CLI intentionally applies only the schema required for the
-// boot path (finance tables + RBAC schema + users stub). Task 2 will
-// add tenant + migration management.
+// The CLI applies the full finance migration set (via applyMigrations)
+// plus the RBAC schema, so any new migration the team ships is picked
+// up on the next boot without a code change here.
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { start } from '../server/server.js';
 import { makePgAdapter } from '../server/db/realDb.js';
+import { applyMigrations } from '../server/finance/migrate.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Resolve DB path + apply schemas.
@@ -40,53 +41,19 @@ function ensureDir(filePath) {
   }
 }
 
-function applySchemas(sqliteDb) {
-  // finance schema (mirror what dashboard.test.js' makeRealDb does).
-  sqliteDb.exec('ATTACH DATABASE ":memory:" AS finance');
-  sqliteDb.exec('PRAGMA foreign_keys = OFF');
-  sqliteDb.exec(`
-    CREATE TABLE IF NOT EXISTS finance.customers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL, hvhh TEXT, address TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS finance.invoices (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      customer_id INTEGER NOT NULL,
-      invoice_number TEXT NOT NULL UNIQUE,
-      issue_date TEXT NOT NULL,
-      due_date TEXT NOT NULL,
-      subtotal_amd INTEGER NOT NULL,
-      vat_amd INTEGER NOT NULL DEFAULT 0,
-      total_amd INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'draft'
-        CHECK (status IN ('draft','sent','paid','overdue','void')),
-      notes TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      sent_at TEXT, voided_at TEXT, void_reason TEXT
-    );
-    CREATE TABLE IF NOT EXISTS finance.invoice_lines (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      invoice_id INTEGER NOT NULL,
-      description TEXT NOT NULL,
-      quantity REAL NOT NULL, unit_price_amd INTEGER NOT NULL,
-      line_total_amd INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS finance.payments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      invoice_id INTEGER NOT NULL,
-      paid_at TEXT NOT NULL DEFAULT (datetime('now')),
-      amount_amd INTEGER NOT NULL, method TEXT NOT NULL DEFAULT 'bank_transfer',
-      reference TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS finance.vat_carry_forward (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      balance_amd INTEGER NOT NULL DEFAULT 0,
-      as_of_period TEXT
-    );
-  `);
+async function applySchemas(sqliteDb) {
+  // finance schema — use the real migration runner so all 5 migrations
+  // (0001..0005) are applied. The runner is idempotent and records each
+  // migration in finance.migration_history.
+  await applyMigrations(sqliteDb, {
+    migrationsDir: join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      'server',
+      'finance',
+      'migrations',
+    ),
+  });
 
   // users table (the auth middleware + rbac routes need it).
   sqliteDb.exec(`
@@ -112,7 +79,7 @@ function applySchemas(sqliteDb) {
   }
 
   // RBAC schema. The canonical schema has a redundant composite PK on
-  // sbos_rbac_approvals that node:sqlite rejects; strip it the same
+  // sbos_rbac_approvals that node:sqlite refuses; strip it the same
   // way rbac.test.js does.
   const here = dirname(fileURLToPath(import.meta.url));
   const rbacSchemaPath = join(here, '..', 'server', 'rbac', 'schema.sql');
@@ -133,12 +100,12 @@ async function main() {
   const dbPath = resolveDbPath();
   ensureDir(dbPath);
 
-  console.log(`[sbos-server] opening DB at ${dbPath}`);
+  console.warn(`[sbos-server] opening DB at ${dbPath}`);
   const sqliteDb = new DatabaseSync(dbPath);
-  applySchemas(sqliteDb);
+  await applySchemas(sqliteDb);
 
   const pgAdapter = makePgAdapter(sqliteDb);
-  console.log(`[sbos-server] listening on http://${host}:${port}`);
+  console.warn(`[sbos-server] listening on http://${host}:${port}`);
   const server = await start({
     db: sqliteDb,
     pgAdapter,
@@ -150,7 +117,7 @@ async function main() {
   // Graceful shutdown.
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => {
-      console.log(`[sbos-server] ${sig} received, shutting down`);
+      console.warn(`[sbos-server] ${sig} received, shutting down`);
       server.close(() => process.exit(0));
     });
   }

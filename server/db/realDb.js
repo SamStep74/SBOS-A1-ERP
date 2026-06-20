@@ -10,6 +10,9 @@
 //
 //   $N            → ?
 //   ::TYPE        → (stripped)
+//   finance.X     → X     (sqlite has no schema namespaces; the
+//                          migration runner strips the prefix on
+//                          CREATE, so reads must match)
 //
 // The adapter is intentionally tiny: it covers the SQL surface the
 // pure functions emit (SELECT/INSERT/UPDATE/DELETE, parameterized).
@@ -31,6 +34,16 @@ export function createRealDb(dbPath) {
   return { sqlite, pgAdapter: makePgAdapter(sqlite) };
 }
 
+// Strip the `finance.` schema prefix from a SQL string. Word-bounded
+// so `'finance.x'` and `comments finance.x` are NOT touched. Exported
+// so tests can assert on the transform.
+export function stripFinanceSchemaPrefix(sql) {
+  return String(sql).replace(
+    /(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g,
+    '$1',
+  );
+}
+
 /**
  * Wrap an existing DatabaseSync in a pg-style adapter.
  *
@@ -45,7 +58,8 @@ export function makePgAdapter(sqliteDb) {
     async query(sql, params = []) {
       const translated = String(sql)
         .replace(/\$\d+/g, '?')
-        .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '');
+        .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '')
+        .replace(/(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g, '$1');
       const stmt = sqliteDb.prepare(translated);
       // SELECTs return rows; non-SELECTs return [] (the production
       // finance modules own the write-path branches — same rule as

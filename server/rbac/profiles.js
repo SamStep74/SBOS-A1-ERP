@@ -19,8 +19,8 @@
 // sbos_rbac_user_profile table is bookkeeping for the 409 check in
 // deleteProfile.
 
-import { ROLES, roleExists } from './roles.js';
-import { PERMISSION_SETS, getPermissionSet } from './matrix.js';
+import { roleExists } from './roles.js';
+import { getPermissionSet } from './matrix.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Custom error classes — callers can match by class, not just message.

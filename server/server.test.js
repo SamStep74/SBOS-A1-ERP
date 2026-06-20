@@ -15,6 +15,13 @@
 //
 // TDD: this file is the RED commit. server/index.js, server/server.js,
 // and server/finance/routes.js are added in the GREEN commit.
+//
+// Note on the schema: the canonical finance migrations under
+// server/finance/migrations/ are Postgres-targeted (BIGSERIAL,
+// TIMESTAMPTZ, CREATE SCHEMA). The production boot path uses
+// applyMigrations() against a real pg instance. The test harness
+// uses a sqlite-friendly schema mirror — same shape, sqlite types —
+// matching the pattern in server/finance/dashboard.test.js.
 
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,15 +42,22 @@ function makeFinanceDb() {
   const sqliteDb = new DatabaseSync(join(dir, 'finance.db'));
   sqliteDb.exec('ATTACH DATABASE ":memory:" AS finance');
   sqliteDb.exec('PRAGMA foreign_keys = OFF');
+  // Mirror of the production finance schema with sqlite-friendly
+  // types. Mirrors the migration chain (0001..0005) by combining
+  // the column sets rather than running the Postgres-targeted
+  // migration files. Keep in sync with
+  // server/finance/migrations/0001..0005 when adding columns.
   sqliteDb.exec(`
     CREATE TABLE finance.customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       name TEXT NOT NULL, hvhh TEXT, address TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE finance.invoices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       customer_id INTEGER NOT NULL,
       invoice_number TEXT NOT NULL UNIQUE,
       issue_date TEXT NOT NULL,
@@ -54,12 +68,13 @@ function makeFinanceDb() {
       status TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft','sent','paid','overdue','void')),
       notes TEXT,
+      sent_at TEXT, voided_at TEXT, void_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      sent_at TEXT, voided_at TEXT, void_reason TEXT
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE finance.invoice_lines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       invoice_id INTEGER NOT NULL,
       description TEXT NOT NULL,
       quantity REAL NOT NULL, unit_price_amd INTEGER NOT NULL,
@@ -67,13 +82,25 @@ function makeFinanceDb() {
     );
     CREATE TABLE finance.payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       invoice_id INTEGER NOT NULL,
       paid_at TEXT NOT NULL DEFAULT (datetime('now')),
       amount_amd INTEGER NOT NULL, method TEXT NOT NULL DEFAULT 'bank_transfer',
       reference TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE finance.invoice_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      invoice_id INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('writeoff','refund','correction')),
+      amount_amd INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      approved_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE TABLE finance.vat_carry_forward (
       id INTEGER PRIMARY KEY CHECK (id = 1),
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       balance_amd INTEGER NOT NULL DEFAULT 0,
       as_of_period TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
