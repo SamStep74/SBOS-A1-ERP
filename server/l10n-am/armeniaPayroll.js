@@ -11,6 +11,7 @@
 // Pure functions, no I/O.
 
 import { roundAmd } from './localization.js';
+import { stampDutyFor } from './stampDuty.js';
 
 const INCOME_TAX_RATE = 20; // flat %, since 1 Jan 2023
 
@@ -18,12 +19,6 @@ const INCOME_TAX_RATE = 20; // flat %, since 1 Jan 2023
 const PENSION_LOW_CEIL = 500000;
 const PENSION_CAP_THRESHOLD = 1125000;
 const PENSION_CAP = 87500;
-
-// 2026: the military stamp duty was REVISED to a flat 1,000/mo for all employees,
-// replacing the former 1,500/3,000/5,500/8,500 salary tiers. No upper bracket exists.
-// Sources: profin.am ("set at 1,000 instead of 1,500/3,000/5,500/8,500"); armenian-lawyer.com
-// payroll guide. (The previous 15,000 high bracket had no source basis — it over-withheld.)
-const STAMP_DUTY_2026 = 1000;
 
 // Health insurance (2026): full monthly premium is 10,800. The 200,001–500,000 band
 // nets to 4,800 after the ~6,000 state reimbursement granted to NON-social-package
@@ -48,9 +43,15 @@ function pension(gross) {
   return PENSION_CAP;
 }
 
+// Military stamp duty (2026 flat revision) is now sourced from the canonical
+// stampDutyFor('payroll', gross) — which also applies the documented
+// exemption for payroll strictly below the AMD 75,000 minimum-wage threshold.
+// This is a behavior CHANGE vs. the pre-refactor local constant: amounts in
+// 1..74,999 AMD now return 0 (per the law) instead of 1,000. The cross-module
+// contract test in stampDuty.test.js ("composes_with_payroll") pins the
+// delegation so a future drift between the two modules fails loud.
 function stampDuty(gross) {
-  const g = roundAmd(gross);
-  return g <= 0 ? 0 : STAMP_DUTY_2026;
+  return stampDutyFor('payroll', gross);
 }
 
 function healthInsurance(gross) {
