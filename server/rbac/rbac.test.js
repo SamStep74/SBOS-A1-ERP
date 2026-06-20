@@ -2082,6 +2082,73 @@ describe('Wave 10 — rbac/guards.js branch coverage', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────
+// Wave 11 — close the rbac/matrix.js 33% function-coverage gap.
+// matrix.js exports listPermissionSetIds, getPermissionSet, and
+// isSystemPermissionSet, but no test exercised them. None of those
+// are imported by routes.js either (routes.js uses PERMISSION_SETS
+// directly), so the only way to cover them is direct unit tests.
+// ────────────────────────────────────────────────────────────────────────
+
+import {
+  PERMISSION_SETS_VERSION,
+  listPermissionSetIds,
+  getPermissionSet,
+  isSystemPermissionSet,
+} from './matrix.js';
+
+describe('Wave 11 — rbac/matrix.js exports', () => {
+  test('PERMISSION_SETS_VERSION: is a positive integer', () => {
+    assert.equal(typeof PERMISSION_SETS_VERSION, 'number');
+    assert.ok(Number.isInteger(PERMISSION_SETS_VERSION));
+    assert.ok(PERMISSION_SETS_VERSION > 0);
+  });
+
+  test('PERMISSION_SETS: frozen map keyed by PS id', () => {
+    assert.equal(typeof PERMISSION_SETS, 'object');
+    assert.ok(Object.isFrozen(PERMISSION_SETS), 'PERMISSION_SETS is frozen');
+    assert.ok(Object.keys(PERMISSION_SETS).length > 0, 'has at least one PS');
+    for (const [id, ps] of Object.entries(PERMISSION_SETS)) {
+      assert.equal(typeof id, 'string');
+      assert.equal(typeof ps.label, 'string', `PS ${id} has a label`);
+      assert.ok(Array.isArray(ps.permissions), `PS ${id} has a permissions array`);
+      // Every permission in the PS must be a known catalog key.
+      for (const k of ps.permissions) {
+        assert.ok(PERMISSIONS[k], `PS ${id} references a known perm: ${k}`);
+      }
+    }
+  });
+
+  test('listPermissionSetIds: returns a frozen array of PS ids', () => {
+    const ids = listPermissionSetIds();
+    assert.ok(Array.isArray(ids));
+    assert.ok(Object.isFrozen(ids), 'frozen');
+    assert.equal(ids.length, Object.keys(PERMISSION_SETS).length);
+    for (const id of ids) {
+      assert.ok(PERMISSION_SETS[id], `${id} is in PERMISSION_SETS`);
+    }
+  });
+
+  test('getPermissionSet: known + unknown ids', () => {
+    const ids = listPermissionSetIds();
+    const firstId = ids[0];
+    const ps = getPermissionSet(firstId);
+    assert.ok(ps, 'known id returns the definition');
+    assert.equal(ps.id, firstId);
+    assert.equal(getPermissionSet('NoSuchPS'), null, 'unknown returns null');
+  });
+
+  test('isSystemPermissionSet: system PS vs custom vs unknown', () => {
+    // Most catalog PSes are system. Pick the first one — it should
+    // be isSystem. Then assert an unknown PS returns false.
+    const ids = listPermissionSetIds();
+    const firstId = ids[0];
+    assert.equal(isSystemPermissionSet(firstId), true, 'first PS is a system PS');
+    assert.equal(isSystemPermissionSet('NoSuchPS'), false, 'unknown id returns false');
+    assert.equal(isSystemPermissionSet(undefined), false, 'undefined returns false');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
 // Wave 8 — close the rbac/routes.js (8% stmt) + rbac/seed.js (14.83% stmt)
 // coverage gaps.
 //
