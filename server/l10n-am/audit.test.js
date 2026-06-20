@@ -9,8 +9,24 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { auditAll, auditCatalog, auditSource, auditUnusedKeys } from './audit.js';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  auditAll,
+  auditCatalog,
+  auditSource,
+  auditUnusedKeys,
+  findHardcodedRates,
+  findEvalLike,
+  findStringConcatSql,
+} from './audit.js';
 import { STRINGS, LOCALES } from './i18n.js';
+
+// Helper: make an isolated scratch directory for filesystem-scanner tests.
+function makeScratchDir(prefix = 'audit-test-') {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
 
 describe('auditCatalog', () => {
   test('every key in the real catalog exists in every locale — current repo is balanced', () => {
@@ -244,5 +260,325 @@ describe('auditUnusedKeys', () => {
     });
     assert.equal(result.issues.length, 1);
     assert.equal(result.issues[0].key, 'only.in.test');
+  });
+});
+
+// ---- findHardcodedRates ----------------------------------------------------
+//
+// Walks rootDir for .js files (excluding *.test.js) and reports any numeric
+// literal >= 0.01 that sits in a "rate-shaped" context: the line contains
+// `rate` / `percent`, or we're inside a `RATES = { ... }` object literal.
+// Tests below use isolated tmpdirs so the live l10n-am tree is never scanned.
+
+describe('findHardcodedRates', () => {
+  test('empty directory returns []', async () => {
+    const dir = makeScratchDir();
+    try {
+      const out = await findHardcodedRates(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags a single rate literal on a rate-shaped line', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'vat.js'),
+        [
+          "export const VAT_RATE = 0.20;",
+        ].join('\n'),
+      );
+      const out = await findHardcodedRates(dir);
+      assert.equal(out.length, 1);
+      assert.equal(out[0].value, 0.20);
+      assert.match(out[0].file, /vat\.js$/);
+      assert.equal(out[0].line, 1);
+      assert.ok(out[0].column >= 1);
+      assert.match(out[0].context, /VAT_RATE/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags literals inside a RATES object (multi-line block)', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'rates.js'),
+        [
+          "const RATES = {",
+          "  income: 0.05,",
+          "  vat: 0.20,",
+          "  pension: 0.10,",
+          "};",
+        ].join('\n'),
+      );
+      const out = await findHardcodedRates(dir);
+      assert.equal(out.length, 3);
+      const values = out.map((r) => r.value).sort();
+      assert.deepEqual(values, [0.05, 0.10, 0.20]);
+      // Lines are 2, 3, 4 (the opening line { is line 1, } is line 5)
+      assert.deepEqual(
+        out.map((r) => r.line).sort((a, b) => a - b),
+        [2, 3, 4],
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('finds rates across multiple files in the tree', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(join(dir, 'a.js'), "const rateA = 0.10;");
+      mkdirSync(join(dir, 'sub'));
+      writeFileSync(join(dir, 'sub', 'b.js'), "const rateB = 0.15;");
+      const out = await findHardcodedRates(dir);
+      assert.equal(out.length, 2);
+      const files = out.map((r) => r.file).sort();
+      assert.equal(files[0].endsWith('a.js'), true);
+      assert.equal(files[1].endsWith('b.js'), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('excludes *.test.js so test fixtures do not flag', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(join(dir, 'real.js'), "const rate = 0.20;");          // flagged
+      writeFileSync(join(dir, 'real.test.js'), "const rate = 0.99;");     // NOT flagged (test)
+      const out = await findHardcodedRates(dir);
+      assert.equal(out.length, 1);
+      assert.match(out[0].file, /real\.js$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not flag literals below 0.01 even on rate-shaped lines', async () => {
+    const dir = makeScratchDir();
+    try {
+      // 0.001 is below the rate threshold; 'count' is not rate-shaped.
+      writeFileSync(
+        join(dir, 'tiny.js'),
+        [
+          "const rate = 0.001;",          // 0.001 < 0.01 → ignored (under threshold)
+          "const count = 10;",            // 'count' has no rate identifier → ignored
+          "const factor = 0.5;",          // no rate identifier → ignored
+        ].join('\n'),
+      );
+      const out = await findHardcodedRates(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not throw on a binary file or unreadable file', async () => {
+    const dir = makeScratchDir();
+    try {
+      // Write a "binary" .js file (non-UTF8 bytes). The scanner must skip it
+      // gracefully — no throw, no spurious match.
+      const binary = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x42, 0x0a, 0x00]);
+      writeFileSync(join(dir, 'garbage.js'), binary);
+      const out = await findHardcodedRates(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('skips node_modules and .git directories', async () => {
+    const dir = makeScratchDir();
+    try {
+      mkdirSync(join(dir, 'node_modules'));
+      writeFileSync(join(dir, 'node_modules', 'lib.js'), "const rate = 0.5;");
+      mkdirSync(join(dir, '.git'));
+      writeFileSync(join(dir, '.git', 'hook.js'), "const rate = 0.5;");
+      writeFileSync(join(dir, 'real.js'), "const rate = 0.20;");
+      const out = await findHardcodedRates(dir);
+      assert.equal(out.length, 1);
+      assert.match(out[0].file, /real\.js$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- findEvalLike ----------------------------------------------------------
+//
+// Walks rootDir for .js files and reports `eval(` and `new Function(` call
+// sites. Both patterns are code-injection red flags; this is an operator-
+// visible warning, not a parser-accurate lint.
+
+describe('findEvalLike', () => {
+  test('empty directory returns []', async () => {
+    const dir = makeScratchDir();
+    try {
+      const out = await findEvalLike(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags eval() call sites', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'danger.js'),
+        [
+          "function run(src) {",
+          "  return eval(src);",
+          "}",
+        ].join('\n'),
+      );
+      const out = await findEvalLike(dir);
+      assert.equal(out.length, 1);
+      assert.equal(out[0].kind, 'eval-call');
+      assert.equal(out[0].line, 2);
+      assert.match(out[0].file, /danger\.js$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags new Function() call sites', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'ctor.js'),
+        "const fn = new Function('a', 'return a + 1');",
+      );
+      const out = await findEvalLike(dir);
+      assert.equal(out.length, 1);
+      assert.equal(out[0].kind, 'new-function');
+      assert.equal(out[0].line, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags both kinds across multiple files', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(join(dir, 'a.js'), "eval('1+1');");
+      writeFileSync(join(dir, 'b.js'), "new Function('return 1')();");
+      writeFileSync(join(dir, 'c.js'), "const x = 1; // safe");
+      const out = await findEvalLike(dir);
+      assert.equal(out.length, 2);
+      const kinds = out.map((r) => r.kind).sort();
+      assert.deepEqual(kinds, ['eval-call', 'new-function']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not throw on a binary file', async () => {
+    const dir = makeScratchDir();
+    try {
+      const binary = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x42, 0x0a, 0x00]);
+      writeFileSync(join(dir, 'garbage.js'), binary);
+      const out = await findEvalLike(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- findStringConcatSql ---------------------------------------------------
+//
+// Walks rootDir for .js files (excluding *.test.js) and reports lines that
+// look like a SQL keyword followed by string-concat (`+`). Single-line match
+// — multi-line SQL builders do not concatenate on a single line, so they are
+// not flagged (and that is by design).
+
+describe('findStringConcatSql', () => {
+  test('empty directory returns []', async () => {
+    const dir = makeScratchDir();
+    try {
+      const out = await findStringConcatSql(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags SELECT ... + concat', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'q.js'),
+        "const q = 'SELECT * FROM users WHERE id = ' + userId;",
+      );
+      const out = await findStringConcatSql(dir);
+      assert.equal(out.length, 1);
+      assert.equal(out[0].pattern, 'select-+');
+      assert.equal(out[0].line, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags INSERT/UPDATE/DELETE concat variants', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(
+        join(dir, 'q.js'),
+        [
+          "const a = 'INSERT INTO t VALUES (' + id + ')';",
+          "const b = 'UPDATE t SET x = ' + v + ' WHERE id = ' + id;",
+          "const c = 'DELETE FROM t WHERE id = ' + id;",
+        ].join('\n'),
+      );
+      const out = await findStringConcatSql(dir);
+      assert.equal(out.length, 3);
+      const patterns = out.map((r) => r.pattern).sort();
+      assert.deepEqual(patterns, ['delete-+', 'insert-+', 'update-+']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('flags multiple matches across multiple files', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(join(dir, 'a.js'), "const x = 'SELECT 1' + n;");
+      mkdirSync(join(dir, 'sub'));
+      writeFileSync(join(dir, 'sub', 'b.js'), "const y = 'UPDATE t SET x = ' + v;");
+      const out = await findStringConcatSql(dir);
+      assert.equal(out.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('excludes *.test.js (tests use fake SQL strings legitimately)', async () => {
+    const dir = makeScratchDir();
+    try {
+      writeFileSync(join(dir, 'real.js'), "const x = 'SELECT 1' + n;");          // flagged
+      writeFileSync(join(dir, 'real.test.js'), "const x = 'SELECT 1' + n;");      // NOT flagged
+      const out = await findStringConcatSql(dir);
+      assert.equal(out.length, 1);
+      assert.match(out[0].file, /real\.js$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not throw on a binary file', async () => {
+    const dir = makeScratchDir();
+    try {
+      const binary = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x42, 0x0a, 0x00]);
+      writeFileSync(join(dir, 'garbage.js'), binary);
+      const out = await findStringConcatSql(dir);
+      assert.deepEqual(out, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
