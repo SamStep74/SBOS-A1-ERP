@@ -89,3 +89,65 @@ test('i18n: every locale has the same set of keys (no drift between languages)',
     assert.deepEqual(extra, [], `locale has extra keys: ${extra.join(', ')}`);
   }
 });
+
+test('i18n: dashboard keys exist in all 3 locales and interpolate vars', () => {
+  // The CFO dashboard relies on these keys. Catalog must be complete
+  // in every locale; partial coverage would produce a mix of languages
+  // in the rendered page.
+  const dashboardKeys = [
+    'dashboard.title',
+    'dashboard.asOf',
+    'dashboard.generatedAt',
+    'dashboard.section.arAging',
+    'dashboard.section.overdue',
+    'dashboard.section.monthly',
+    'dashboard.section.topCustomers',
+    'dashboard.section.vat',
+    'dashboard.meta.arAging',
+    'dashboard.meta.overdue',
+    'dashboard.meta.monthly',
+    'dashboard.meta.topCustomers',
+    'dashboard.meta.vat',
+    'dashboard.empty.overdue',
+    'dashboard.empty.topCustomers',
+    'dashboard.bucket.0_30',
+    'dashboard.bucket.31_60',
+    'dashboard.bucket.61_90',
+    'dashboard.bucket.90_plus',
+    'dashboard.bucket.total',
+    'dashboard.th.invoiceNumber',
+    'dashboard.th.customer',
+    'dashboard.th.balance',
+    'dashboard.th.daysOverdue',
+    'dashboard.th.invoiced',
+    'dashboard.th.collected',
+    'dashboard.th.outstanding',
+    'dashboard.th.invoices',
+    'dashboard.th.paid',
+    'dashboard.th.collectionRate',
+    'dashboard.th.hvhh',
+    'dashboard.th.billed',
+    'dashboard.th.paidAmount',
+    'dashboard.th.invoiceCount',
+    'dashboard.th.vatInvoiced',
+    'dashboard.th.vatPaid',
+    'dashboard.th.netVatPosition',
+  ];
+  for (const k of dashboardKeys) {
+    for (const loc of LOCALES) {
+      const v = t(loc, k);
+      assert.ok(v && !v.startsWith('[[missing:'), `${loc} missing key ${k}`);
+    }
+  }
+  // Var interpolation: dashboard.section.overdue uses {{n}}.
+  assert.equal(t('en', 'dashboard.section.overdue', { n: 5 }), 'Overdue Invoices (top 5)');
+  assert.equal(t('hy', 'dashboard.section.overdue', { n: 5 }), 'Վճարման ժամկետը լրացած հաշիվ-ապրանքագրեր (top 5)');
+  assert.equal(t('ru', 'dashboard.section.overdue', { n: 5 }), 'Просроченные счета (top 5)');
+  // Var interpolation: dashboard.asOf uses {{date}}.
+  assert.equal(t('en', 'dashboard.asOf', { date: '2026-06-20' }), 'As of 2026-06-20');
+  // Var interpolation: dashboard.meta.vat uses {{since}} and {{until}}.
+  assert.equal(
+    t('en', 'dashboard.meta.vat', { since: '2026-01-01', until: '2026-06-20' }),
+    '2026-01-01 → 2026-06-20 — output-VAT rollup.',
+  );
+});

@@ -176,7 +176,11 @@ export function auditCatalog({ strings = STRINGS, locales = LOCALES } = {}) {
  * @param {string[]}  [opts.locales] - locale codes, default LOCALES
  * @param {string[]}  [opts.files]   - explicit file list; skipped if not .js
  *                                      or if basename ends in .test.js
- * @param {string}    [opts.root]    - default walk root (this module's dir)
+ * @param {string}    [opts.root]    - default walk root (the parent
+ *                                      `server/` dir, so all module trees
+ *                                      are scanned — not just l10n-am)
+ * @param {string[]}  [opts.roots]   - alternative to `root`: walk multiple
+ *                                      directories (each one is recursed).
  * @param {Function}  [opts.readFile] - default node:fs readFileSync
  * @returns {{ issues: Array, tCallCount: number }}
  */
@@ -184,10 +188,23 @@ export function auditSource({
   strings = STRINGS,
   locales = LOCALES,
   files,
-  root = dirname(fileURLToPath(import.meta.url)),
+  root,
+  roots,
   readFile = (p) => readFileSync(p, 'utf8'),
 } = {}) {
-  const allCandidates = files ?? walkJsSources(root);
+  // Default root: parent of this module (server/), so all sibling
+  // modules (finance/, l10n-am/, future ones) are scanned together.
+  // WalkJsSources recurses through subdirs.
+  const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  let allCandidates;
+  if (files) {
+    allCandidates = files;
+  } else if (Array.isArray(roots) && roots.length > 0) {
+    allCandidates = [];
+    for (const r of roots) allCandidates.push(...walkJsSources(r));
+  } else {
+    allCandidates = walkJsSources(root ?? defaultRoot);
+  }
   // Defensive filter — even when the caller passes files, exclude tests
   // and non-js so the contract is "this function audits source, not tests".
   const fileList = allCandidates.filter((f) => {
@@ -245,7 +262,11 @@ export function auditSource({
  * @param {string[]}  [opts.locales] - locale codes, default LOCALES
  * @param {string[]}  [opts.files]   - explicit file list; skipped if not .js
  *                                      or if basename ends in .test.js
- * @param {string}    [opts.root]    - default walk root (this module's dir)
+ * @param {string}    [opts.root]    - default walk root (the parent
+ *                                      `server/` dir, so all module trees
+ *                                      are scanned — not just l10n-am)
+ * @param {string[]}  [opts.roots]   - alternative to `root`: walk multiple
+ *                                      directories (each one is recursed).
  * @param {Function}  [opts.readFile] - default node:fs readFileSync
  * @returns {{
  *   issues: Array,
@@ -258,10 +279,20 @@ export function auditUnusedKeys({
   strings = STRINGS,
   locales = LOCALES,
   files,
-  root = dirname(fileURLToPath(import.meta.url)),
+  root,
+  roots,
   readFile = (p) => readFileSync(p, 'utf8'),
 } = {}) {
-  const allCandidates = files ?? walkJsSources(root);
+  const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  let allCandidates;
+  if (files) {
+    allCandidates = files;
+  } else if (Array.isArray(roots) && roots.length > 0) {
+    allCandidates = [];
+    for (const r of roots) allCandidates.push(...walkJsSources(r));
+  } else {
+    allCandidates = walkJsSources(root ?? defaultRoot);
+  }
   // Same defensive filter as auditSource: this function audits production
   // source, never test files. A test.js that mentions a key does not
   // count as "consumer code uses this key".

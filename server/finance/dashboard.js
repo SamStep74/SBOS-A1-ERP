@@ -14,6 +14,10 @@
 // dependencies. Server-side rendering only. HTML-escaped at every
 // dynamic value (caller-supplied invoice_number, customer_name, etc. —
 // these flow from user-facing inputs).
+//
+// i18n: every user-facing string flows through t(locale, key, vars?)
+// from server/l10n-am/i18n.js. Pass opts.locale (default 'en') to switch
+// languages. The HTTP server reads ?lang=hy|ru|en from the query string.
 
 import { createServer } from 'node:http';
 import {
@@ -23,6 +27,7 @@ import {
   getTopCustomers,
   getVatSummary,
 } from './reports.js';
+import { t, DEFAULT_LOCALE, LOCALES } from '../l10n-am/i18n.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // HTML escaping — minimal but sufficient for the fields we render.
@@ -54,6 +59,14 @@ function fmtAmd(n) {
 function fmtPct(n) {
   const v = Number(n) || 0;
   return v.toFixed(1) + '%';
+}
+
+// Locale normalization — accept any case, validate against LOCALES, fall
+// back to DEFAULT_LOCALE. Returns the canonical lower-case locale.
+function resolveLocale(locale) {
+  if (typeof locale !== 'string') return DEFAULT_LOCALE;
+  const norm = locale.toLowerCase();
+  return LOCALES.includes(norm) ? norm : DEFAULT_LOCALE;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -89,25 +102,26 @@ const STYLES = `
 
 // ────────────────────────────────────────────────────────────────────────
 // Section renderers — one per report function. Each returns a string of
-// <section>...</section> HTML. The main page composes them.
+// <section>...</section> HTML. The main page composes them. Every
+// user-facing string is routed through t(locale, key, vars).
 // ────────────────────────────────────────────────────────────────────────
 
-function renderArAgingSection(ar) {
+function renderArAgingSection(locale, ar) {
   const b = ar.buckets || {};
   const cell = (key) => {
     const v = b[key] || { invoice_count: 0, amount_amd: 0 };
     return `<td class="num">${v.invoice_count} inv<br>${escapeHtml(fmtAmd(v.amount_amd))}</td>`;
   };
   return `
-  <h2>AR Aging</h2>
-  <p class="meta">${escapeHtml(ar.asOfDate)} — outstanding receivables by days past due.</p>
+  <h2>${t(locale, 'dashboard.section.arAging')}</h2>
+  <p class="meta">${t(locale, 'dashboard.meta.arAging', { date: ar.asOfDate })}</p>
   <table>
     <tr>
-      <th>0–30 days</th>
-      <th>31–60 days</th>
-      <th>61–90 days</th>
-      <th>90+ days</th>
-      <th>Total</th>
+      <th>${t(locale, 'dashboard.bucket.0_30')}</th>
+      <th>${t(locale, 'dashboard.bucket.31_60')}</th>
+      <th>${t(locale, 'dashboard.bucket.61_90')}</th>
+      <th>${t(locale, 'dashboard.bucket.90_plus')}</th>
+      <th>${t(locale, 'dashboard.bucket.total')}</th>
     </tr>
     <tr class="bucket-row">
       ${cell('0_30')}
@@ -120,22 +134,22 @@ function renderArAgingSection(ar) {
   `;
 }
 
-function renderOverdueSection(rows) {
+function renderOverdueSection(locale, rows) {
   if (!rows || rows.length === 0) {
     return `
-    <h2>Overdue Invoices (top ${rows?.length || 0})</h2>
-    <p class="empty">No overdue invoices. 🎉</p>
+    <h2>${t(locale, 'dashboard.section.overdue', { n: rows?.length || 0 })}</h2>
+    <p class="empty">${t(locale, 'dashboard.empty.overdue')}</p>
     `;
   }
   return `
-  <h2>Overdue Invoices (top ${rows.length})</h2>
-  <p class="meta">Past-due as of the report date, sorted by days overdue DESC.</p>
+  <h2>${t(locale, 'dashboard.section.overdue', { n: rows.length })}</h2>
+  <p class="meta">${t(locale, 'dashboard.meta.overdue')}</p>
   <table>
     <tr>
-      <th>Invoice #</th>
-      <th>Customer</th>
-      <th class="right">Balance</th>
-      <th class="right">Days overdue</th>
+      <th>${t(locale, 'dashboard.th.invoiceNumber')}</th>
+      <th>${t(locale, 'dashboard.th.customer')}</th>
+      <th class="right">${t(locale, 'dashboard.th.balance')}</th>
+      <th class="right">${t(locale, 'dashboard.th.daysOverdue')}</th>
     </tr>
     ${rows.map((r) => `
     <tr>
@@ -148,18 +162,18 @@ function renderOverdueSection(rows) {
   `;
 }
 
-function renderMonthlySection(m) {
+function renderMonthlySection(locale, m) {
   return `
-  <h2>This Month's Revenue</h2>
-  <p class="meta">${escapeHtml(m.year_month)} — period revenue and collection.</p>
+  <h2>${t(locale, 'dashboard.section.monthly')}</h2>
+  <p class="meta">${t(locale, 'dashboard.meta.monthly', { yearMonth: m.year_month })}</p>
   <table>
     <tr>
-      <th>Invoiced</th>
-      <th>Collected</th>
-      <th>Outstanding</th>
-      <th>Invoices</th>
-      <th>Paid</th>
-      <th>Collection rate</th>
+      <th>${t(locale, 'dashboard.th.invoiced')}</th>
+      <th>${t(locale, 'dashboard.th.collected')}</th>
+      <th>${t(locale, 'dashboard.th.outstanding')}</th>
+      <th>${t(locale, 'dashboard.th.invoices')}</th>
+      <th>${t(locale, 'dashboard.th.paid')}</th>
+      <th>${t(locale, 'dashboard.th.collectionRate')}</th>
     </tr>
     <tr>
       <td class="num">${escapeHtml(fmtAmd(m.invoiced_amd))}</td>
@@ -173,23 +187,23 @@ function renderMonthlySection(m) {
   `;
 }
 
-function renderTopCustomersSection(rows) {
+function renderTopCustomersSection(locale, rows) {
   if (!rows || rows.length === 0) {
     return `
-    <h2>Top Customers</h2>
-    <p class="empty">No customers in the selected window.</p>
+    <h2>${t(locale, 'dashboard.section.topCustomers')}</h2>
+    <p class="empty">${t(locale, 'dashboard.empty.topCustomers')}</p>
     `;
   }
   return `
-  <h2>Top Customers</h2>
-  <p class="meta">By gross billed amount in the selected window.</p>
+  <h2>${t(locale, 'dashboard.section.topCustomers')}</h2>
+  <p class="meta">${t(locale, 'dashboard.meta.topCustomers')}</p>
   <table>
     <tr>
-      <th>Customer</th>
-      <th>HVHH (tax ID)</th>
-      <th class="right">Billed</th>
-      <th class="right">Paid</th>
-      <th class="right">Invoices</th>
+      <th>${t(locale, 'dashboard.th.customer')}</th>
+      <th>${t(locale, 'dashboard.th.hvhh')}</th>
+      <th class="right">${t(locale, 'dashboard.th.billed')}</th>
+      <th class="right">${t(locale, 'dashboard.th.paidAmount')}</th>
+      <th class="right">${t(locale, 'dashboard.th.invoiceCount')}</th>
     </tr>
     ${rows.map((r) => `
     <tr>
@@ -203,16 +217,16 @@ function renderTopCustomersSection(rows) {
   `;
 }
 
-function renderVatSection(v) {
+function renderVatSection(locale, v) {
   return `
-  <h2>VAT Summary (YTD)</h2>
-  <p class="meta">${escapeHtml(v.since)} → ${escapeHtml(v.until)} — output-VAT rollup.</p>
+  <h2>${t(locale, 'dashboard.section.vat')}</h2>
+  <p class="meta">${t(locale, 'dashboard.meta.vat', { since: v.since, until: v.until })}</p>
   <table>
     <tr>
-      <th>VAT invoiced (output)</th>
-      <th>VAT paid (on collected invoices)</th>
-      <th>Net VAT position</th>
-      <th>Invoices</th>
+      <th>${t(locale, 'dashboard.th.vatInvoiced')}</th>
+      <th>${t(locale, 'dashboard.th.vatPaid')}</th>
+      <th>${t(locale, 'dashboard.th.netVatPosition')}</th>
+      <th>${t(locale, 'dashboard.th.invoiceCount')}</th>
     </tr>
     <tr>
       <td class="num">${escapeHtml(fmtAmd(v.vat_invoiced_amd))}</td>
@@ -236,12 +250,14 @@ function renderVatSection(v) {
  * @param {object} [opts]
  * @param {number} [opts.overdueLimit=10]  how many overdue invoices to show
  * @param {number} [opts.topCustomersLimit=10]
+ * @param {string} [opts.locale='en']  one of LOCALES (hy/en/ru); unknown values fall back to 'en'
  * @returns {Promise<string>}  the full HTML page
  */
 export async function renderDashboard(db, asOfDate, opts = {}) {
   if (typeof asOfDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
     throw new ValueError('asOfDate must be in YYYY-MM-DD format');
   }
+  const locale = resolveLocale(opts.locale);
   const overdueLimit = opts.overdueLimit ?? 10;
   const topLimit = opts.topCustomersLimit ?? 10;
   const yearMonth = asOfDate.substring(0, 7);
@@ -257,20 +273,20 @@ export async function renderDashboard(db, asOfDate, opts = {}) {
   ]);
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${escapeHtml(locale)}">
 <head>
   <meta charset="utf-8">
-  <title>CFO Dashboard — ${escapeHtml(asOfDate)}</title>
+  <title>${t(locale, 'dashboard.title')} — ${escapeHtml(asOfDate)}</title>
   <style>${STYLES}</style>
 </head>
 <body>
-  <h1>CFO Dashboard</h1>
-  <p class="meta">As of ${escapeHtml(asOfDate)} — generated ${escapeHtml(new Date().toISOString())}</p>
-  ${renderArAgingSection(arAging)}
-  ${renderOverdueSection(overdue)}
-  ${renderMonthlySection(monthRevenue)}
-  ${renderTopCustomersSection(topCustomers)}
-  ${renderVatSection(vatSummary)}
+  <h1>${t(locale, 'dashboard.title')}</h1>
+  <p class="meta">${t(locale, 'dashboard.asOf', { date: asOfDate })} — ${t(locale, 'dashboard.generatedAt', { date: new Date().toISOString() })}</p>
+  ${renderArAgingSection(locale, arAging)}
+  ${renderOverdueSection(locale, overdue)}
+  ${renderMonthlySection(locale, monthRevenue)}
+  ${renderTopCustomersSection(locale, topCustomers)}
+  ${renderVatSection(locale, vatSummary)}
 </body>
 </html>
 `;
@@ -289,10 +305,24 @@ export class ValueError extends Error {
   }
 }
 
+// Parse a URL like "/?lang=hy" — returns { locale: 'hy' } or {}.
+function parseLangFromUrl(url) {
+  try {
+    const u = new URL(url, 'http://localhost');
+    const lang = u.searchParams.get('lang');
+    if (typeof lang === 'string' && lang.length > 0) return { locale: lang };
+  } catch {
+    // fall through to empty result
+  }
+  return {};
+}
+
 /**
  * Start a minimal HTTP server that serves the dashboard at GET /.
  * @param {Db} db
- * @param {{ port?: number, host?: string }} [opts]
+ * @param {object} [opts]
+ * @param {number} [opts.port=3000]
+ * @param {string} [opts.host='127.0.0.1']
  * @returns {Promise<import('node:http').Server>}
  */
 export function serveDashboard(db, opts = {}) {
@@ -301,7 +331,7 @@ export function serveDashboard(db, opts = {}) {
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
       // Tiny router — only GET / is supported.
-      if (req.method !== 'GET' || req.url !== '/') {
+      if (req.method !== 'GET' || req.url !== '/' && !req.url.startsWith('/?')) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found\n');
         return;
@@ -309,7 +339,8 @@ export function serveDashboard(db, opts = {}) {
       try {
         // Default asOfDate to today in YYYY-MM-DD.
         const asOfDate = new Date().toISOString().substring(0, 10);
-        const html = await renderDashboard(db, asOfDate);
+        const queryOpts = parseLangFromUrl(req.url);
+        const html = await renderDashboard(db, asOfDate, queryOpts);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
       } catch (e) {

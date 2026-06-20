@@ -290,4 +290,95 @@ describe('CFO dashboard — server-rendered HTML view', () => {
       await new Promise((r) => server.close(r));
     }
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // i18n: locale option, query-string routing, fallback to default.
+  // ──────────────────────────────────────────────────────────────────────
+
+  test('14. renderDashboard: opts.locale="hy" returns Armenian headings', async () => {
+    const html = await renderDashboard(db, '2026-06-20', { locale: 'hy' });
+    assert.ok(html.includes('<html lang="hy">'), 'html lang attr set to hy');
+    assert.ok(html.includes('CFO Վահանակ'), 'title is Armenian');
+    assert.ok(html.includes('Դեբիտորական պարտքերի ժամկետներ'), 'AR Aging section is Armenian');
+    assert.ok(html.includes('ԱԱՀ ամփոփում'), 'VAT section is Armenian');
+    assert.ok(html.includes('0–30 օր'), 'bucket label is Armenian');
+  });
+
+  test('15. renderDashboard: opts.locale="ru" returns Russian headings', async () => {
+    const html = await renderDashboard(db, '2026-06-20', { locale: 'ru' });
+    assert.ok(html.includes('<html lang="ru">'), 'html lang attr set to ru');
+    assert.ok(html.includes('Панель CFO'), 'title is Russian');
+    assert.ok(html.includes('Дебиторская задолженность по срокам'), 'AR Aging is Russian');
+    assert.ok(html.includes('Сводка НДС'), 'VAT section is Russian');
+    assert.ok(html.includes('0–30 дней'), 'bucket label is Russian');
+  });
+
+  test('16. renderDashboard: opts.locale defaults to "en" (no locale = English)', async () => {
+    const html = await renderDashboard(db, '2026-06-20');
+    assert.ok(html.includes('<html lang="en">'), 'html lang attr defaults to en');
+    assert.ok(html.includes('CFO Dashboard'), 'title is English');
+    assert.ok(html.includes('AR Aging'), 'AR Aging is English');
+  });
+
+  test('17. renderDashboard: unknown locale falls back to "en"', async () => {
+    const html = await renderDashboard(db, '2026-06-20', { locale: 'fr' });
+    assert.ok(html.includes('<html lang="en">'), 'unknown locale falls back to en');
+    assert.ok(html.includes('CFO Dashboard'), 'headings are English');
+  });
+
+  test('18. renderDashboard: case-insensitive locale is normalized', async () => {
+    const html = await renderDashboard(db, '2026-06-20', { locale: 'HY' });
+    assert.ok(html.includes('<html lang="hy">'), 'HY normalizes to hy');
+    assert.ok(html.includes('CFO Վահանակ'), 'headings are Armenian');
+  });
+
+  test('19. serveDashboard: ?lang=hy query returns Armenian dashboard', async () => {
+    const server = await serveDashboard(db, { port: 0, host: '127.0.0.1' });
+    try {
+      const addr = server.address();
+      const res = await fetch(`http://${addr.address}:${addr.port}/?lang=hy`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('<html lang="hy">'), 'served as Armenian');
+      assert.ok(html.includes('CFO Վահանակ'), 'served title in Armenian');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  test('20. serveDashboard: ?lang=ru query returns Russian dashboard', async () => {
+    const server = await serveDashboard(db, { port: 0, host: '127.0.0.1' });
+    try {
+      const addr = server.address();
+      const res = await fetch(`http://${addr.address}:${addr.port}/?lang=ru`);
+      const html = await res.text();
+      assert.ok(html.includes('<html lang="ru">'), 'served as Russian');
+      assert.ok(html.includes('Панель CFO'), 'served title in Russian');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  test('21. serveDashboard: ?lang=xx (unknown) falls back to en', async () => {
+    const server = await serveDashboard(db, { port: 0, host: '127.0.0.1' });
+    try {
+      const addr = server.address();
+      const res = await fetch(`http://${addr.address}:${addr.port}/?lang=xx`);
+      const html = await res.text();
+      assert.ok(html.includes('<html lang="en">'), 'unknown lang falls back to en');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  test('22. dashboard still escapes user-supplied data (XSS safety preserved)', async () => {
+    const freshSqlite = makeRealDb();
+    const freshDb = makePgAdapter(freshSqlite);
+    const custId = await seedCustomer(freshDb, { name: '<script>alert(1)</script>', hvhh: '11111111' });
+    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'XSS-1', issue_date: '2026-06-01', due_date: '2026-07-01', total_amd: 50000, status: 'sent' });
+    const html = await renderDashboard(freshDb, '2026-06-20', { locale: 'hy' });
+    // User data must be escaped even when serving in Armenian.
+    assert.ok(!html.includes('<script>alert(1)</script>'), 'raw script tag must not appear');
+    assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'escaped form must appear');
+  });
 });
