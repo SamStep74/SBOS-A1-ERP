@@ -14,7 +14,7 @@ de-privatization.
 ## Current wave
 
 **Wave 0 (`sbos-a1-erp-bootstrap`)** is in progress. Four workers run in
-parallel: `repo-foundation`, `seed-from-a1-erp-hy`, `rbac-port`, `dmux-docs`.
+parallel: `repo-foundation`, `seed-docs`, `rbac-port`, `dmux-docs`.
 See [`PROJECT_STATUS.md`](./PROJECT_STATUS.md) for the live state and
 [`.orchestration/sbos-a1-erp-bootstrap.json`](../.orchestration/sbos-a1-erp-bootstrap.json)
 for the plan.
@@ -32,6 +32,11 @@ for the plan.
 5. `AGENTS.md` (in repo root, written by the `repo-foundation` worker in
    wave 0) — TDD, 80% coverage, immutable data, conventional commits, no
    hardcoded secrets, prefer porting A1-ERP-HY over net-new invention.
+6. [`sales/WALKTHROUGH.md`](./sales/WALKTHROUGH.md) — the 30-minute
+   operator walkthrough (prospect-facing). Pair with
+   [`sales/CONSOLE.md`](./sales/CONSOLE.md) for the expected on-screen
+   output. Useful even for non-sales contexts: it is the fastest tour
+   of the live state of the repo.
 
 ## Conventions
 
@@ -42,7 +47,7 @@ for the plan.
   `chore:`, `perf:`, `ci:`. Scope allowed: `feat(rbac): ...`.
 - **Node 20** — pinned in `.nvmrc`. `npm test` uses `node --test`.
 - **A1-ERP-HY is read-only.** Port with provenance. Brand-strip every file.
-  See [`DMUX_WORKFLOWS.md` §7](./DMUX_WORKFLOWS.md#7-a1-erp-hy--sbos-a1-erp-worker-convention).
+  See [`DMUX_WORKFLOWS.md` §7](./DMUX_WORKFLOWS.md#7-legacy-rd--sbos-a1-erp-worker-convention).
 - **Workers write to their worktree only.** Never edit files in the repo
   root, sibling worktrees, or another worker's `.orchestration/<session>/`
   directory.
