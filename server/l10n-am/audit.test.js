@@ -361,13 +361,13 @@ describe('findHardcodedRates', () => {
   test('does not flag literals below 0.01 even on rate-shaped lines', async () => {
     const dir = makeScratchDir();
     try {
-      // 0.001 is below the rate threshold AND not rate-shaped context.
+      // 0.001 is below the rate threshold; 'count' is not rate-shaped.
       writeFileSync(
         join(dir, 'tiny.js'),
         [
-          "const rate = 0.001;",          // 0.001 < 0.01 → ignored
-          "const retries = 10;",          // not rate context → ignored
-          "const factor = 0.5;",          // not rate context → ignored
+          "const rate = 0.001;",          // 0.001 < 0.01 → ignored (under threshold)
+          "const count = 10;",            // 'count' has no rate identifier → ignored
+          "const factor = 0.5;",          // no rate identifier → ignored
         ].join('\n'),
       );
       const out = await findHardcodedRates(dir);

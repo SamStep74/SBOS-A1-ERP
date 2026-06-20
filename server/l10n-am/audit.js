@@ -13,6 +13,7 @@
 // do with the report.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFile as readFileAsync, readdir as readdirAsync } from 'node:fs/promises';
 import { extname, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STRINGS, LOCALES } from './i18n.js';
@@ -316,4 +317,235 @@ export function auditAll(opts = {}) {
     usedKeyCount: unused.usedKeyCount,
     unusedKeyCount: unused.unusedKeyCount,
   };
+}
+
+// ---- findHardcodedRates / findEvalLike / findStringConcatSql -------------
+//
+// Three new operator-visible scans. They share a common async walker over
+// rootDir; each one applies a per-line regex heuristic and returns a flat
+// array of {file, line, column, ...} hits. No throws on malformed input —
+// unreadable files / binary content / unreadable dirs are silently skipped.
+//
+// The "rate-shape" heuristic in findHardcodedRates is intentionally simple:
+// flag a literal >= 0.01 on any line whose trimmed text contains 'rate'
+// or 'percent' (case-insensitive substring, per spec) OR any line inside
+// a `RATES = { ... }` object literal (tracked across lines via brace
+// depth). This is a coarse operator-visible signal, not a parser.
+
+// Match the opening of a `RATES = { ... }` block. Case-sensitive on the
+// identifier name — RATES is a coding convention here.
+const RATES_OBJECT_HEAD_RE = /\b(RATES|rates)\s*=\s*\{/;
+
+// Rate-shaped identifier anywhere on a line (spec is `/rate/i` substring).
+const RATE_SHAPED_LINE_RE = /(rate|percent)/i;
+
+// Match a numeric literal that is NOT glued to an identifier. Examples:
+//   "0.20"     → match (value=0.20)
+//   "rate=5"   → match (value=5)
+//   "id_123"   → no match (the 123 is part of the identifier)
+//   "1.5.6"    → matches "1.5" then "6" (left-to-right)
+const NUMERIC_LITERAL_RE = /(?<![A-Za-z0-9_$.])(\d+(?:\.\d+)?)/g;
+
+// `eval(` and `new Function(` are red flags; treat them symmetrically.
+const EVAL_CALL_RE = /\beval\s*\(/g;
+const NEW_FUNCTION_RE = /\bnew\s+Function\s*\(/g;
+
+// SQL keywords followed on the same line by a `+` (string concat). Each
+// pattern is reported under a distinct `pattern` name so the CLI can echo
+// which keyword tripped.
+const SQL_CONCAT_PATTERNS = [
+  { name: 'select-+', re: /\bSELECT\b.*\+/i },
+  { name: 'insert-+', re: /\bINSERT\b.*\+/i },
+  { name: 'update-+', re: /\bUPDATE\b.*\+/i },
+  { name: 'delete-+', re: /\bDELETE\b.*\+/i },
+];
+
+/**
+ * Async walker that returns every `.js` file under `root`, recursing into
+ * subdirectories. Skips `node_modules` and any dotfile-prefixed directory
+ * (including `.git`, `.orchestration`). When `skipTest` is true, files
+ * whose basename ends in `.test.js` are also dropped.
+ *
+ * Unreadable directories are silently skipped — the caller wants a flat
+ * list of files it CAN read, not an exception that aborts the whole scan.
+ */
+async function walkJsFilesAsync(root, { skipTest = false } = {}) {
+  const out = [];
+  async function recurse(dir) {
+    let entries;
+    try {
+      entries = await readdirAsync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir — keep going
+    }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        await recurse(p);
+      } else if (e.name.endsWith('.js')) {
+        if (skipTest && e.name.endsWith('.test.js')) continue;
+        out.push(p);
+      }
+    }
+  }
+  await recurse(root);
+  return out;
+}
+
+/**
+ * Scan `rootDir` for numeric literals that look like tax rates. A "rate"
+ * is any number >= 0.01 that appears in a context suggesting a rate: the
+ * line contains `/rate/i` or `/percent/i`, or the line is inside a
+ * `RATES = { ... }` object literal (tracked across lines).
+ *
+ * @param {string} rootDir - typically `server/l10n-am/`
+ * @returns {Promise<Array<{file: string, line: number, column: number, value: number, context: string}>>}
+ */
+export async function findHardcodedRates(rootDir) {
+  const files = await walkJsFilesAsync(rootDir, { skipTest: true });
+  const results = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFileAsync(file, 'utf8');
+    } catch {
+      continue; // unreadable / binary — skip silently
+    }
+    const lines = text.split('\n');
+    let inRatesBlock = false;
+    let blockDepth = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i];
+      const line = rawLine.trim();
+
+      // Block entry: `const RATES = {` (or `rates`).
+      if (!inRatesBlock && RATES_OBJECT_HEAD_RE.test(line)) {
+        inRatesBlock = true;
+        blockDepth = 0;
+      }
+      // Track brace depth on every line we are inside the block.
+      if (inRatesBlock) {
+        blockDepth += (line.match(/\{/g) || []).length;
+        blockDepth -= (line.match(/\}/g) || []).length;
+      }
+
+      const inRateContext = inRatesBlock || RATE_SHAPED_LINE_RE.test(line);
+      if (!inRateContext) {
+        // If we just closed the block on this line, drop the flag.
+        if (inRatesBlock && blockDepth <= 0) {
+          inRatesBlock = false;
+          blockDepth = 0;
+        }
+        continue;
+      }
+
+      // Scan for numeric literals >= 0.01.
+      NUMERIC_LITERAL_RE.lastIndex = 0;
+      let m;
+      while ((m = NUMERIC_LITERAL_RE.exec(line)) !== null) {
+        const v = Number(m[1]);
+        if (Number.isFinite(v) && v >= 0.01) {
+          results.push({
+            file,
+            line: i + 1,
+            column: m.index + 1,
+            value: v,
+            context: rawLine.trim(),
+          });
+        }
+      }
+
+      if (inRatesBlock && blockDepth <= 0) {
+        inRatesBlock = false;
+        blockDepth = 0;
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Scan `rootDir` for `eval(` and `new Function(` call sites. Both are
+ * code-injection red flags; this is an operator-visible warning, not a
+ * parser-accurate lint. Per spec, test files are NOT excluded for this
+ * scan — `eval(` in a test still means somebody wrote `eval(`, which is
+ * information the operator should see.
+ *
+ * @param {string} rootDir
+ * @returns {Promise<Array<{file: string, line: number, column: number, kind: 'eval-call'|'new-function'}>>}
+ */
+export async function findEvalLike(rootDir) {
+  const files = await walkJsFilesAsync(rootDir, { skipTest: false });
+  const results = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFileAsync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      EVAL_CALL_RE.lastIndex = 0;
+      NEW_FUNCTION_RE.lastIndex = 0;
+      let m;
+      while ((m = EVAL_CALL_RE.exec(line)) !== null) {
+        results.push({
+          file,
+          line: i + 1,
+          column: m.index + 1,
+          kind: 'eval-call',
+        });
+      }
+      while ((m = NEW_FUNCTION_RE.exec(line)) !== null) {
+        results.push({
+          file,
+          line: i + 1,
+          column: m.index + 1,
+          kind: 'new-function',
+        });
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Scan `rootDir` for SQL string-concat patterns on a single line:
+ * `SELECT ... +`, `INSERT ... +`, `UPDATE ... +`, `DELETE ... +`
+ * (case-insensitive). Test files are excluded — they legitimately contain
+ * fake SQL strings as fixtures.
+ *
+ * @param {string} rootDir
+ * @returns {Promise<Array<{file: string, line: number, column: number, pattern: string}>>}
+ */
+export async function findStringConcatSql(rootDir) {
+  const files = await walkJsFilesAsync(rootDir, { skipTest: true });
+  const results = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFileAsync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const { name, re } of SQL_CONCAT_PATTERNS) {
+        const m = re.exec(line);
+        if (m) {
+          results.push({
+            file,
+            line: i + 1,
+            column: m.index + 1,
+            pattern: name,
+          });
+        }
+      }
+    }
+  }
+  return results;
 }
