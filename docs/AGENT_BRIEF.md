@@ -14,7 +14,7 @@ de-privatization.
 ## Current wave
 
 **Wave 0 (`sbos-a1-erp-bootstrap`)** is in progress. Four workers run in
-parallel: `repo-foundation`, `seed-from-a1-erp-hy`, `rbac-port`, `dmux-docs`.
+parallel: `repo-foundation`, `seed-docs`, `rbac-port`, `dmux-docs`.
 See [`PROJECT_STATUS.md`](./PROJECT_STATUS.md) for the live state and
 [`.orchestration/sbos-a1-erp-bootstrap.json`](../.orchestration/sbos-a1-erp-bootstrap.json)
 for the plan.
@@ -47,7 +47,7 @@ for the plan.
   `chore:`, `perf:`, `ci:`. Scope allowed: `feat(rbac): ...`.
 - **Node 20** — pinned in `.nvmrc`. `npm test` uses `node --test`.
 - **A1-ERP-HY is read-only.** Port with provenance. Brand-strip every file.
-  See [`DMUX_WORKFLOWS.md` §7](./DMUX_WORKFLOWS.md#7-a1-erp-hy--sbos-a1-erp-worker-convention).
+  See [`DMUX_WORKFLOWS.md` §7](./DMUX_WORKFLOWS.md#7-legacy-rd--sbos-a1-erp-worker-convention).
 - **Workers write to their worktree only.** Never edit files in the repo
   root, sibling worktrees, or another worker's `.orchestration/<session>/`
   directory.
