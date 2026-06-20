@@ -8,6 +8,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, runAudit } from './audit-cli.js';
@@ -248,5 +250,257 @@ describe('audit-cli.js — live l10n-am regression (child process)', () => {
     assert.ok(parsed.catalogKeyCount > 0);
     assert.ok(parsed.tCallCount > 0);
     assert.equal(parsed.unusedKeyCount, 0);
+  });
+});
+
+// ---- new flags: --check-rates / --check-eval / --check-sql -----------------
+//
+// The CLI gets three new independent flags. The default behavior (no new
+// flag) is unchanged. With one or more flags, the legacy auditAll is NOT
+// called; only the requested check(s) run. `--format json` switches to the
+// new {rates, eval, sql, ok} shape when at least one new flag is active.
+
+describe('parseArgs — new flags', () => {
+  test('--check-rates is recognised and recorded', () => {
+    const a = parseArgs(['--check-rates']);
+    assert.equal(a.checkRates, true);
+    assert.equal(a.checkEval, false);
+    assert.equal(a.checkSql, false);
+    assert.deepEqual(a.errors, []);
+  });
+
+  test('--check-eval is recognised and recorded', () => {
+    const a = parseArgs(['--check-eval']);
+    assert.equal(a.checkEval, true);
+    assert.equal(a.checkRates, false);
+    assert.equal(a.checkSql, false);
+  });
+
+  test('--check-sql is recognised and recorded', () => {
+    const a = parseArgs(['--check-sql']);
+    assert.equal(a.checkSql, true);
+    assert.equal(a.checkRates, false);
+    assert.equal(a.checkEval, false);
+  });
+
+  test('all three check flags can be combined', () => {
+    const a = parseArgs(['--check-rates', '--check-eval', '--check-sql']);
+    assert.equal(a.checkRates, true);
+    assert.equal(a.checkEval, true);
+    assert.equal(a.checkSql, true);
+  });
+});
+
+// runExtraChecks is the async handler for the new flags. We import it via
+// a dynamic lookup so the test file still loads when the symbol does not
+// yet exist (RED state). When the symbol is missing, we mark every extra
+// check test as a "tombstone" that fails with a precise message.
+import * as auditCli from './audit-cli.js';
+const runExtraChecks = auditCli.runExtraChecks;
+
+describe('runExtraChecks — --check-rates', () => {
+  test('clean scratch dir: exitCode 0, no matches', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-rates-clean-'));
+    try {
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-rates']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 0,
+        `clean scratch dir should have exitCode 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.ok(Array.isArray(out.rates));
+      assert.equal(out.rates.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('with a synthetic rate fixture: exitCode 1 and stdout shows the match', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    // Build a tiny scratch dir with one .js file containing a rate literal.
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-rates-'));
+    try {
+      writeFileSync(
+        join(dir, 'fixture.js'),
+        "export const STAMP_RATE = 0.05;",
+      );
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-rates']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 1,
+        `expected exitCode 1 when a rate is present, got ${out.exitCode}`);
+      assert.equal(out.rates.length, 1);
+      assert.match(stdout, /fixture\.js/);
+      assert.match(stdout, /0\.05/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runExtraChecks — --check-eval', () => {
+  test('clean scratch dir: exitCode 0, no matches', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-eval-clean-'));
+    try {
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-eval']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 0,
+        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.ok(Array.isArray(out.eval));
+      assert.equal(out.eval.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('with a synthetic eval fixture: exitCode 1 and stdout shows eval-call', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-eval-'));
+    try {
+      writeFileSync(join(dir, 'fixture.js'), "const r = eval('1+1');");
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-eval']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 1);
+      assert.equal(out.eval.length, 1);
+      assert.equal(out.eval[0].kind, 'eval-call');
+      assert.match(stdout, /fixture\.js/);
+      assert.match(stdout, /eval-call/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runExtraChecks — --check-sql', () => {
+  test('clean scratch dir: exitCode 0, no matches', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-sql-clean-'));
+    try {
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-sql']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 0,
+        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.ok(Array.isArray(out.sql));
+      assert.equal(out.sql.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('with a synthetic SQL fixture: exitCode 1 and stdout shows select-+', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-sql-'));
+    try {
+      writeFileSync(join(dir, 'fixture.js'), "const q = 'SELECT * FROM t WHERE id=' + id;");
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-sql']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(out.exitCode, 1);
+      assert.equal(out.sql.length, 1);
+      assert.equal(out.sql[0].pattern, 'select-+');
+      assert.match(stdout, /fixture\.js/);
+      assert.match(stdout, /select-\+/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runExtraChecks — --format json', () => {
+  test('emits {rates, eval, sql, ok} shape when any new flag is active', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-json-'));
+    try {
+      writeFileSync(join(dir, 'clean.js'), "const x = 1; // no rates here");
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      await runExtraChecks({
+        args: parseArgs(['--check-rates', '--format', 'json']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      const parsed = JSON.parse(stdout.trim());
+      assert.ok(Array.isArray(parsed.rates), 'parsed.rates must be an array');
+      assert.ok(Array.isArray(parsed.eval), 'parsed.eval must be an array');
+      assert.ok(Array.isArray(parsed.sql), 'parsed.sql must be an array');
+      assert.equal(typeof parsed.ok, 'boolean');
+      assert.equal(parsed.ok,
+        parsed.rates.length === 0 && parsed.eval.length === 0 && parsed.sql.length === 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runExtraChecks — --quiet', () => {
+  test('suppresses per-match output but preserves exitCode', async () => {
+    if (typeof runExtraChecks !== 'function') {
+      throw new Error('runExtraChecks is not exported by audit-cli.js');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'audit-cli-quiet-'));
+    try {
+      writeFileSync(join(dir, 'fixture.js'), "const rate = 0.20;");
+      let stdout = '';
+      const capture = (s) => { stdout += s + '\n'; };
+      const out = await runExtraChecks({
+        args: parseArgs(['--check-rates', '--quiet']),
+        rootDir: dir,
+        stdout: capture,
+        stderr: capture,
+      });
+      assert.equal(stdout, '', `--quiet should suppress stdout, got: ${JSON.stringify(stdout)}`);
+      assert.equal(out.exitCode, 1, '--quiet must still set exitCode 1 on a hit');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
