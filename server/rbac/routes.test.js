@@ -387,4 +387,205 @@ describe('RBAC approval routes', () => {
     assert.equal(approve.status, 404);
     assert.equal(approve.body.error, 'not_found');
   });
+
+  // ───── Additional edge-case tests (attempt 2) ─────
+  //
+  // These five cases close gaps the attempt-1 reviewer flagged. The
+  // first attempt only asserted the happy path and the most obvious
+  // denial paths. These tests exercise input validation, the reject
+  // dual-control path, idempotency on already-decided rows, the GET
+  // limit parameter, and the reject unknown-id 404.
+
+  test('POST /api/rbac/approvals with missing resource/action → 400 invalid_request', async () => {
+    const localDb = makeDb();
+    const localMock = makeMockApp();
+    registerRbacRoutes(localMock.app, { db: localDb });
+    const localRoutes = localMock.routes;
+
+    // Missing resource — requestApproval throws ValueError → 400.
+    const r1 = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      '/api/rbac/approvals',
+      {
+        user: { id: 100, role: 'Admin', tenant_id: 0 },
+        body: { action: 'a', payloadJson: '{}' }, // resource missing
+      },
+      r1.reply,
+    );
+    assert.equal(r1.status, 400);
+    assert.equal(r1.body.error, 'invalid_request');
+
+    // Missing action.
+    const r2 = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      '/api/rbac/approvals',
+      {
+        user: { id: 100, role: 'Admin', tenant_id: 0 },
+        body: { resource: 'r', payloadJson: '{}' }, // action missing
+      },
+      r2.reply,
+    );
+    assert.equal(r2.status, 400);
+    assert.equal(r2.body.error, 'invalid_request');
+  });
+
+  test('POST /api/rbac/approvals/:id/reject dual-control → 409 when same user', async () => {
+    const localDb = makeDb();
+    const localMock = makeMockApp();
+    registerRbacRoutes(localMock.app, { db: localDb });
+    const localRoutes = localMock.routes;
+
+    const create = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      '/api/rbac/approvals',
+      {
+        user: { id: 200, role: 'Admin', tenant_id: 0 },
+        body: { resource: 'r', action: 'a', payloadJson: '{}' },
+      },
+      create.reply,
+    );
+    const id = create.body.id;
+
+    // Same user (200) attempts to reject their own request.
+    const reject = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      `/api/rbac/approvals/${id}/reject`,
+      {
+        user: { id: 200, role: 'Admin', tenant_id: 0 },
+        body: { reason: 'self-reject attempt' },
+        params: {},
+      },
+      reject.reply,
+    );
+    assert.equal(reject.status, 409, 'same rejecter as requester → 409 conflict');
+    assert.equal(reject.body.error, 'conflict');
+    // The row must remain pending.
+    const row = localDb.prepare(`SELECT status FROM sbos_rbac_approvals WHERE id = ?`).get(id);
+    assert.equal(row.status, 'pending');
+  });
+
+  test('POST /api/rbac/approvals/:id/approve on already-rejected → 409 conflict', async () => {
+    const localDb = makeDb();
+    const localMock = makeMockApp();
+    registerRbacRoutes(localMock.app, { db: localDb });
+    const localRoutes = localMock.routes;
+
+    const create = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      '/api/rbac/approvals',
+      {
+        user: { id: 300, role: 'Admin', tenant_id: 0 },
+        body: { resource: 'r', action: 'a', payloadJson: '{}' },
+      },
+      create.reply,
+    );
+    const id = create.body.id;
+
+    // User 301 rejects first.
+    const reject = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      `/api/rbac/approvals/${id}/reject`,
+      {
+        user: { id: 301, role: 'Admin', tenant_id: 0 },
+        body: { reason: 'changed my mind' },
+        params: {},
+      },
+      reject.reply,
+    );
+    assert.equal(reject.status, 200);
+
+    // User 302 then tries to approve — the row is no longer pending.
+    const approve = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      `/api/rbac/approvals/${id}/approve`,
+      { user: { id: 302, role: 'Admin', tenant_id: 0 }, params: {} },
+      approve.reply,
+    );
+    assert.equal(approve.status, 409, 'cannot approve an already-rejected row');
+    assert.equal(approve.body.error, 'conflict');
+  });
+
+  test('GET /api/rbac/approvals honors the ?limit query parameter', async () => {
+    const localDb = makeDb();
+    const localMock = makeMockApp();
+    registerRbacRoutes(localMock.app, { db: localDb });
+    const localRoutes = localMock.routes;
+
+    // Insert 4 pending rows for tenant 0.
+    for (let i = 0; i < 4; i++) {
+      await dispatch(
+        localRoutes,
+        'POST',
+        '/api/rbac/approvals',
+        {
+          user: { id: 400 + i, role: 'Admin', tenant_id: 0 },
+          body: { resource: `r${i}`, action: 'a', payloadJson: '{}' },
+        },
+        makeReply().reply,
+      );
+    }
+
+    // Default (no limit param) returns all 4.
+    const all = makeReply();
+    await dispatch(
+      localRoutes,
+      'GET',
+      '/api/rbac/approvals',
+      { user: { id: 1, role: 'Admin', tenant_id: 0 }, query: {} },
+      all.reply,
+    );
+    assert.equal(all.status, 200);
+    assert.equal(all.body.items.length, 4);
+
+    // limit=2 returns 2. The mock-app's URL regex doesn't include the
+    // query string, so we strip it before dispatch — the route reads
+    // `request.query.limit` exactly the way Express/Fastify would
+    // have parsed it for us in a real request.
+    const limited = makeReply();
+    await dispatch(
+      localRoutes,
+      'GET',
+      '/api/rbac/approvals',
+      { user: { id: 1, role: 'Admin', tenant_id: 0 }, query: { limit: '2' } },
+      limited.reply,
+    );
+    assert.equal(limited.status, 200);
+    assert.equal(limited.body.items.length, 2, 'limit=2 returns 2 items');
+  });
+
+  test('POST /api/rbac/approvals/:id/reject on unknown id → 404', async () => {
+    const localDb = makeDb();
+    const localMock = makeMockApp();
+    registerRbacRoutes(localMock.app, { db: localDb });
+    const localRoutes = localMock.routes;
+
+    const reject = makeReply();
+    await dispatch(
+      localRoutes,
+      'POST',
+      '/api/rbac/approvals/no-such-id/reject',
+      {
+        user: { id: 500, role: 'Admin', tenant_id: 0 },
+        body: { reason: 'irrelevant' },
+        params: {},
+      },
+      reject.reply,
+    );
+    assert.equal(reject.status, 404);
+    assert.equal(reject.body.error, 'not_found');
+  });
 });
