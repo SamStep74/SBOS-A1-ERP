@@ -62,6 +62,12 @@ function newTables() {
 /**
  * Build a pg-style mock DB. Pattern-matches every `db.query(sql, params)`
  * call and updates an in-memory model so tests can assert on it.
+ *
+ * Wave-13: every query that previously took `(invoice_id, ...)` now
+ * takes `(tenant_id, invoice_id, ...)`. The mock accepts both forms by
+ * inspecting the number of params (5+ = wave-13, 4 = pre-wave-13) —
+ * the in-memory rows are tagged with `tenant_id` (default 0) so a
+ * pre-wave-13 INSERT followed by a wave-13 SELECT still finds the row.
  */
 function makePgMock() {
   const tables = newTables();
@@ -76,28 +82,39 @@ function makePgMock() {
     async query(sql, params = []) {
       statements.push({ sql, params });
       const tag = classifySql(sql);
+      // Wave-13 SELECTs / UPDATEs take `tenant_id` as the first param.
+      // We can detect that by counting `$N` placeholders that are not
+      // in a `RETURNING` clause — but for the mock it's simpler to
+      // look at param count: 4+ for selects/sums, 5+ for insert,
+      // 4 for update.
       switch (tag) {
         case 'select-sum-payments': {
-          const [invoiceId] = params;
+          // Wave-13: WHERE tenant_id = $1 AND invoice_id = $2
+          // Pre-wave-13: WHERE invoice_id = $1
+          const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+          const invoiceId = params.length >= 2 ? Number(params[1]) : Number(params[0]);
           let sum = 0;
           for (const p of tables.payments.values()) {
-            if (p.invoice_id === invoiceId) sum += Number(p.amount_amd);
+            if (p.invoice_id === invoiceId && (p.tenant_id ?? 0) === tenantId)
+              sum += Number(p.amount_amd);
           }
           return { rows: [{ paid_amd: sum }] };
         }
         case 'select-invoice': {
-          // SELECT id, customer_id, total_amd, status FROM finance.invoices WHERE id = $1
-          const [id] = params;
+          // Wave-13: WHERE tenant_id = $1 AND id = $2
+          const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+          const id = params.length >= 2 ? Number(params[1]) : Number(params[0]);
           const inv = tables.invoices.get(Number(id));
           if (!inv) return { rows: [] };
-          // Project to the columns the caller asked for, but return the whole row
-          // so tests that read `.status` / `.total_amd` still work.
+          if ((inv.tenant_id ?? 0) !== tenantId) return { rows: [] };
           return { rows: [{ ...inv }] };
         }
         case 'select-payments': {
-          const [invoiceId] = params;
+          // Wave-13: WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY ...
+          const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+          const invoiceId = params.length >= 2 ? Number(params[1]) : Number(params[0]);
           const rows = [...tables.payments.values()]
-            .filter((p) => p.invoice_id === Number(invoiceId))
+            .filter((p) => p.invoice_id === Number(invoiceId) && (p.tenant_id ?? 0) === tenantId)
             .sort((a, b) => {
               if (a.paid_at < b.paid_at) return -1;
               if (a.paid_at > b.paid_at) return 1;
@@ -107,14 +124,19 @@ function makePgMock() {
           return { rows };
         }
         case 'select-payment-by-id': {
+          // Pre-wave-13: WHERE id = $1 (1 param). Wave-13: same
+          // (the read-back after an INSERT is not tenant-scoped —
+          // the row was just written by this adapter).
           const [id] = params;
           const p = tables.payments.get(Number(id));
           return { rows: p ? [{ ...p }] : [] };
         }
         case 'insert-payment': {
-          // INSERT INTO finance.payments (invoice_id, paid_at, amount_amd, method, reference)
-          // VALUES ($1, $2, $3, $4, $5) RETURNING *
-          const [invoice_id, paid_at, amount_amd, method, reference] = params;
+          // Wave-13: INSERT INTO finance.payments (invoice_id, paid_at,
+          // amount_amd, method, reference, tenant_id) VALUES (..., $6)
+          // Pre-wave-13: 5 params. The mock writes the row with a
+          // `tenant_id` derived from the call params (default 0).
+          const [invoice_id, paid_at, amount_amd, method, reference, tenantId] = params;
           counters.payment += 1;
           const row = {
             id: counters.payment,
@@ -123,16 +145,34 @@ function makePgMock() {
             amount_amd: Number(amount_amd),
             method,
             reference: reference ?? null,
+            tenant_id: tenantId != null ? Number(tenantId) : 0,
             created_at: new Date().toISOString(),
           };
           tables.payments.set(row.id, row);
           return { rows: [{ ...row }] };
         }
         case 'update-invoice-status': {
-          // UPDATE finance.invoices SET status = $1, updated_at = $2 WHERE id = $3
-          const [status, updated_at, id] = params;
+          // Wave-13: UPDATE ... WHERE tenant_id = $N AND id = $M.
+          // Pre-wave-13: WHERE id = $3.
+          // Param count distinguishes the two forms: 4 = wave-13,
+          // 3 = pre-wave-13. Status + updated_at are the first two
+          // params in both forms, so the difference is just the
+          // tail.
+          const whereMatch = sql.match(/WHERE\s+([\s\S]+)$/i);
+          const whereRefs = whereMatch ? (whereMatch[1].match(/\$\d+/g) || []).length : 0;
+          const status = params[0];
+          const updated_at = params[1];
+          let tenantId = 0;
+          let id;
+          if (whereRefs >= 2) {
+            tenantId = Number(params[params.length - 2] ?? 0);
+            id = Number(params[params.length - 1]);
+          } else {
+            id = Number(params[params.length - 1]);
+          }
           const inv = tables.invoices.get(Number(id));
           if (!inv) return { rows: [] };
+          if ((inv.tenant_id ?? 0) !== tenantId) return { rows: [] };
           inv.status = status;
           inv.updated_at = updated_at;
           tables.invoices.set(inv.id, inv);
@@ -156,6 +196,10 @@ function makePgMock() {
  * inserted row. Our model returns the row from `.run()` via a side channel
  * (`_lastInserted`) that the production adapter is not expected to use;
  * the tests can use it directly to verify the insert landed.
+ *
+ * Wave-13: every adapter call now takes a `tenantId` arg and is scoped
+ * to the corresponding tenant. Pre-wave-13 seeds (no `tenant_id`
+ * column) are tolerated as tenant 0.
  */
 function makeSqliteMock() {
   const tables = newTables();
@@ -179,7 +223,9 @@ function makeSqliteMock() {
       const stmt = {
         run(...params) {
           if (tag === 'insert-payment') {
-            const [invoice_id, paid_at, amount_amd, method, reference] = params;
+            // Wave-13: 6 params. Pre-wave-13: 5. The last param is
+            // tenant_id; absent → 0.
+            const [invoice_id, paid_at, amount_amd, method, reference, tenantId] = params;
             counters.payment += 1;
             const row = {
               id: counters.payment,
@@ -188,6 +234,7 @@ function makeSqliteMock() {
               amount_amd: Number(amount_amd),
               method,
               reference: reference ?? null,
+              tenant_id: tenantId != null ? Number(tenantId) : 0,
               created_at: new Date().toISOString(),
             };
             tables.payments.set(row.id, row);
@@ -195,35 +242,59 @@ function makeSqliteMock() {
             return { changes: 1, lastInsertRowid: row.id };
           }
           if (tag === 'update-invoice-status') {
-            const [status, updated_at, id] = params;
+            // Wave-13: WHERE tenant_id = ? AND id = ? — 4 params:
+            //   [status, updated_at, tenantId, id]
+            // Pre-wave-13: WHERE id = ? — 3 params:
+            //   [status, updated_at, id]
+            // The `?` count inside the WHERE clause tells us which form.
+            const whereMatch = sql.match(/WHERE\s+([\s\S]+)$/i);
+            const whereQms = whereMatch ? (whereMatch[1].match(/\?/g) || []).length : 0;
+            const status = params[0];
+            const updated_at = params[1];
+            let tenantId = 0;
+            let id;
+            if (whereQms >= 2) {
+              // wave-13: tenantId is the second-to-last param, id is last.
+              tenantId = Number(params[params.length - 2] ?? 0);
+              id = Number(params[params.length - 1]);
+            } else {
+              // pre-wave-13: id is the last param, no tenant predicate.
+              id = Number(params[params.length - 1]);
+            }
             const inv = tables.invoices.get(Number(id));
-            if (inv) {
+            if (inv && (inv.tenant_id ?? 0) === tenantId) {
               inv.status = status;
               inv.updated_at = updated_at;
               tables.invoices.set(inv.id, inv);
+              return { changes: 1 };
             }
-            return { changes: inv ? 1 : 0 };
+            return { changes: 0 };
           }
           return { changes: 0 };
         },
         all(...params) {
           if (tag === 'select-sum-payments') {
-            const [invoiceId] = params;
+            const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+            const invoiceId = params.length >= 2 ? Number(params[1]) : Number(params[0]);
             let sum = 0;
             for (const p of tables.payments.values()) {
-              if (p.invoice_id === invoiceId) sum += Number(p.amount_amd);
+              if (p.invoice_id === invoiceId && (p.tenant_id ?? 0) === tenantId)
+                sum += Number(p.amount_amd);
             }
             return [{ paid_amd: sum }];
           }
           if (tag === 'select-invoice') {
-            const [id] = params;
+            const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+            const id = params.length >= 2 ? Number(params[1]) : Number(params[0]);
             const inv = tables.invoices.get(Number(id));
-            return inv ? [{ ...inv }] : [];
+            if (inv && (inv.tenant_id ?? 0) === tenantId) return [{ ...inv }];
+            return [];
           }
           if (tag === 'select-payments') {
-            const [invoiceId] = params;
+            const tenantId = params.length >= 2 ? Number(params[0]) : 0;
+            const invoiceId = params.length >= 2 ? Number(params[1]) : Number(params[0]);
             return [...tables.payments.values()]
-              .filter((p) => p.invoice_id === Number(invoiceId))
+              .filter((p) => p.invoice_id === Number(invoiceId) && (p.tenant_id ?? 0) === tenantId)
               .sort((a, b) => {
                 if (a.paid_at < b.paid_at) return -1;
                 if (a.paid_at > b.paid_at) return 1;
@@ -267,6 +338,7 @@ function seedInvoice(db, overrides = {}) {
     total_amd: 120_000,
     status: 'sent',
     notes: null,
+    tenant_id: 0, // wave-13: default to bootstrap tenant
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,

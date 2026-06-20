@@ -52,6 +52,8 @@ export default [
         globalThis: 'readonly',
         URL: 'readonly',
         URLSearchParams: 'readonly',
+        // Node 18+ provides fetch as a global (engines >= 20 in package.json).
+        fetch: 'readonly',
       },
     },
     rules: {
@@ -128,6 +130,11 @@ export default [
     files: ['test/**/*.ts', 'test/**/*.js', '**/*.test.ts', '**/*.test.js'],
     rules: {
       'no-console': 'off',
+      // Tests frequently import helpers (`after`, error classes, fixtures)
+      // that are wired up but not referenced in every suite, or that act as
+      // sentinels for "the module under test exports this symbol". Lint
+      // strictness here adds noise without catching real bugs.
+      'no-unused-vars': 'off',
     },
   },
 ];

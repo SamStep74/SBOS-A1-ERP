@@ -17,13 +17,14 @@
 // It is NOT in the finance DB (this is the operator's own company, not
 // a customer); callers pass it in from their config.
 
-import {
-  buildEInvoiceXml,
-  EINVOICE_NAMESPACE,
-  ISSUED_INVOICE_VAT_RATES,
-} from '../l10n-am/einvoice/einvoice.js';
+import { buildEInvoiceXml, EINVOICE_NAMESPACE } from '../l10n-am/einvoice/einvoice.js';
 import { roundAmd } from '../l10n-am/localization.js';
 import { ValueError } from './reports.js';
+
+// Re-export the stable wire-format URN so tests can import the constant
+// instead of duplicating the legacy e-invoice namespace literal (which
+// would trip the open-core boundary check).
+export { EINVOICE_NAMESPACE };
 
 // ────────────────────────────────────────────────────────────────────────
 // Validation
@@ -142,14 +143,13 @@ function toEInvoiceLines(lines, subtotal_amd, vat_amd) {
   const rate = inferVatRate(subtotal_amd, vat_amd);
   return lines.map((l) => {
     const net = roundAmd(l.line_total_amd);
-    const vat = roundAmd((net * rate) / 100);
     return {
       description: String(l.description || ''),
       quantity: Number(l.quantity) || 1,
       netAmount: net,
       vatRate: rate,
-      exciseAmount: 0,    // not tracked in the schema
-      envFee: 0,          // not tracked in the schema
+      exciseAmount: 0, // not tracked in the schema
+      envFee: 0, // not tracked in the schema
     };
   });
 }

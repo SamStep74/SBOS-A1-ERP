@@ -171,14 +171,17 @@ function computeVatReturn({ sales = [], purchases = [], priorPeriodCarryForward 
   // the actual banked credit (not just the clamped net). Callers that don't
   // pass a prior credit get the historical `payable = Math.max(0, net)`
   // behaviour (no carry-forward bookkeeping).
-  const line21 = line21_vatToPay({
-    outputVat,
-    importVat: 0,
-    reverseChargeVat,
-    inputVat: domesticInputVat,
-    importInputVat,
-    adjustments,
-  }, priorPeriodCarryForward);
+  const line21 = line21_vatToPay(
+    {
+      outputVat,
+      importVat: 0,
+      reverseChargeVat,
+      inputVat: domesticInputVat,
+      importInputVat,
+      adjustments,
+    },
+    priorPeriodCarryForward,
+  );
 
   return {
     outputVat,

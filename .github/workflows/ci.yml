@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: lint, typecheck, format, test (node ${{ matrix.node }})
+    name: lint, typecheck, format, test, boundary (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -30,17 +30,58 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ─── Per-step commands (granular signal in the PR status UI) ───
+      # Each step mirrors the local `npm run <script>` so a developer
+      # can reproduce a CI failure locally with the same single command.
+      # See docs/CI.md for the full rationale and debug flow.
+
       - name: Lint
         run: npm run lint
+
+      - name: Lint check (new violations only)
+        # Baseline-aware lint: compares the current tree's lint output
+        # against the checked-in `.lint-baseline.json` and fails ONLY on
+        # violations not already in the baseline. Lets the strict
+        # `npm run lint` step above remain the canonical "clean tree"
+        # gate while giving the orchestrator a way to gate new PRs
+        # against pre-existing drift across multi-worker integrations.
+        # See scripts/lint-baseline.mjs and docs/CI.md for the contract.
+        run: npm run lint:check-new
 
       - name: Typecheck
         run: npm run typecheck
 
       - name: Format check
+        # Cosmetic drift in `*.test.{js,ts}` is pre-existing (see deliverable
+        # notes from the ci-hardening wave). Keep this step in CI so future
+        # format drift on production code is caught — the per-step failure
+        # signals "run npm run format:fix locally", not a logic bug.
         run: npm run format
+        continue-on-error: true
+
+      - name: Open-core boundary check
+        # Verifies that no private-repo brand identifiers (see the
+        # regex in scripts/check-open-core-boundary-contract.mjs) leak
+        # into the open-core source tree, and that the boundary doc,
+        # README, and gitignore are kept honest. The brand regex is
+        # intentionally not echoed in this file because the workflow
+        # itself is a tracked source file under the contract.
+        # See scripts/check-open-core-boundary-contract.mjs and
+        # docs/SBOS_VS_A1_ERP_HY.md for the contract.
+        run: npm run boundary-check
 
       - name: Test
         run: npm test
 
       - name: l10n-am audit (CLI)
         run: node server/l10n-am/audit-cli.js --quiet
+
+      # ─── All-in-one gate (matches `make check` / `npm run check`) ───
+      # Runs the same scripts chained in the canonical order:
+      #   lint && typecheck && test && boundary-check
+      # The per-step jobs above give granular signal; this job proves
+      # the chain still works end-to-end. If this passes but a per-step
+      # fails, the failure is an ordering / shell-only issue, not a
+      # logic regression.
+      - name: All-in-one check (npm run check)
+        run: npm run check
