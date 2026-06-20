@@ -168,7 +168,11 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
   // Line 21 headline (VAT to pay). importVat (output-side) defaults to 0 — no
   // entity in the current dataset re-sells imports to domestic customers under
   // a separate output tracking path; callers can pass it explicitly when needed.
-  const vatToPay = line21_vatToPay({
+  // Prior-period carry-forward is threaded through so this function reports
+  // the actual banked credit (not just the clamped net). Callers that don't
+  // pass a prior credit get the historical `payable = Math.max(0, net)`
+  // behaviour (no carry-forward bookkeeping).
+  const line21 = line21_vatToPay({
     outputVat,
     importVat: 0,
     reverseChargeVat,
@@ -192,7 +196,8 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
     importsVatBase, // line 13
     reverseChargeVat, // line 16
     adjustments, // line 18
-    vatToPay, // line 21 (clamps at 0; carry-forward TODO)
+    vatToPay: line21.vatToPay, // line 21 (number, with prior credit applied; 0 if recoverable)
+    carryForward: line21.carryForward, // line 21 banked credit for the next period
     inputVatCreditBase, // line 23
     // decomposition (split of inputVat for line-21 audit trail):
     domesticInputVat, // line 19 share of inputVat
@@ -298,10 +303,20 @@ function line18_adjustments(invoice = {}) {
 //
 // The result is CLAMPED at 0 — Armenia does not refund excess input VAT
 // automatically; the balance is carried forward to the next period.
-// TODO(wave-5+): implement the carry-forward ledger (Tax Code art. 68) so a
-// negative net is banked rather than silently zeroed. For wave-4 we clamp and
-// surface the carrier via `creditCarried` in computeVatReturn().
-function line21_vatToPay(decomposition = {}) {
+// Per RA Tax Code art. 68, a negative net is banked — not refunded — and
+// the carry-forward reduces the next period's payable (or grows the
+// bank's balance if the next period is also negative).
+//
+// `priorPeriodCarryForward` (whole drams) is the banked credit from the
+// previous period's return. It is subtracted from the current net:
+//   - net >= priorCredit  → vatToPay = net - priorCredit, carryForward = 0
+//   - net <  priorCredit  → vatToPay = 0, carryForward = priorCredit - net
+//
+// Returns `{ vatToPay, carryForward }` so the caller can persist the new
+// carry-forward to the next period's input. The caller is responsible
+// for the multi-period ledger (e.g. a `vat_carry_forward` table); this
+// function is pure math on a single period's decomposition.
+function line21_vatToPay(decomposition = {}, priorPeriodCarryForward = 0) {
   const d = decomposition || {};
   const outputVat = roundAmd(d.outputVat || 0);
   const importVat = roundAmd(d.importVat || 0);
@@ -312,8 +327,15 @@ function line21_vatToPay(decomposition = {}) {
   const net = roundAmd(
     outputVat + importVat + reverseChargeVat - inputVat - importInputVat + adjustments,
   );
-  // TODO(wave-5+): carry-forward ledger per RA Tax Code art. 68
-  return Math.max(0, net);
+  const prior = roundAmd(priorPeriodCarryForward || 0);
+  // Prior-period carry-forward is a credit that REDUCES the current
+  // period's payable (and absorbs it if larger than the current net).
+  const total = roundAmd(net - prior);
+  if (total >= 0) {
+    return { vatToPay: total, carryForward: 0 };
+  }
+  // Current period also recoverable: the bank grows by the excess.
+  return { vatToPay: 0, carryForward: -total };
 }
 
 // Line 23 — Total purchases subject to input VAT credit (recoverable base).

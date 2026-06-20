@@ -453,40 +453,42 @@ test('computeVatReturn: 8 new line aggregates sum correctly across a full VAT re
   }
 });
 
-test('computeVatReturn: line 21 (VAT to pay) clamps to 0 on a negative net (carry-forward TODO)', () => {
+test('computeVatReturn: line 21 (VAT to pay) clamps to 0 on a negative net and banks the carry-forward', () => {
   // Recoverable period: input VAT far exceeds output VAT → Armenia carries
-  // the credit forward, never refunds. Wave-4 clamps at 0; the carried
-  // amount is surfaced separately via creditCarried.
+  // the credit forward, never refunds. Wave-7 returns { vatToPay, carryForward }
+  // from the helper so the caller can persist the banked credit; the
+  // computeVatReturn() headline stays a back-compat number (0 here) and
+  // exposes the banked amount as r.carryForward.
   const r = computeVatReturn(recoverablePeriod);
 
   // The headline vatToPay is clamped at 0 (no negative payable to SRC).
   assert.equal(r.vatToPay, 0);
   assert.ok(r.creditCarried > 0, `expected a positive credit carry, got ${r.creditCarried}`);
+  assert.ok(r.carryForward > 0, `expected a positive banked credit, got ${r.carryForward}`);
 
-  // And the helper itself clamps when called directly.
-  assert.equal(
-    line21_vatToPay({
-      outputVat: 20000,
-      importVat: 0,
-      reverseChargeVat: 0,
-      inputVat: 50000,
-      importInputVat: 50000,
-      adjustments: 0,
-    }),
-    0,
-  );
-  // Positive adjustments bring it back above 0.
-  assert.equal(
-    line21_vatToPay({
-      outputVat: 20000,
-      importVat: 0,
-      reverseChargeVat: 0,
-      inputVat: 50000,
-      importInputVat: 50000,
-      adjustments: 200000, // prior-period correction clears the negative
-    }),
-    120000,
-  );
+  // And the helper itself banks when called directly (new return shape).
+  const clamped = line21_vatToPay({
+    outputVat: 20000,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: 50000,
+    importInputVat: 50000,
+    adjustments: 0,
+  });
+  assert.equal(clamped.vatToPay, 0);
+  assert.equal(clamped.carryForward, 80000); // 20000 − 50000 − 50000 = −80000
+
+  // Positive adjustments bring it back above 0 with no new carry-forward.
+  const positive = line21_vatToPay({
+    outputVat: 20000,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: 50000,
+    importInputVat: 50000,
+    adjustments: 200000, // prior-period correction clears the negative
+  });
+  assert.equal(positive.vatToPay, 120000);
+  assert.equal(positive.carryForward, 0);
 });
 
 test('computeVatReturn: invoice with both line-19 (input VAT) and line-20 (input VAT on imports) decomposes correctly', () => {
@@ -516,19 +518,19 @@ test('computeVatReturn: invoice with both line-19 (input VAT) and line-20 (input
   // line13 base = import base only = 300000.
   assert.equal(r.importsVatBase, 300000);
 
-  // And the helper itself, called directly with the same decomposition, returns the
-  // same headline — confirms computeVatReturn is correctly wiring the split.
-  assert.equal(
-    line21_vatToPay({
-      outputVat: r.outputVat,
-      importVat: 0,
-      reverseChargeVat: 0,
-      inputVat: r.domesticInputVat,
-      importInputVat: r.importInputVat,
-      adjustments: r.adjustments,
-    }),
-    r.vatToPay,
-  );
+  // And the helper itself, called directly with the same decomposition, returns
+  // the same headline vatToPay (back-compat: the helper now returns
+  // { vatToPay, carryForward } but the headline number matches).
+  const direct = line21_vatToPay({
+    outputVat: r.outputVat,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: r.domesticInputVat,
+    importInputVat: r.importInputVat,
+    adjustments: r.adjustments,
+  });
+  assert.equal(direct.vatToPay, r.vatToPay);
+  assert.equal(direct.carryForward, 0);
 });
 
 test('computeVatReturn: an empty period returns all-zero wave-4 fields', () => {
@@ -556,12 +558,16 @@ test('computeVatReturn: an empty period returns all-zero wave-4 fields', () => {
   assert.equal(r.importInputVat, 0);
 
   // Per-helper sanity on empty inputs (matches the empty-period totals).
+  // Per-helper sanity on empty inputs (matches the empty-period totals).
   assert.equal(line7_totalTaxableBase({}), 0);
   assert.equal(line9_zeroRatedSupplies({}), 0);
   assert.equal(line12_exemptSupplies({}), 0);
   assert.equal(line13_importsVatBase({}), 0);
   assert.equal(line16_reverseChargeVat({}), 0);
   assert.equal(line18_adjustments({}), 0);
-  assert.equal(line21_vatToPay({}), 0);
+  // line21 now returns { vatToPay, carryForward }; both are 0 on empty.
+  const emptyLine21 = line21_vatToPay({});
+  assert.equal(emptyLine21.vatToPay, 0);
+  assert.equal(emptyLine21.carryForward, 0);
   assert.equal(line23_inputVatCreditBase({}), 0);
 });

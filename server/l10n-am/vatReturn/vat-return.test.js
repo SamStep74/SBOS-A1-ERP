@@ -363,7 +363,7 @@ test('line21_vatToPay: aggregate decomposition — output + imports + reverse-ch
   //   import input VAT 60000 (line 20)
   //   domestic input VAT 80000 (line 19)
   //   no reverse-charge, no adjustments, no output-side imports
-  const vatToPay = line21_vatToPay({
+  const result = line21_vatToPay({
     outputVat: 200000,
     importVat: 0,
     reverseChargeVat: 0,
@@ -372,13 +372,14 @@ test('line21_vatToPay: aggregate decomposition — output + imports + reverse-ch
     adjustments: 0,
   });
   // 200000 + 0 + 0 − 80000 − 60000 + 0 = 60000
-  assert.equal(vatToPay, 60000);
+  assert.equal(result.vatToPay, 60000);
+  assert.equal(result.carryForward, 0);
 });
 
-test('line21_vatToPay: negative net is clamped at 0 (carry-forward is TODO wave-5+)', () => {
+test('line21_vatToPay: negative net is banked as carryForward (RA Tax Code art. 68)', () => {
   // Recoverable period: input VAT exceeds output VAT → no refund in Armenia,
-  // the balance is carried forward. Wave-4 clamps to 0; wave-5+ will bank it.
-  const vatToPay = line21_vatToPay({
+  // the balance is banked and reduces the next period's payable.
+  const result = line21_vatToPay({
     outputVat: 20000,
     importVat: 0,
     reverseChargeVat: 0,
@@ -386,12 +387,13 @@ test('line21_vatToPay: negative net is clamped at 0 (carry-forward is TODO wave-
     importInputVat: 50000,
     adjustments: 0,
   });
-  // 20000 − 50000 − 50000 = −80000 → clamped to 0
-  assert.equal(vatToPay, 0);
+  // 20000 − 50000 − 50000 = −80000 → vatToPay=0, carryForward=80000
+  assert.equal(result.vatToPay, 0);
+  assert.equal(result.carryForward, 80000);
 });
 
 test('line21_vatToPay: positive adjustments increase the VAT to pay', () => {
-  const vatToPay = line21_vatToPay({
+  const result = line21_vatToPay({
     outputVat: 100000,
     importVat: 0,
     reverseChargeVat: 0,
@@ -400,12 +402,83 @@ test('line21_vatToPay: positive adjustments increase the VAT to pay', () => {
     adjustments: 5000, // prior-period correction in the SRC's favor
   });
   // 100000 + 0 + 0 − 20000 − 0 + 5000 = 85000
-  assert.equal(vatToPay, 85000);
+  assert.equal(result.vatToPay, 85000);
+  assert.equal(result.carryForward, 0);
 });
 
-test('line21_vatToPay: an empty decomposition is zero', () => {
-  assert.equal(line21_vatToPay({}), 0);
-  assert.equal(line21_vatToPay(), 0); // missing argument
+test('line21_vatToPay: an empty decomposition is zero (no carry-forward either)', () => {
+  const empty = line21_vatToPay({});
+  assert.equal(empty.vatToPay, 0);
+  assert.equal(empty.carryForward, 0);
+  const missing = line21_vatToPay();
+  assert.equal(missing.vatToPay, 0);
+  assert.equal(missing.carryForward, 0);
+});
+
+test('line21_vatToPay: priorPeriodCarryForward reduces a positive net payable', () => {
+  // Current period net = 60000, prior credit = 20000 → vatToPay = 40000, no carry-forward.
+  const result = line21_vatToPay(
+    {
+      outputVat: 200000,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: 80000,
+      importInputVat: 60000,
+      adjustments: 0,
+    },
+    20000, // prior credit
+  );
+  assert.equal(result.vatToPay, 40000);
+  assert.equal(result.carryForward, 0);
+});
+
+test('line21_vatToPay: priorPeriodCarryForward fully absorbs a smaller net → no payable, no new carry-forward', () => {
+  // Current period net = 10000, prior credit = 50000 → vatToPay = 0,
+  // remainder of prior credit (40000) is still banked and shows up as
+  // a positive carry-forward for the next period.
+  const result = line21_vatToPay(
+    {
+      outputVat: 90000,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: 80000,
+      importInputVat: 0,
+      adjustments: 0,
+    },
+    50000,
+  );
+  // net = 10000; total = 10000 + 50000 = 60000 credit > 10000 net
+  // → vatToPay = 0, carryForward = 50000 - 10000 = 40000 (leftover prior credit)
+  assert.equal(result.vatToPay, 0);
+  assert.equal(result.carryForward, 40000);
+});
+
+test('line21_vatToPay: priorPeriodCarryForward + negative net → new carry-forward = prior + |net|', () => {
+  // Both periods are recoverable: the banked credit grows.
+  const result = line21_vatToPay(
+    {
+      outputVat: 20000,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: 50000,
+      importInputVat: 0,
+      adjustments: 0,
+    },
+    10000, // prior credit
+  );
+  // net = -30000; total = -30000 - 10000 = -40000
+  // → vatToPay = 0, carryForward = 40000 (prior 10000 + |net| 30000)
+  assert.equal(result.vatToPay, 0);
+  assert.equal(result.carryForward, 40000);
+});
+
+test('line21_vatToPay: priorPeriodCarryForward of 0 is a no-op (back-compat)', () => {
+  // Explicit zero must match the no-second-arg behavior.
+  const a = line21_vatToPay({ outputVat: 50000, inputVat: 10000 });
+  const b = line21_vatToPay({ outputVat: 50000, inputVat: 10000 }, 0);
+  assert.deepEqual(a, b);
+  assert.equal(a.vatToPay, 40000);
+  assert.equal(a.carryForward, 0);
 });
 
 test('line23_inputVatCreditBase: sum of recoverable purchase bases (art. 66 input VAT credit)', () => {
