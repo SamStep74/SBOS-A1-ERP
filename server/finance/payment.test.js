@@ -34,6 +34,11 @@ function classifySql(sql) {
     if (/FROM\s+finance\.payments/i.test(t) && /SUM\s*\(\s*amount_amd\s*\)/i.test(t)) {
       return 'select-sum-payments';
     }
+    // Fetch one payment by id (used by the sqlite adapter after INSERT to read
+    // back the row, since better-sqlite3 has no RETURNING clause).
+    if (/FROM\s+finance\.payments/i.test(t) && /WHERE\s+id\s*=/i.test(t)) {
+      return 'select-payment-by-id';
+    }
     if (/FROM\s+finance\.invoices/i.test(t)) return 'select-invoice';
     if (/FROM\s+finance\.payments/i.test(t)) return 'select-payments';
   }
@@ -100,6 +105,11 @@ function makePgMock() {
             })
             .map((p) => ({ ...p }));
           return { rows };
+        }
+        case 'select-payment-by-id': {
+          const [id] = params;
+          const p = tables.payments.get(Number(id));
+          return { rows: p ? [{ ...p }] : [] };
         }
         case 'insert-payment': {
           // INSERT INTO finance.payments (invoice_id, paid_at, amount_amd, method, reference)
@@ -220,6 +230,11 @@ function makeSqliteMock() {
                 return a.id - b.id;
               })
               .map((p) => ({ ...p }));
+          }
+          if (tag === 'select-payment-by-id') {
+            const [id] = params;
+            const p = tables.payments.get(Number(id));
+            return p ? [{ ...p }] : [];
           }
           return [];
         },
