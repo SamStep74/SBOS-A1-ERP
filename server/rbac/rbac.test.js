@@ -2315,6 +2315,10 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
       'GET /api/rbac/audit',
       'GET /api/rbac/me/permissions',
       'GET /api/rbac/health',
+      'GET /api/rbac/approvals',
+      'POST /api/rbac/approvals',
+      'POST /api/rbac/approvals/:id/approve',
+      'POST /api/rbac/approvals/:id/reject',
     ];
     for (const e of expected) assert.ok(seen.has(e), `route registered: ${e}`);
   });
