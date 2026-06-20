@@ -87,7 +87,7 @@ in the summary block. Stop the demo, isolate the failing file with
 ## 3. l10n-am fiscal walk — `node --test ...`
 
 The umbrella command in section 3 of WALKTHROUGH.md fans out across
-12 test files. Last ten lines:
+18 test files. Last ten lines:
 
 ```
   ✔ vat-return-form: line 22 (imports per Tax Code art. 79) is input base + VAT, independent of line 21 (0.053ms)
@@ -137,7 +137,7 @@ Without `--quiet`, expect a per-file scan progress block plus a
 summary:
 
 ```
-scanning server/l10n-am/ (12 files)...
+scanning server/l10n-am/ (18 files)...
 ✔ armeniaPhone.js
 ✔ armeniaRegions.js
 ✔ armeniaPayroll.js
@@ -146,7 +146,7 @@ scanning server/l10n-am/ (12 files)...
 ✔ audit.js
 ✔ audit-cli.js
 ... (rest of files)
-ok: 12 files scanned, 0 issues
+ok: 18 files scanned, 0 issues
 ```
 
 ### 4a. Audit hardening (wave-3 sibling branch)
@@ -181,23 +181,46 @@ during the close. Read it slowly. Pause after each beat.
 
 ```
 [Beat 1 — the artefacts]   "The artefacts do the talking.
-                              Three wave-3 deliverables just shipped:
-                              audit scanner hardening, rbac coverage,
-                              and this walkthrough."
+                               Three wave-3 deliverables just shipped:
+                               audit scanner hardening, rbac coverage,
+                               and this walkthrough."
 
 [Beat 2 — the pipeline]     "The open pipeline is CRM, Finance,
-                              and Reporting. The dmux-workflow pattern
-                              is how each lands — three workers per
-                              wave, disjoint file groups, one merge."
+                               and Reporting. The dmux-workflow pattern
+                               is how each lands — three workers per
+                               wave, disjoint file groups, one merge."
 
 [Beat 3 — the posture]       "Open-core. No proprietary lock-in.
-                              Brand-neutral. The sovereign stack
-                              is yours to fork, audit, and ship."
+                               Brand-neutral. The sovereign stack
+                               is yours to fork, audit, and ship."
 
 [Beat 4 — the door]          "Thank you. I'll leave you with the
-                              walkthrough and the console narrative.
-                              Ping me if anything in there doesn't
-                              hold up under your own hands-on test."
+                               walkthrough and the console narrative.
+                               Ping me if anything in there doesn't
+                               hold up under your own hands-on test."
+```
+
+### 5a. Operator handoff — what the prospect walks away with
+
+If the prospect wants a one-liner they can paste into an email or
+their CRM, point them at the artefacts:
+
+```
+$ cd /path/to/SBOS-A1-ERP
+$ npm test --silent           # 627 pass / 0 fail
+$ node server/finance/dashboard.js --help   # not yet wired (TODO wave-8.1)
+$ open docs/sales/WALKTHROUGH.md
+```
+
+And the talking-point summary they can forward to a colleague:
+
+```
+Open-core ERP. Brand-neutral. No proprietary lock-in.
+- 627 tests, 0 failures across finance + RBAC + l10n + audit
+- 18 l10n-am test files, 100% coverage on the audit scanner
+- Multi-period VAT carry-forward (RA Tax Code art. 68)
+- CFO dashboard wired to the 5 reporting functions
+- The sovereign stack is yours to fork, audit, and ship.
 ```
 
 If the prospect asks to see the wave-3 plan JSON itself, point at
