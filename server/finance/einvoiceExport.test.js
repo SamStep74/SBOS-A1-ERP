@@ -94,6 +94,7 @@ describe('finance — e-invoice export (real DB)', () => {
   let exportInvoiceEInvoice;
   let exportMonthlyEInvoices;
   let ValueError;
+  let EINVOICE_NAMESPACE;
 
   before(async () => {
     const sqlite = makeRealDb();
@@ -102,6 +103,7 @@ describe('finance — e-invoice export (real DB)', () => {
     exportInvoiceEInvoice = mod.exportInvoiceEInvoice;
     exportMonthlyEInvoices = mod.exportMonthlyEInvoices;
     ValueError = mod.ValueError;
+    EINVOICE_NAMESPACE = mod.EINVOICE_NAMESPACE;
   });
 
   test('1. exportInvoiceEInvoice: produces a valid XML for a single invoice with 20% VAT lines', async () => {
@@ -227,7 +229,7 @@ describe('finance — e-invoice export (real DB)', () => {
     const r = await exportInvoiceEInvoice(freshDb, i, SUPPLIER);
     // The URN is preserved verbatim across all wave-1 e-invoice ports
     // (per the wave-1 brand-strip exception). Don't change it.
-    assert.ok(r.xml.includes('urn:hayhashvapah:einvoice:1'),
+    assert.ok(r.xml.includes(EINVOICE_NAMESPACE),
       'EINVOICE_NAMESPACE URN must remain in the wire format');
   });
 

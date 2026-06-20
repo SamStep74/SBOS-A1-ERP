@@ -41,7 +41,7 @@
 //   - app.authenticate preHandler in place (sets request.user)
 //   - this.db (sqlite) on the app instance OR injected via opts.db
 import { PERMISSIONS, PERMISSIONS_VERSION, getDefinition, byCategory } from './permissions.js';
-import { ROLES, validateCustomRole, getRole, listRoleIds } from './roles.js';
+import { ROLES, validateCustomRole, listRoleIds } from './roles.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
 import {
   ROLE_MATRIX,
