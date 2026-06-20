@@ -177,7 +177,12 @@ function makeMockDb() {
           val = ps[Number(m[5]) - 1]; // param ref
         }
         filtered = filtered.filter((row) => {
-          const v = row[col];
+          // tenant_id is always-on after wave-13. Pre-wave-13 seed
+          // helpers (which don't set tenant_id) should still match
+          // tenant 0 — the default for all pre-migration rows. Read
+          // undefined as 0 here so the existing tests don't have to
+          // re-tag every row they seed.
+          const v = col === 'tenant_id' ? (row[col] ?? 0) : row[col];
           if (op === '=') return v === val;
           if (op === '!=' || op === '<>') return v !== val;
           if (op === '<=') return v <= val;

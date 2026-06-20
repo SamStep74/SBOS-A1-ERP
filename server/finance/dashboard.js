@@ -151,13 +151,17 @@ function renderOverdueSection(locale, rows) {
       <th class="right">${t(locale, 'dashboard.th.balance')}</th>
       <th class="right">${t(locale, 'dashboard.th.daysOverdue')}</th>
     </tr>
-    ${rows.map((r) => `
+    ${rows
+      .map(
+        (r) => `
     <tr>
       <td>${escapeHtml(r.invoice_number)}</td>
       <td>${escapeHtml(r.customer_name)}</td>
       <td class="num">${escapeHtml(fmtAmd(r.balance_amd))}</td>
       <td class="num">${r.days_overdue}</td>
-    </tr>`).join('')}
+    </tr>`,
+      )
+      .join('')}
   </table>
   `;
 }
@@ -205,14 +209,18 @@ function renderTopCustomersSection(locale, rows) {
       <th class="right">${t(locale, 'dashboard.th.paidAmount')}</th>
       <th class="right">${t(locale, 'dashboard.th.invoiceCount')}</th>
     </tr>
-    ${rows.map((r) => `
+    ${rows
+      .map(
+        (r) => `
     <tr>
       <td>${escapeHtml(r.customer_name)}</td>
       <td>${escapeHtml(r.hvhh || '—')}</td>
       <td class="num">${escapeHtml(fmtAmd(r.total_billed_amd))}</td>
       <td class="num">${escapeHtml(fmtAmd(r.total_paid_amd))}</td>
       <td class="num">${r.invoice_count}</td>
-    </tr>`).join('')}
+    </tr>`,
+      )
+      .join('')}
   </table>
   `;
 }
@@ -251,6 +259,10 @@ function renderVatSection(locale, v) {
  * @param {number} [opts.overdueLimit=10]  how many overdue invoices to show
  * @param {number} [opts.topCustomersLimit=10]
  * @param {string} [opts.locale='en']  one of LOCALES (hy/en/ru); unknown values fall back to 'en'
+ * @param {number} [opts.tenantId=0]  tenant scope; defaults to the bootstrap
+ *   tenant. Pre-wave-13 callers can omit this; the 5 report functions
+ *   then default to tenant 0 (the row default), which matches the
+ *   pre-migration data.
  * @returns {Promise<string>}  the full HTML page
  */
 export async function renderDashboard(db, asOfDate, opts = {}) {
@@ -260,16 +272,19 @@ export async function renderDashboard(db, asOfDate, opts = {}) {
   const locale = resolveLocale(opts.locale);
   const overdueLimit = opts.overdueLimit ?? 10;
   const topLimit = opts.topCustomersLimit ?? 10;
+  const tenantId = opts.tenantId ?? 0;
   const yearMonth = asOfDate.substring(0, 7);
   const yearStart = `${asOfDate.substring(0, 4)}-01-01`;
 
-  // Run all 5 reports in parallel — they're independent reads.
+  // Run all 5 reports in parallel — they're independent reads. Each is
+  // scoped to the caller's tenantId so a multi-tenant deployment can
+  // render the dashboard per tenant without any cross-tenant data leak.
   const [arAging, overdue, monthRevenue, topCustomers, vatSummary] = await Promise.all([
-    getArAging(db, asOfDate),
-    listOverdueInvoices(db, asOfDate, overdueLimit),
-    getMonthlyRevenue(db, yearMonth),
-    getTopCustomers(db, { since: yearStart, until: asOfDate, limit: topLimit }),
-    getVatSummary(db, yearStart, asOfDate),
+    getArAging(db, asOfDate, tenantId),
+    listOverdueInvoices(db, asOfDate, overdueLimit, tenantId),
+    getMonthlyRevenue(db, yearMonth, tenantId),
+    getTopCustomers(db, { since: yearStart, until: asOfDate, limit: topLimit }, tenantId),
+    getVatSummary(db, yearStart, asOfDate, tenantId),
   ]);
 
   return `<!DOCTYPE html>
@@ -331,7 +346,7 @@ export function serveDashboard(db, opts = {}) {
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
       // Tiny router — only GET / is supported.
-      if (req.method !== 'GET' || req.url !== '/' && !req.url.startsWith('/?')) {
+      if (req.method !== 'GET' || (req.url !== '/' && !req.url.startsWith('/?'))) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found\n');
         return;

@@ -100,6 +100,7 @@ function buildFinanceSchemaSqlite(sqliteDb) {
       name        TEXT NOT NULL,
       hvhh        TEXT,
       address     TEXT,
+      tenant_id   INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -115,6 +116,7 @@ function buildFinanceSchemaSqlite(sqliteDb) {
       status          TEXT NOT NULL DEFAULT 'draft'
                         CHECK (status IN ('draft','sent','paid','overdue','void')),
       notes           TEXT,
+      tenant_id       INTEGER NOT NULL DEFAULT 0,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
       sent_at         TEXT,
@@ -127,7 +129,8 @@ function buildFinanceSchemaSqlite(sqliteDb) {
       description     TEXT NOT NULL,
       quantity        REAL NOT NULL CHECK (quantity > 0),
       unit_price_amd  INTEGER NOT NULL CHECK (unit_price_amd >= 0),
-      line_total_amd  INTEGER NOT NULL
+      line_total_amd  INTEGER NOT NULL,
+      tenant_id       INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE finance.payments (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +140,7 @@ function buildFinanceSchemaSqlite(sqliteDb) {
       method      TEXT NOT NULL DEFAULT 'bank_transfer'
                     CHECK (method IN ('bank_transfer','cash','card','other')),
       reference   TEXT,
+      tenant_id   INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE finance.migration_history (

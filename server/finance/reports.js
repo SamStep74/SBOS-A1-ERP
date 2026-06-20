@@ -123,16 +123,18 @@ function monthBounds(yearMonth) {
 
 // ────────────────────────────────────────────────────────────────────────
 // Internal: fetch sums and paid-by-invoice map. Single query; works with
-// the mock's GROUP BY branch and the real DB's native SQL.
+// the mock's GROUP BY branch and the real DB's native SQL. Scoped to
+// the caller's tenantId so a tenant never sees another tenant's payments.
 // ────────────────────────────────────────────────────────────────────────
 
-async function buildPaidByInvoice(db) {
+async function buildPaidByInvoice(db, tenantId) {
   const out = await runQuery(
     db,
     `SELECT invoice_id, SUM(amount_amd) AS paid_amd
      FROM finance.payments
+     WHERE tenant_id = $1
      GROUP BY invoice_id`,
-    [],
+    [tenantId],
   );
   const map = new Map();
   for (const row of out.rows || []) {
@@ -170,17 +172,17 @@ async function buildPaidByInvoice(db) {
  *   }
  * }>}
  */
-export async function getArAging(db, asOfDate) {
+export async function getArAging(db, asOfDate, tenantId = 0) {
   assertDate(asOfDate, 'asOfDate');
 
   const invResult = await runQuery(
     db,
     `SELECT id, due_date, total_amd
      FROM finance.invoices
-     WHERE status IN ($1, $2) AND due_date < $3`,
-    [UNPAID_STATUSES[0], UNPAID_STATUSES[1], asOfDate],
+     WHERE tenant_id = $1 AND status IN ($2, $3) AND due_date < $4`,
+    [tenantId, UNPAID_STATUSES[0], UNPAID_STATUSES[1], asOfDate],
   );
-  const paidByInvoice = await buildPaidByInvoice(db);
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
 
   const buckets = {
     '0_30': { invoice_count: 0, amount_amd: 0 },
@@ -245,7 +247,12 @@ export async function getArAging(db, asOfDate) {
  *   balance_amd: number, due_date: string, days_overdue: number,
  * }>>}
  */
-export async function listOverdueInvoices(db, asOfDate, limit = DEFAULT_OVERDUE_LIMIT) {
+export async function listOverdueInvoices(
+  db,
+  asOfDate,
+  limit = DEFAULT_OVERDUE_LIMIT,
+  tenantId = 0,
+) {
   assertDate(asOfDate, 'asOfDate');
   const effectiveLimit = assertLimit(limit, 'limit', {
     defaultVal: DEFAULT_OVERDUE_LIMIT,
@@ -258,12 +265,12 @@ export async function listOverdueInvoices(db, asOfDate, limit = DEFAULT_OVERDUE_
             c.name AS customer_name
      FROM finance.invoices i
      JOIN finance.customers c ON c.id = i.customer_id
-     WHERE i.status IN ($1, $2) AND i.due_date < $3
+     WHERE i.tenant_id = $1 AND i.status IN ($2, $3) AND i.due_date < $4
      ORDER BY i.due_date ASC`,
-    [UNPAID_STATUSES[0], UNPAID_STATUSES[1], asOfDate],
+    [tenantId, UNPAID_STATUSES[0], UNPAID_STATUSES[1], asOfDate],
   );
 
-  const paidByInvoice = await buildPaidByInvoice(db);
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
   const rows = [];
   for (const inv of invResult.rows || []) {
     const total = Number(inv.total_amd);
@@ -310,7 +317,7 @@ export async function listOverdueInvoices(db, asOfDate, limit = DEFAULT_OVERDUE_
  *   paid_count: number,
  * }>}
  */
-export async function getMonthlyRevenue(db, yearMonth) {
+export async function getMonthlyRevenue(db, yearMonth, tenantId = 0) {
   assertYearMonth(yearMonth, 'yearMonth');
   const { first, last } = monthBounds(yearMonth);
 
@@ -318,8 +325,8 @@ export async function getMonthlyRevenue(db, yearMonth) {
     db,
     `SELECT id, total_amd
      FROM finance.invoices
-     WHERE issue_date >= $1 AND issue_date <= $2`,
-    [first, last],
+     WHERE tenant_id = $1 AND issue_date >= $2 AND issue_date <= $3`,
+    [tenantId, first, last],
   );
   const invRows = invResult.rows || [];
   const invoiceIds = invRows.map((r) => Number(r.id));
@@ -335,8 +342,8 @@ export async function getMonthlyRevenue(db, yearMonth) {
     db,
     `SELECT invoice_id, amount_amd
      FROM finance.payments
-     WHERE paid_at >= $1 AND paid_at <= $2`,
-    [`${first}T00:00:00Z`, `${last}T23:59:59Z`],
+     WHERE tenant_id = $1 AND paid_at >= $2 AND paid_at <= $3`,
+    [tenantId, `${first}T00:00:00Z`, `${last}T23:59:59Z`],
   );
   let collected = 0;
   for (const p of payResult.rows || []) {
@@ -345,7 +352,7 @@ export async function getMonthlyRevenue(db, yearMonth) {
   collected = roundAmd(collected);
 
   // Fully-paid count: in-month invoice whose total_paid_amd >= total_amd.
-  const paidByInvoice = await buildPaidByInvoice(db);
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
   let paidCount = 0;
   for (const inv of invRows) {
     const id = Number(inv.id);
@@ -381,7 +388,7 @@ export async function getMonthlyRevenue(db, yearMonth) {
  *   invoice_count: number,
  * }>>}
  */
-export async function getTopCustomers(db, { since, until, limit } = {}) {
+export async function getTopCustomers(db, { since, until, limit } = {}, tenantId = 0) {
   if (since !== undefined) assertDate(since, 'since');
   if (until !== undefined) assertDate(until, 'until');
   const effectiveLimit = assertLimit(limit, 'limit', {
@@ -389,9 +396,15 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
     maxVal: MAX_TOP_CUSTOMERS_LIMIT,
   });
 
-  // Build the optional date-range filter.
-  const conds = [`i.status IN (${BILLED_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})`];
-  const params = [...BILLED_STATUSES];
+  // Build the optional date-range filter. tenant_id is the FIRST
+  // condition so it can short-circuit on the partial index
+  // (idx_finance_invoices_tenant_issue_date).
+  const conds = [`i.tenant_id = $1`];
+  const params = [tenantId];
+  conds.push(
+    `i.status IN (${BILLED_STATUSES.map((_, i) => `$${i + 1 + params.length}`).join(', ')})`,
+  );
+  params.push(...BILLED_STATUSES);
   if (since !== undefined) {
     params.push(since);
     conds.push(`i.issue_date >= $${params.length}`);
@@ -413,7 +426,7 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
   params.push(effectiveLimit);
 
   const result = await runQuery(db, sql, params);
-  const paidByInvoice = await buildPaidByInvoice(db);
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
 
   // Compute per-customer paid totals. We need a second pass to know
   // which invoices belong to each customer.
@@ -435,10 +448,13 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
   for (let i = 0; i < out.length; i += 1) {
     const cid = out[i].customer_id;
     // Re-query invoice ids for this customer (cheap, since the top-N
-    // list is small).
-    const invs = await runQuery(db, `SELECT id FROM finance.invoices WHERE customer_id = $1`, [
-      cid,
-    ]);
+    // list is small). Also scoped to the tenant so a top-customers call
+    // for tenant A never reaches into tenant B's invoice history.
+    const invs = await runQuery(
+      db,
+      `SELECT id FROM finance.invoices WHERE tenant_id = $1 AND customer_id = $2`,
+      [tenantId, cid],
+    );
     let totalPaid = 0;
     for (const inv of invs.rows || []) {
       totalPaid += paidByInvoice.get(Number(inv.id)) || 0;
@@ -476,7 +492,7 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
  *   invoice_count: number,
  * }>}
  */
-export async function getVatSummary(db, since, until) {
+export async function getVatSummary(db, since, until, tenantId = 0) {
   assertDate(since, 'since');
   assertDate(until, 'until');
   if (until < since) {
@@ -489,9 +505,9 @@ export async function getVatSummary(db, since, until) {
     `SELECT COALESCE(SUM(vat_amd), 0) AS vat_invoiced_amd,
             COUNT(*) AS invoice_count
      FROM finance.invoices
-     WHERE issue_date >= $1 AND issue_date <= $2
+     WHERE tenant_id = $1 AND issue_date >= $2 AND issue_date <= $3
        AND status <> 'void'`,
-    [since, until],
+    [tenantId, since, until],
   );
   const invoiced = Number(invoicedResult.rows?.[0]?.vat_invoiced_amd ?? 0);
   const invoiceCount = Number(invoicedResult.rows?.[0]?.invoice_count ?? 0);
@@ -501,9 +517,9 @@ export async function getVatSummary(db, since, until) {
     db,
     `SELECT COALESCE(SUM(vat_amd), 0) AS vat_paid_amd
      FROM finance.invoices
-     WHERE issue_date >= $1 AND issue_date <= $2
+     WHERE tenant_id = $1 AND issue_date >= $2 AND issue_date <= $3
        AND status = 'paid'`,
-    [since, until],
+    [tenantId, since, until],
   );
   const paid = Number(paidResult.rows?.[0]?.vat_paid_amd ?? 0);
 
