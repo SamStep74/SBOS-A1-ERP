@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { vatReturnForm, validateVatReturnForm } from './vatReturn.js';
+import {
+  vatReturnForm,
+  validateVatReturnForm,
+  computeVatReturn,
+  line7_totalTaxableBase,
+  line9_zeroRatedSupplies,
+  line12_exemptSupplies,
+  line13_importsVatBase,
+  line16_reverseChargeVat,
+  line18_adjustments,
+  line21_vatToPay,
+  line23_inputVatCreditBase,
+} from './vatReturn.js';
 
 // A representative period that produces a PAYABLE position (output VAT > input VAT).
 const payablePeriod = {
@@ -374,4 +386,182 @@ test('validateVatReturnForm: i18n — every emitted error message is non-empty i
       );
     }
   }
+});
+
+// --- wave-4: 8 new per-line helpers (decree N 298-Ն aggregate view) ---------
+// Cross-foot and decomposition guarantees on the wave-4 return shape. The
+// official VAT return must tie out across all 8 lines — any drift between the
+// per-line helpers and the form totals is a finance-fatal filing error.
+
+test('computeVatReturn: 8 new line aggregates sum correctly across a full VAT return', () => {
+  // Use the canonical payable period and assert the wave-4 helpers agree with
+  // the underlying form-mapping (line 7 base ≡ standard sales base; line 13
+  // base ≡ form line 17 base; line 23 base ≡ form line 17+18 base; etc.).
+  const r = computeVatReturn(payablePeriod);
+  const form = vatReturnForm(payablePeriod);
+
+  // Line 7 — total taxable base across sales + purchases.
+  assert.equal(r.totalTaxableBase, 2650000); // 1M + 600K + 200K + 50K sales + 300K + 400K + 100K purchases
+
+  // Line 9 — zero-rated supplies (vatRate===0, NOT category:'exempt').
+  // The period has one zero-rated sale (200K) and one exempt (50K).
+  assert.equal(r.zeroRatedSupplies, 200000);
+  // And the helper agrees when called directly on a synthesized invoice.
+  assert.equal(
+    line9_zeroRatedSupplies({ lines: payablePeriod.sales }),
+    200000,
+  );
+
+  // Line 12 — exempt supplies (category:'exempt').
+  assert.equal(r.exemptSupplies, 50000);
+  assert.equal(
+    line12_exemptSupplies({ lines: payablePeriod.sales }),
+    50000,
+  );
+
+  // Line 13 — imports base (source:'import'). Ties out with form line 17 base.
+  assert.equal(r.importsVatBase, form.lines['17'].base);
+  assert.equal(r.importsVatBase, 300000);
+
+  // Line 16 — reverse-charge VAT. No reverse-charge in this period.
+  assert.equal(r.reverseChargeVat, 0);
+  assert.equal(
+    line16_reverseChargeVat({ lines: payablePeriod.sales }),
+    0,
+  );
+
+  // Line 18 — adjustments. Default 0.
+  assert.equal(r.adjustments, 0);
+  assert.equal(line18_adjustments({}), 0);
+
+  // Line 23 — input VAT credit base. Ties out with form line 17 base + line 18 base.
+  assert.equal(r.inputVatCreditBase, form.lines['17'].base + form.lines['18'].base);
+  assert.equal(r.inputVatCreditBase, 700000); // 300K import + 400K domestic (100K excluded)
+
+  // Sanity: every one of the 8 wave-4 fields is a non-negative integer.
+  for (const [k, v] of Object.entries({
+    totalTaxableBase: r.totalTaxableBase,
+    zeroRatedSupplies: r.zeroRatedSupplies,
+    exemptSupplies: r.exemptSupplies,
+    importsVatBase: r.importsVatBase,
+    reverseChargeVat: r.reverseChargeVat,
+    adjustments: r.adjustments,
+    vatToPay: r.vatToPay,
+    inputVatCreditBase: r.inputVatCreditBase,
+  })) {
+    assert.ok(Number.isInteger(v) && v >= 0, `field ${k} must be a non-negative integer, got ${v}`);
+  }
+});
+
+test('computeVatReturn: line 21 (VAT to pay) clamps to 0 on a negative net (carry-forward TODO)', () => {
+  // Recoverable period: input VAT far exceeds output VAT → Armenia carries
+  // the credit forward, never refunds. Wave-4 clamps at 0; the carried
+  // amount is surfaced separately via creditCarried.
+  const r = computeVatReturn(recoverablePeriod);
+
+  // The headline vatToPay is clamped at 0 (no negative payable to SRC).
+  assert.equal(r.vatToPay, 0);
+  assert.ok(r.creditCarried > 0, `expected a positive credit carry, got ${r.creditCarried}`);
+
+  // And the helper itself clamps when called directly.
+  assert.equal(
+    line21_vatToPay({
+      outputVat: 20000,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: 50000,
+      importInputVat: 50000,
+      adjustments: 0,
+    }),
+    0,
+  );
+  // Positive adjustments bring it back above 0.
+  assert.equal(
+    line21_vatToPay({
+      outputVat: 20000,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: 50000,
+      importInputVat: 50000,
+      adjustments: 200000, // prior-period correction clears the negative
+    }),
+    120000,
+  );
+});
+
+test('computeVatReturn: invoice with both line-19 (input VAT) and line-20 (input VAT on imports) decomposes correctly', () => {
+  // Mixed source purchases — verifies the inputVat split that feeds line 21.
+  const r = computeVatReturn({
+    sales: [{ netAmount: 1000000, vatRate: 20 }],
+    purchases: [
+      { netAmount: 300000, vatRate: 20, source: 'import' }, // line-20: import input VAT
+      { netAmount: 400000, vatRate: 20, source: 'domestic' }, // line-19: domestic input VAT
+    ],
+  });
+
+  // Total recoverable input VAT (backward-compat field).
+  assert.equal(r.inputVat, 140000); // 60000 + 80000
+
+  // Decomposition split: domestic vs import input VAT.
+  assert.equal(r.domesticInputVat, 80000); // 400000 * 20%
+  assert.equal(r.importInputVat, 60000); // 300000 * 20%
+  assert.equal(r.domesticInputVat + r.importInputVat, r.inputVat);
+
+  // Line 21 headline = outputVat − domesticInputVat − importInputVat = 200000 − 80000 − 60000 = 60000.
+  assert.equal(r.vatToPay, 60000);
+  assert.equal(r.payable, 60000); // matches existing semantics when no reverse-charge / adjustments
+
+  // line23 base = sum of recoverable purchases = 700000.
+  assert.equal(r.inputVatCreditBase, 700000);
+  // line13 base = import base only = 300000.
+  assert.equal(r.importsVatBase, 300000);
+
+  // And the helper itself, called directly with the same decomposition, returns the
+  // same headline — confirms computeVatReturn is correctly wiring the split.
+  assert.equal(
+    line21_vatToPay({
+      outputVat: r.outputVat,
+      importVat: 0,
+      reverseChargeVat: 0,
+      inputVat: r.domesticInputVat,
+      importInputVat: r.importInputVat,
+      adjustments: r.adjustments,
+    }),
+    r.vatToPay,
+  );
+});
+
+test('computeVatReturn: an empty period returns all-zero wave-4 fields', () => {
+  const r = computeVatReturn({ sales: [], purchases: [] });
+
+  // Backward-compat fields.
+  assert.equal(r.outputVat, 0);
+  assert.equal(r.inputVat, 0);
+  assert.equal(r.net, 0);
+  assert.equal(r.payable, 0);
+  assert.equal(r.creditCarried, 0);
+
+  // Wave-4 new fields — all zero on an empty period.
+  assert.equal(r.totalTaxableBase, 0);
+  assert.equal(r.zeroRatedSupplies, 0);
+  assert.equal(r.exemptSupplies, 0);
+  assert.equal(r.importsVatBase, 0);
+  assert.equal(r.reverseChargeVat, 0);
+  assert.equal(r.adjustments, 0);
+  assert.equal(r.vatToPay, 0);
+  assert.equal(r.inputVatCreditBase, 0);
+
+  // Decomposition split.
+  assert.equal(r.domesticInputVat, 0);
+  assert.equal(r.importInputVat, 0);
+
+  // Per-helper sanity on empty inputs (matches the empty-period totals).
+  assert.equal(line7_totalTaxableBase({}), 0);
+  assert.equal(line9_zeroRatedSupplies({}), 0);
+  assert.equal(line12_exemptSupplies({}), 0);
+  assert.equal(line13_importsVatBase({}), 0);
+  assert.equal(line16_reverseChargeVat({}), 0);
+  assert.equal(line18_adjustments({}), 0);
+  assert.equal(line21_vatToPay({}), 0);
+  assert.equal(line23_inputVatCreditBase({}), 0);
 });

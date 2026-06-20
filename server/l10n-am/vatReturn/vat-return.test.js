@@ -7,6 +7,14 @@ import {
   IMPUTED_VAT_RATE,
   VAT_RETURN_FORM_SOURCE,
   VAT_RETURN_FORM_LINE_DEFINITIONS,
+  line7_totalTaxableBase,
+  line9_zeroRatedSupplies,
+  line12_exemptSupplies,
+  line13_importsVatBase,
+  line16_reverseChargeVat,
+  line18_adjustments,
+  line21_vatToPay,
+  line23_inputVatCreditBase,
 } from './vatReturn.js';
 
 test('vat-return: net = output VAT minus recoverable input VAT (payable to SRC)', () => {
@@ -233,4 +241,225 @@ test('vat-return-form: every line definition carries the same shape (section/lab
     assert.ok(Array.isArray([...def.fields]), `line ${id} fields must be an array`);
     assert.ok(def.fields.length > 0, `line ${id} must declare at least one field`);
   }
+});
+
+// --- wave-4: per-line helpers (decree N 298-Ն aggregate view) ---------------
+// Each line 7/9/12/13/16/18/23 helper takes an invoice and returns the line's
+// value. Line 21 takes a VAT decomposition (per-period aggregate) and returns
+// the headline "VAT to pay" amount, clamped at 0 (carry-forward TODO wave-5+).
+// For every line we assert two paths: a realistic Armenian tax scenario that
+// produces a non-zero value, and an input that produces 0.
+
+test('line7_totalTaxableBase: sums netAmount across all invoice line items (multi-line invoice)', () => {
+  // Realistic mixed invoice: one standard-rate supply, one zero-rated, one exempt.
+  const invoice = {
+    lines: [
+      { netAmount: 1000000, vatRate: 20 },
+      { netAmount: 200000, vatRate: 0 }, // zero-rated
+      { netAmount: 50000, category: 'exempt' },
+    ],
+  };
+  assert.equal(line7_totalTaxableBase(invoice), 1250000);
+});
+
+test('line7_totalTaxableBase: an empty invoice is zero', () => {
+  assert.equal(line7_totalTaxableBase({ lines: [] }), 0);
+  assert.equal(line7_totalTaxableBase({}), 0); // missing lines key
+});
+
+test('line9_zeroRatedSupplies: sum of zero-rated lines (exports, international services, art. 65)', () => {
+  // A coffee exporter: domestic sales 1M @ 20% + export sales 500K @ 0%.
+  const invoice = {
+    lines: [
+      { netAmount: 1000000, vatRate: 20 },
+      { netAmount: 500000, vatRate: 0 }, // export → line 9
+    ],
+  };
+  assert.equal(line9_zeroRatedSupplies(invoice), 500000);
+});
+
+test('line9_zeroRatedSupplies: exempt lines (category "exempt") are NOT zero-rated, even when vatRate=0', () => {
+  // Exempt supplies have their own line 12 — must not bleed into line 9.
+  const invoice = {
+    lines: [
+      { netAmount: 100000, vatRate: 0, category: 'exempt' },
+      { netAmount: 200000, vatRate: 0 }, // plain zero-rated
+    ],
+  };
+  assert.equal(line9_zeroRatedSupplies(invoice), 200000);
+});
+
+test('line12_exemptSupplies: sum of exempt lines (financial, medical, educational, art. 64)', () => {
+  // A clinic's invoice: consultation (exempt) + pharmacy sales (standard).
+  const invoice = {
+    lines: [
+      { netAmount: 300000, category: 'exempt' }, // medical service → line 12
+      { netAmount: 150000, vatRate: 20 }, // pharmacy sale → not exempt
+    ],
+  };
+  assert.equal(line12_exemptSupplies(invoice), 300000);
+});
+
+test('line12_exemptSupplies: a zero-rated line without category "exempt" is not exempt', () => {
+  const invoice = {
+    lines: [{ netAmount: 100000, vatRate: 0 }],
+  };
+  assert.equal(line12_exemptSupplies(invoice), 0);
+});
+
+test('line13_importsVatBase: sum of import-purchase lines (RA Tax Code art. 71)', () => {
+  // An importer's purchase batch: domestic 400K + import 300K.
+  const invoice = {
+    lines: [
+      { netAmount: 400000, vatRate: 20, source: 'domestic' },
+      { netAmount: 300000, vatRate: 20, source: 'import' }, // → line 13 base
+    ],
+  };
+  assert.equal(line13_importsVatBase(invoice), 300000);
+});
+
+test('line13_importsVatBase: a domestic-only invoice has zero imports base', () => {
+  const invoice = {
+    lines: [{ netAmount: 500000, vatRate: 20, source: 'domestic' }],
+  };
+  assert.equal(line13_importsVatBase(invoice), 0);
+});
+
+test('line16_reverseChargeVat: 20% reverse-charge on an imported service from a non-VAT-payer (art. 72)', () => {
+  // Reverse-charge example: a foreign SaaS purchase (buyer acts as VAT agent).
+  // Base 1000000, no vatRate declared → engine uses standard 20%.
+  const invoice = {
+    lines: [
+      { netAmount: 1000000, isReverseCharge: true }, // no vatRate → 20%
+    ],
+  };
+  assert.equal(line16_reverseChargeVat(invoice), 200000);
+});
+
+test('line16_reverseChargeVat: lines without isReverseCharge are excluded', () => {
+  const invoice = {
+    lines: [
+      { netAmount: 100000, vatRate: 20 }, // standard sale, not reverse-charge
+      { netAmount: 200000, vatRate: 20, isReverseCharge: true },
+    ],
+  };
+  assert.equal(line16_reverseChargeVat(invoice), 40000); // only the second line
+});
+
+test('line18_adjustments: net of increase and decrease (prior-period corrections, rounding)', () => {
+  // Period adjustments: +5000 from a corrected prior invoice, -2000 rounding.
+  const invoice = { adjustments: { increase: 5000, decrease: 2000 } };
+  assert.equal(line18_adjustments(invoice), 3000);
+});
+
+test('line18_adjustments: invoice without adjustments declared is zero', () => {
+  assert.equal(line18_adjustments({}), 0);
+  assert.equal(line18_adjustments({ lines: [{ netAmount: 1000, vatRate: 20 }] }), 0);
+});
+
+test('line21_vatToPay: aggregate decomposition — output + imports + reverse-charge − input − import-input ± adjustments', () => {
+  // Standard payable period:
+  //   output 20% sales 200000 (line 14)
+  //   import input VAT 60000 (line 20)
+  //   domestic input VAT 80000 (line 19)
+  //   no reverse-charge, no adjustments, no output-side imports
+  const vatToPay = line21_vatToPay({
+    outputVat: 200000,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: 80000, // domestic-only
+    importInputVat: 60000, // import-only credit
+    adjustments: 0,
+  });
+  // 200000 + 0 + 0 − 80000 − 60000 + 0 = 60000
+  assert.equal(vatToPay, 60000);
+});
+
+test('line21_vatToPay: negative net is clamped at 0 (carry-forward is TODO wave-5+)', () => {
+  // Recoverable period: input VAT exceeds output VAT → no refund in Armenia,
+  // the balance is carried forward. Wave-4 clamps to 0; wave-5+ will bank it.
+  const vatToPay = line21_vatToPay({
+    outputVat: 20000,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: 50000,
+    importInputVat: 50000,
+    adjustments: 0,
+  });
+  // 20000 − 50000 − 50000 = −80000 → clamped to 0
+  assert.equal(vatToPay, 0);
+});
+
+test('line21_vatToPay: positive adjustments increase the VAT to pay', () => {
+  const vatToPay = line21_vatToPay({
+    outputVat: 100000,
+    importVat: 0,
+    reverseChargeVat: 0,
+    inputVat: 20000,
+    importInputVat: 0,
+    adjustments: 5000, // prior-period correction in the SRC's favor
+  });
+  // 100000 + 0 + 0 − 20000 − 0 + 5000 = 85000
+  assert.equal(vatToPay, 85000);
+});
+
+test('line21_vatToPay: an empty decomposition is zero', () => {
+  assert.equal(line21_vatToPay({}), 0);
+  assert.equal(line21_vatToPay(), 0); // missing argument
+});
+
+test('line23_inputVatCreditBase: sum of recoverable purchase bases (art. 66 input VAT credit)', () => {
+  // Mixed purchase batch: 2 recoverable + 1 non-recoverable.
+  const invoice = {
+    lines: [
+      { netAmount: 400000, vatRate: 20, source: 'domestic', recoverable: true },
+      { netAmount: 300000, vatRate: 20, source: 'import', recoverable: true },
+      { netAmount: 100000, vatRate: 20, recoverable: false }, // excluded
+    ],
+  };
+  assert.equal(line23_inputVatCreditBase(invoice), 700000);
+});
+
+test('line23_inputVatCreditBase: a fully non-recoverable purchase batch is zero', () => {
+  const invoice = {
+    lines: [
+      { netAmount: 500000, vatRate: 20, recoverable: false },
+      { netAmount: 200000, vatRate: 20, recoverable: false },
+    ],
+  };
+  assert.equal(line23_inputVatCreditBase(invoice), 0);
+});
+
+// --- wave-4: computeVatReturn wires the per-line helpers into the return ---
+
+test('computeVatReturn: wave-4 return shape includes the 8 new line aggregates', () => {
+  const r = computeVatReturn({
+    sales: [
+      { netAmount: 1000000, vatRate: 20 },
+      { netAmount: 200000, vatRate: 0 }, // zero-rated
+      { netAmount: 50000, category: 'exempt' },
+    ],
+    purchases: [
+      { netAmount: 300000, vatRate: 20, source: 'import' },
+      { netAmount: 400000, vatRate: 20, source: 'domestic' },
+      { netAmount: 100000, vatRate: 20, recoverable: false },
+    ],
+  });
+  // Backward-compatible fields (existing tests).
+  assert.equal(r.outputVat, 200000);
+  assert.equal(r.inputVat, 140000); // total recoverable
+  assert.equal(r.net, 60000);
+  assert.equal(r.payable, 60000);
+  // Wave-4 new fields.
+  assert.equal(r.totalTaxableBase, 1000000 + 200000 + 50000 + 300000 + 400000 + 100000); // = 2050000
+  assert.equal(r.zeroRatedSupplies, 200000);
+  assert.equal(r.exemptSupplies, 50000);
+  assert.equal(r.importsVatBase, 300000);
+  assert.equal(r.reverseChargeVat, 0);
+  assert.equal(r.adjustments, 0);
+  assert.equal(r.vatToPay, 60000); // matches payable when no reverse-charge / adjustments / output-side imports
+  assert.equal(r.inputVatCreditBase, 300000 + 400000); // 700000 (recoverable only)
+  // Decomposition (split of inputVat for line-21 audit trail).
+  assert.equal(r.domesticInputVat, 80000);
+  assert.equal(r.importInputVat, 60000);
 });
