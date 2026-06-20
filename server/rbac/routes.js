@@ -31,6 +31,10 @@
 //   GET    /api/rbac/sessions                         (security.session.list)
 //   DELETE /api/rbac/sessions/:id                     (security.session.revoke)
 //   GET    /api/rbac/audit                            (security.audit.read)
+//   GET    /api/rbac/approvals                        (security.approval.read)
+//   POST   /api/rbac/approvals                        (security.approval.request)
+//   POST   /api/rbac/approvals/:id/approve            (security.approval.decide)
+//   POST   /api/rbac/approvals/:id/reject             (security.approval.decide)
 //   GET    /api/rbac/me/permissions                   (auth required) — return effective set
 //
 // The router expects to be registered with a Fastify app that has:
@@ -56,6 +60,15 @@ import {
   NotFoundError as ProfileNotFoundError,
   ConflictError as ProfileConflictError,
 } from './profiles.js';
+import {
+  requestApproval,
+  listPendingApprovals,
+  approveRequest,
+  rejectRequest,
+  expireStale,
+  ValueError as ApprovalValueError,
+} from './approvals.js';
+
 function registerRbacRoutes(app, opts = {}) {
   const db = opts.db || app.db;
   if (!db) {
@@ -742,6 +755,110 @@ function registerRbacRoutes(app, opts = {}) {
         }
       }
       return { ok: issues.length === 0, issues };
+    },
+  );
+
+  // ───── Approval / Dual-control workflow ─────
+  //
+  // Phase 0.4 wiring for sbos_rbac_approvals. The four endpoints below
+  // are the public surface; the business logic lives in
+  // server/rbac/approvals.js (pure, framework-agnostic functions).
+  //
+  // All four endpoints read tenant_id from the authenticated user and
+  // refuse to act across tenant boundaries — there is no path that
+  // lets a caller specify an arbitrary tenant_id for read or write.
+
+  app.get(
+    '/api/rbac/approvals',
+    { preHandler: requirePermFastify('security.approval.read') },
+    async (request) => {
+      // Opportunistically sweep stale rows so the queue UI never
+      // shows rows that are past their expires_at. expireStale is
+      // idempotent and cheap on the typical small N of pending rows.
+      expireStale(db);
+      const limit = Math.min(Number(request.query.limit) || 100, 500);
+      const items = listPendingApprovals(db, {
+        tenantId: request.user.tenant_id || 0,
+        limit,
+      });
+      return { items };
+    },
+  );
+
+  app.post(
+    '/api/rbac/approvals',
+    { preHandler: requirePermFastify('security.approval.request') },
+    async (request, reply) => {
+      const body = request.body || {};
+      try {
+        const id = requestApproval(db, {
+          tenantId: request.user.tenant_id || 0,
+          resource: body.resource,
+          action: body.action,
+          payloadJson: typeof body.payloadJson === 'string' ? body.payloadJson : '{}',
+          requestedBy: request.user.id,
+        });
+        return reply.code(201).send({ id, status: 'pending' });
+      } catch (err) {
+        if (err instanceof ApprovalValueError) {
+          return reply.code(400).send({ error: 'invalid_request', message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.post(
+    '/api/rbac/approvals/:id/approve',
+    { preHandler: requirePermFastify('security.approval.decide') },
+    async (request, reply) => {
+      try {
+        const result = approveRequest(db, {
+          approvalId: request.params.id,
+          approvedBy: request.user.id,
+        });
+        return result;
+      } catch (err) {
+        if (err instanceof ApprovalValueError) {
+          // dual-control and not-pending both surface as 409 (conflict);
+          // unknown id is 404. Distinguish by the message text — the
+          // error string is stable enough to be a contract here.
+          const status = /not found/i.test(err.message) ? 404 : 409;
+          return reply
+            .code(status)
+            .send({ error: status === 404 ? 'not_found' : 'conflict', message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.post(
+    '/api/rbac/approvals/:id/reject',
+    { preHandler: requirePermFastify('security.approval.decide') },
+    async (request, reply) => {
+      const body = request.body || {};
+      try {
+        const result = rejectRequest(db, {
+          approvalId: request.params.id,
+          rejectedBy: request.user.id,
+          reason: body.reason,
+        });
+        return result;
+      } catch (err) {
+        if (err instanceof ApprovalValueError) {
+          // Same shape as approve: 404 for unknown id, 409 for dual-
+          // control / not-pending, 400 for missing reason.
+          let status = 409;
+          if (/not found/i.test(err.message)) status = 404;
+          else if (/reason/i.test(err.message)) status = 400;
+          return reply.code(status).send({
+            error: status === 404 ? 'not_found' : status === 400 ? 'invalid_request' : 'conflict',
+            message: err.message,
+          });
+        }
+        throw err;
+      }
     },
   );
 }

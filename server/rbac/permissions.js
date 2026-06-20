@@ -410,6 +410,32 @@ const PERMISSIONS = Object.freeze({
     description: 'Revoke an API key.',
   },
 
+  // ───────────── Approval / Dual-control ─────────────
+  //
+  // These keys gate the dual-control workflow for "critical" actions
+  // (sbos_rbac_approvals table). The approver must be a different user
+  // than the requester — this is enforced inside server/rbac/approvals.js,
+  // not via the permission check, so an Admin can't approve their own
+  // request even with security.approval.decide.
+  'security.approval.read': {
+    category: 'security',
+    sensitivity: 'medium',
+    label: 'View approval queue',
+    description: 'View pending and historical approval requests.',
+  },
+  'security.approval.request': {
+    category: 'security',
+    sensitivity: 'medium',
+    label: 'Request approval',
+    description: 'Submit a critical action for second-person approval.',
+  },
+  'security.approval.decide': {
+    category: 'security',
+    sensitivity: 'high',
+    label: 'Decide approval',
+    description: 'Approve or reject a pending approval (must be a different user).',
+  },
+
   // ───────────── Finance & Accounting ─────────────
   'finance.coa.read': {
     category: 'finance',
