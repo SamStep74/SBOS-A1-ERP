@@ -175,6 +175,31 @@ finding as a real defect to triage, not noise.
 The close is a 3-minute speech. There is nothing for the operator
 to type. The talking points are in [`WALKTHROUGH.md` §5](./WALKTHROUGH.md#5-close-3-minutes--what-landed-and-whats-next).
 
+The "expected output" for a verbal section is the operator's
+speaking script. The block below is the literal words to say
+during the close. Read it slowly. Pause after each beat.
+
+```
+[Beat 1 — the artefacts]   "The artefacts do the talking.
+                              Three wave-3 deliverables just shipped:
+                              audit scanner hardening, rbac coverage,
+                              and this walkthrough."
+
+[Beat 2 — the pipeline]     "The open pipeline is CRM, Finance,
+                              and Reporting. The dmux-workflow pattern
+                              is how each lands — three workers per
+                              wave, disjoint file groups, one merge."
+
+[Beat 3 — the posture]       "Open-core. No proprietary lock-in.
+                              Brand-neutral. The sovereign stack
+                              is yours to fork, audit, and ship."
+
+[Beat 4 — the door]          "Thank you. I'll leave you with the
+                              walkthrough and the console narrative.
+                              Ping me if anything in there doesn't
+                              hold up under your own hands-on test."
+```
+
 If the prospect asks to see the wave-3 plan JSON itself, point at
 [`.orchestration/sbos-a1-erp-wave-3.json`](../../.orchestration/sbos-a1-erp-wave-3.json) — three workers,
 three disjoint surfaces, one merge commit.
