@@ -15,13 +15,6 @@
 //
 // TDD: this file is the RED commit. server/index.js, server/server.js,
 // and server/finance/routes.js are added in the GREEN commit.
-//
-// Note on the schema: the canonical finance migrations under
-// server/finance/migrations/ are Postgres-targeted (BIGSERIAL,
-// TIMESTAMPTZ, CREATE SCHEMA). The production boot path uses
-// applyMigrations() against a real pg instance. The test harness
-// uses a sqlite-friendly schema mirror — same shape, sqlite types —
-// matching the pattern in server/finance/dashboard.test.js.
 
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,10 +36,13 @@ function makeFinanceDb() {
   sqliteDb.exec('ATTACH DATABASE ":memory:" AS finance');
   sqliteDb.exec('PRAGMA foreign_keys = OFF');
   // Mirror of the production finance schema with sqlite-friendly
-  // types. Mirrors the migration chain (0001..0005) by combining
-  // the column sets rather than running the Postgres-targeted
-  // migration files. Keep in sync with
-  // server/finance/migrations/0001..0005 when adding columns.
+  // types. The canonical migrations under server/finance/migrations/
+  // are Postgres-targeted (BIGSERIAL, TIMESTAMPTZ, CREATE SCHEMA).
+  // The test harness builds a sqlite-compatible mirror with the same
+  // column shape — same pattern as dashboard.test.js' makeRealDb.
+  // The mirror here is a UNION of every column added in 0001..0005
+  // so tests that exercise the latest SQL still resolve every
+  // column the production code references.
   sqliteDb.exec(`
     CREATE TABLE finance.customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,12 +95,14 @@ function makeFinanceDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE finance.vat_carry_forward (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
+      id INTEGER NOT NULL,
       tenant_id INTEGER NOT NULL DEFAULT 0,
       balance_amd INTEGER NOT NULL DEFAULT 0,
       as_of_period TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (tenant_id, id),
+      CHECK (id = 1)
     );
   `);
   return { sqliteDb, dir };

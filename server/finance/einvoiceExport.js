@@ -10,8 +10,16 @@
 // concern (operator action).
 //
 // Public API:
-//   exportInvoiceEInvoice(db, invoiceId, supplier) → { invoiceNumber, xml }
-//   exportMonthlyEInvoices(db, yearMonth, supplier) → Array<{ invoiceNumber, xml }>
+//   exportInvoiceEInvoice(db, invoiceId, supplier, tenantId=0) → { invoiceNumber, xml }
+//   exportMonthlyEInvoices(db, yearMonth, supplier, tenantId=0) → Array<{ invoiceNumber, xml }>
+//
+// Wave-13: both functions take an optional `tenantId` (defaults to
+// the bootstrap tenant 0) and scope every SELECT to that tenant.
+// Cross-tenant reads return null / empty — the caller surfaces
+// that as a 404 / empty array. The `tenantId` parameter is a true
+// declared param (not a silent extra arg); routes that previously
+// passed `req.tenantId` as the Nth positional now land on the right
+// parameter and the SQL filters by `tenant_id = $N`.
 //
 // `supplier` is the company's own profile (name, hvhh, vatId, address).
 // It is NOT in the finance DB (this is the operator's own company, not
@@ -52,16 +60,22 @@ function assertYearMonth(yearMonth) {
 /**
  * Fetch one invoice + its line items + the customer row.
  * Returns `null` if the invoice doesn't exist.
+ *
+ * Wave-13 (multi-tenant): the SELECT is scoped to the caller's
+ * tenant via `WHERE i.tenant_id = $2`. A cross-tenant request
+ * returns `null` (same shape as a missing invoice) — the caller
+ * surfaces that as a 404, so a cross-tenant probe is
+ * indistinguishable from a non-existent id.
  */
-async function fetchInvoiceWithLines(db, invoiceId) {
+async function fetchInvoiceWithLines(db, invoiceId, tenantId = 0) {
   const invResult = await db.query(
     `SELECT i.id, i.invoice_number, i.issue_date, i.due_date,
             i.subtotal_amd, i.vat_amd, i.total_amd, i.status,
             c.id AS customer_id, c.name AS customer_name, c.hvhh, c.address
      FROM finance.invoices i
      JOIN finance.customers c ON c.id = i.customer_id
-     WHERE i.id = $1`,
-    [invoiceId],
+     WHERE i.tenant_id = $1 AND i.id = $2`,
+    [tenantId, invoiceId],
   );
   const invRows = invResult.rows || [];
   if (invRows.length === 0) return null;
@@ -70,17 +84,21 @@ async function fetchInvoiceWithLines(db, invoiceId) {
   const lineResult = await db.query(
     `SELECT description, quantity, unit_price_amd, line_total_amd
      FROM finance.invoice_lines
-     WHERE invoice_id = $1
+     WHERE tenant_id = $1 AND invoice_id = $2
      ORDER BY id ASC`,
-    [invoiceId],
+    [tenantId, invoiceId],
   );
   return { invoice: inv, lines: lineResult.rows || [] };
 }
 
 /**
  * Fetch all invoices issued in a given YYYY-MM month, with lines + customer.
+ *
+ * Wave-13: scoped to the caller's tenant. Both the invoice SELECT
+ * and the line SELECT add `WHERE tenant_id = $N` so a cross-tenant
+ * request sees only its own invoices.
  */
-async function fetchInvoicesInMonth(db, yearMonth) {
+async function fetchInvoicesInMonth(db, yearMonth, tenantId = 0) {
   // Match by issue_date prefix. Works on both pg (text comparison) and
   // sqlite (TEXT column with ISO date strings sorts lexically).
   const prefix = `${yearMonth}-`;
@@ -90,22 +108,23 @@ async function fetchInvoicesInMonth(db, yearMonth) {
             c.id AS customer_id, c.name AS customer_name, c.hvhh, c.address
      FROM finance.invoices i
      JOIN finance.customers c ON c.id = i.customer_id
-     WHERE i.issue_date LIKE $1 || '%'
+     WHERE i.tenant_id = $1 AND i.issue_date LIKE $2 || '%'
      ORDER BY i.issue_date ASC, i.id ASC`,
-    [prefix],
+    [tenantId, prefix],
   );
   const ids = (invResult.rows || []).map((r) => Number(r.id));
   if (ids.length === 0) return [];
   // Build dynamic placeholders for sqlite (which doesn't have
-  // = ANY($1)). One-to-one mapping: ids[i] → $(i+1). Works on both
-  // pg and sqlite — pg accepts the `IN ($1,$2,...)` form too.
-  const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
+  // = ANY($1)). One-to-one mapping: ids[i] → $(i+2) because $1 is
+  // the tenant_id predicate. Works on both pg and sqlite — pg
+  // accepts the `IN ($2,$3,...)` form too.
+  const placeholders = ids.map((_, i) => `$${i + 2}`).join(',');
   const lineResult = await db.query(
     `SELECT invoice_id, description, quantity, unit_price_amd, line_total_amd
      FROM finance.invoice_lines
-     WHERE invoice_id IN (${placeholders})
+     WHERE tenant_id = $1 AND invoice_id IN (${placeholders})
      ORDER BY invoice_id ASC, id ASC`,
-    ids,
+    [tenantId, ...ids],
   );
   const linesByInvoice = new Map();
   for (const l of lineResult.rows || []) {
@@ -179,18 +198,27 @@ function toEInvoiceInput(invoiceRow, lineRows, supplier) {
 /**
  * Export a single invoice as an SRC-format e-invoice XML string.
  *
+ * Wave-13: the read is tenant-scoped — the SQL inside
+ * `fetchInvoiceWithLines` adds `AND i.tenant_id = $N` so a
+ * cross-tenant request returns `null` (which the caller
+ * surfaces as a 404). Back-compat preserved: omitting
+ * `tenantId` defaults to 0 (the bootstrap tenant; matches
+ * the migration default).
+ *
  * @param {Db} db
  * @param {number} invoiceId
  * @param {object} supplier  { name, hvhh, vatId, address }
+ * @param {number} [tenantId=0]  caller tenant scope; pre-wave-13
+ *   callers omit this and see only tenant-0 invoices.
  * @returns {Promise<{ invoiceNumber: string, xml: string, issueDate: string, total_amd: number }>}
  * @throws ValueError if the invoice doesn't exist or the supplier is invalid
  */
-export async function exportInvoiceEInvoice(db, invoiceId, supplier) {
+export async function exportInvoiceEInvoice(db, invoiceId, supplier, tenantId = 0) {
   assertSupplier(supplier);
   if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
     throw new ValueError('invoiceId must be a positive integer');
   }
-  const fetched = await fetchInvoiceWithLines(db, invoiceId);
+  const fetched = await fetchInvoiceWithLines(db, invoiceId, tenantId);
   if (!fetched) {
     throw new ValueError(`invoice ${invoiceId} not found`);
   }
@@ -209,15 +237,19 @@ export async function exportInvoiceEInvoice(db, invoiceId, supplier) {
  * e-invoice XML strings. The result is ordered by issue date ASC, then
  * invoice id ASC. An empty month returns an empty array.
  *
+ * Wave-13: tenant-scoped — only the caller's invoices are exported.
+ *
  * @param {Db} db
  * @param {string} yearMonth  'YYYY-MM' inclusive
  * @param {object} supplier  { name, hvhh, vatId, address }
+ * @param {number} [tenantId=0]  caller tenant scope; pre-wave-13
+ *   callers omit this and see only tenant-0 invoices.
  * @returns {Promise<Array<{ invoiceNumber, xml, issueDate, total_amd }>>}
  */
-export async function exportMonthlyEInvoices(db, yearMonth, supplier) {
+export async function exportMonthlyEInvoices(db, yearMonth, supplier, tenantId = 0) {
   assertSupplier(supplier);
   assertYearMonth(yearMonth);
-  const rows = await fetchInvoicesInMonth(db, yearMonth);
+  const rows = await fetchInvoicesInMonth(db, yearMonth, tenantId);
   // Skip void invoices — they're not real exports.
   const out = [];
   for (const { invoice, lines } of rows) {

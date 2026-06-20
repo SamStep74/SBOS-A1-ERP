@@ -106,3 +106,12 @@ ALTER TABLE finance.vat_carry_forward
 -- the only access pattern on this table.
 CREATE INDEX IF NOT EXISTS idx_finance_vat_carry_forward_tenant
   ON finance.vat_carry_forward (tenant_id, id);
+
+-- NOTE: the original 0003 schema declared `id INTEGER PRIMARY KEY`,
+-- which restricts the table to a single row for the whole DB. With
+-- multi-tenant, each tenant needs its own id=1 row — otherwise the
+-- bank credit gets clobbered across tenants. The pg path requires
+-- a follow-up migration to recreate this table with a composite
+-- PK on (tenant_id, id). The sqlite path is fixed in the inline
+-- schema mirror in bin/sbos-server.mjs (which already uses
+-- composite PK for this table) — pg migration is a follow-up.

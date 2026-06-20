@@ -36,14 +36,18 @@ function makeRealDb() {
   sqliteDb.exec(`
     CREATE TABLE finance.customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       name TEXT NOT NULL
     );
     CREATE TABLE finance.vat_carry_forward (
-      id INTEGER PRIMARY KEY,
+      id INTEGER NOT NULL,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       balance_amd INTEGER NOT NULL DEFAULT 0,
       as_of_period TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (tenant_id, id),
+      CHECK (id = 1)
     );
   `);
   // Sanity check: also verify the migration file declares the table.
@@ -51,7 +55,9 @@ function makeRealDb() {
   // this is a smoke-level fallback.)
   const mig0003 = readFileSync(join(__dirname, 'migrations', '0003_vat_carry_forward.sql'), 'utf8');
   if (!/vat_carry_forward/i.test(mig0003)) {
-    throw new Error('0003_vat_carry_forward.sql is missing the vat_carry_forward table declaration');
+    throw new Error(
+      '0003_vat_carry_forward.sql is missing the vat_carry_forward table declaration',
+    );
   }
   return sqliteDb;
 }
@@ -159,11 +165,16 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
   test('8. computeAndCloseVatPeriod: positive-net period → bank set to 0 (no carry-forward)', async () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
-    const r = await computeAndCloseVatPeriod(freshDb, '2026-06', {
-      sales: [{ netAmount: 1000000, vatRate: 20 }], // 200000 output VAT
-    }, {
-      purchases: [{ netAmount: 200000, vatRate: 20, source: 'domestic' }], // 40000 input
-    });
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-06',
+      {
+        sales: [{ netAmount: 1000000, vatRate: 20 }], // 200000 output VAT
+      },
+      {
+        purchases: [{ netAmount: 200000, vatRate: 20, source: 'domestic' }], // 40000 input
+      },
+    );
     // Net = 200000 - 40000 = 160000 → vatToPay = 160000, no carry-forward.
     assert.equal(r.vatToPay, 160000);
     assert.equal(r.carryForward, 0);
@@ -178,11 +189,16 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const freshDb = makePgAdapter(freshSqlite);
     // Pre-seed a small bank so we can verify the growth.
     await setCurrentCarryForward(freshDb, 10000, '2026-05');
-    const r = await computeAndCloseVatPeriod(freshDb, '2026-06', {
-      sales: [{ netAmount: 100000, vatRate: 20 }], // 20000 output
-    }, {
-      purchases: [{ netAmount: 300000, vatRate: 20, source: 'domestic' }], // 60000 input
-    });
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-06',
+      {
+        sales: [{ netAmount: 100000, vatRate: 20 }], // 20000 output
+      },
+      {
+        purchases: [{ netAmount: 300000, vatRate: 20, source: 'domestic' }], // 60000 input
+      },
+    );
     // net = 20000 - 60000 = -40000; prior = 10000; total = -40000 - 10000 = -50000
     // → vatToPay = 0, carryForward = 50000
     assert.equal(r.vatToPay, 0);
@@ -197,16 +213,20 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     // Period 1: net = 20000 - 60000 = -40000 → bank grows to 40000.
-    await computeAndCloseVatPeriod(freshDb, '2026-06',
+    await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-06',
       { sales: [{ netAmount: 100000, vatRate: 20 }] }, // 20000
       { purchases: [{ netAmount: 300000, vatRate: 20, source: 'domestic' }] }, // 60000
     );
     // Period 2: net = 80000, prior = 40000. The prior credit reduces
     // the current payable by 40000, leaving 40000 to pay. No new
     // carry-forward; the bank is now 0.
-    const r = await computeAndCloseVatPeriod(freshDb, '2026-07',
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-07',
       { sales: [{ netAmount: 400000, vatRate: 20 }] }, // 80000 output
-      { purchases: [] },                               // 0 input
+      { purchases: [] }, // 0 input
     );
     // net = 80000; prior = 40000; total = 80000 - 40000 = 40000
     // → vatToPay = 40000, carryForward = 0
@@ -222,14 +242,18 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     // Period 1: negative net, bank = 80000.
-    await computeAndCloseVatPeriod(freshDb, '2026-06',
+    await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-06',
       { sales: [{ netAmount: 100000, vatRate: 20 }] }, // 20000
       { purchases: [{ netAmount: 500000, vatRate: 20, source: 'domestic' }] }, // 100000
     );
     // bank = 20000 - 100000 = -80000 → vatToPay=0, carryForward=80000
     // Period 2: small positive net 20000. Prior 80000 > 20000, so vatToPay=0,
     // carryForward = 80000 - 20000 = 60000 (residual).
-    const r = await computeAndCloseVatPeriod(freshDb, '2026-07',
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-07',
       { sales: [{ netAmount: 100000, vatRate: 20 }] }, // 20000
       { purchases: [] },
     );
@@ -243,7 +267,9 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     await setCurrentCarryForward(freshDb, 25000, '2026-04');
-    const r = await computeAndCloseVatPeriod(freshDb, '2026-05',
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-05',
       { sales: [{ netAmount: 500000, vatRate: 20 }] }, // 100000
       { purchases: [] },
     );
@@ -256,10 +282,7 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
   });
 
   test('13. computeAndCloseVatPeriod: bad yearMonth format rejected before any DB write', async () => {
-    await assert.rejects(
-      () => computeAndCloseVatPeriod(db, '2026/06', {}, {}),
-      /YYYY-MM/,
-    );
+    await assert.rejects(() => computeAndCloseVatPeriod(db, '2026/06', {}, {}), /YYYY-MM/);
     // The bank should be unchanged.
     const bank = await getCurrentCarryForward(db);
     assert.equal(bank.balance_amd, 0, 'rejected write must not corrupt the bank');
@@ -269,21 +292,27 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     // Period 1 (2026-04): net -30000 → bank 30000
-    const r1 = await computeAndCloseVatPeriod(freshDb, '2026-04',
+    const r1 = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-04',
       { sales: [{ netAmount: 200000, vatRate: 20 }] }, // 40000
       { purchases: [{ netAmount: 350000, vatRate: 20, source: 'domestic' }] }, // 70000
     );
     assert.equal(r1.vatToPay, 0);
     assert.equal(r1.carryForward, 30000);
     // Period 2 (2026-05): net 10000, prior 30000 → vatToPay 0, bank 20000
-    const r2 = await computeAndCloseVatPeriod(freshDb, '2026-05',
+    const r2 = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-05',
       { sales: [{ netAmount: 50000, vatRate: 20 }] }, // 10000
       { purchases: [] },
     );
     assert.equal(r2.vatToPay, 0);
     assert.equal(r2.carryForward, 20000);
     // Period 3 (2026-06): net 15000, prior 20000 → vatToPay 0, bank 5000
-    const r3 = await computeAndCloseVatPeriod(freshDb, '2026-06',
+    const r3 = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-06',
       { sales: [{ netAmount: 75000, vatRate: 20 }] }, // 15000
       { purchases: [] },
     );
@@ -335,5 +364,70 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     const r = await getCurrentCarryForward(freshDb);
     assert.equal(r.balance_amd, 1000);
     assert.equal(r.as_of_period, null, 'empty string normalizes to null');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave-13 cross-tenant isolation tests
+//
+// The vat_carry_forward ledger is per-tenant: each tenant gets its
+// own bank. computeAndCloseVatPeriod(tenantId=N) must read + write
+// the bank for tenant N — not tenant 0's bank.
+//
+// These tests would have caught the silent extra-arg trap if the
+// parameter hadn't been added to the signature.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('finance/vatLedger — wave-13 cross-tenant isolation', () => {
+  let computeAndCloseVatPeriod;
+
+  before(async () => {
+    const mod = await import('./vatLedger.js');
+    computeAndCloseVatPeriod = mod.computeAndCloseVatPeriod;
+  });
+
+  test('18. computeAndCloseVatPeriod banks are per-tenant', async () => {
+    const sqlite = makeRealDb();
+    const freshDb = makePgAdapter(sqlite);
+
+    // Tenant 0 closes a negative period → carries 50k forward.
+    const r0 = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-05',
+      { sales: [] },
+      { purchases: [] },
+      0,
+    );
+    assert.equal(r0.carryForward, 0, 'zero carry for empty inputs');
+    // Manually bank a known value for tenant 0 by UPDATING the
+    // existing id=1, tenant_id=0 row that computeAndCloseVatPeriod
+    // just wrote. (A second INSERT would PK-violate.)
+    sqlite
+      .prepare(
+        `UPDATE finance.vat_carry_forward
+       SET balance_amd = 50000, as_of_period = '2026-04'
+       WHERE tenant_id = 0 AND id = 1`,
+      )
+      .run();
+
+    // Tenant 7 closes — must NOT see tenant 0's bank.
+    const r7 = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-05',
+      { sales: [] },
+      { purchases: [] },
+      7,
+    );
+    assert.equal(r7.priorPeriodCarryForward, 0, 'tenant 7 must not see tenant 0 bank');
+    // The closure wrote to tenant 7's row (separate from tenant 0's).
+    const t7 = sqlite
+      .prepare('SELECT balance_amd FROM finance.vat_carry_forward WHERE tenant_id = 7 AND id = 1')
+      .get();
+    assert.ok(t7, 'tenant 7 now has its own bank row');
+    // Tenant 0's bank is untouched.
+    const t0 = sqlite
+      .prepare('SELECT balance_amd FROM finance.vat_carry_forward WHERE tenant_id = 0 AND id = 1')
+      .get();
+    assert.equal(t0.balance_amd, 50000, 'tenant 0 bank unchanged');
   });
 });
