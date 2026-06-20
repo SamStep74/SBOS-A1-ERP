@@ -195,7 +195,11 @@ test('stamp_duty: composes_with_payroll — matches armeniaPayroll.stampDuty con
   // modules can be safely cross-imported without behavioral drift.
   // The function under test: stampDutyFor('payroll', GROSS) for positive GROSS.
   const payrollDuty = stampDutyFor('payroll', 200000);
-  assert.equal(payrollDuty, 1000, 'stamp duty for payroll must match armeniaPayroll STAMP_DUTY_2026');
+  assert.equal(
+    payrollDuty,
+    1000,
+    'stamp duty for payroll must match armeniaPayroll STAMP_DUTY_2026',
+  );
   // Spot-check more values to pin the contract across the salary range.
   assert.equal(stampDutyFor('payroll', 75000), 1000);
   assert.equal(stampDutyFor('payroll', 1200000), 1000);
@@ -260,7 +264,10 @@ test('stamp_duty: rates_table_has_at_least_5_types', () => {
     const r = STAMP_DUTY_RATES[k];
     assert.equal(typeof r, 'object');
     assert.ok(r, `rate for ${k} must be a truthy object`);
-    assert.ok(['flat', 'percent'].includes(r.kind), `rate.kind for ${k} must be 'flat' or 'percent'`);
+    assert.ok(
+      ['flat', 'percent'].includes(r.kind),
+      `rate.kind for ${k} must be 'flat' or 'percent'`,
+    );
   }
 });
 

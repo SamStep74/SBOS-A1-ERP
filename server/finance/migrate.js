@@ -39,8 +39,7 @@ function pgAdapter(db) {
       )
     `.trim(),
     historySelectSql: 'SELECT name FROM finance.migration_history',
-    historyInsertSql:
-      'INSERT INTO finance.migration_history (name, applied_at) VALUES ($1, $2)',
+    historyInsertSql: 'INSERT INTO finance.migration_history (name, applied_at) VALUES ($1, $2)',
     // Run a single statement. Returns `{ rows: [] }`.
     async execOne(sql, params) {
       return db.query(sql, params);
@@ -62,8 +61,7 @@ function sqliteAdapter(db) {
       )
     `.trim(),
     historySelectSql: 'SELECT name FROM finance.migration_history',
-    historyInsertSql:
-      'INSERT INTO finance.migration_history (name, applied_at) VALUES (?, ?)',
+    historyInsertSql: 'INSERT INTO finance.migration_history (name, applied_at) VALUES (?, ?)',
     async execOne(sql, params) {
       const stmt = db.prepare(sql);
       if (params && params.length > 0) {

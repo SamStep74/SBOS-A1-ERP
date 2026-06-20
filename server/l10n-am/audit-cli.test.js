@@ -76,7 +76,9 @@ describe('parseArgs', () => {
 describe('runAudit', () => {
   test('clean scan: exitCode 0, human output says no issues', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     const fakeScan = () => ({
       issues: [],
       catalogKeyCount: 5,
@@ -92,13 +94,15 @@ describe('runAudit', () => {
     });
     assert.equal(out.exitCode, 0);
     assert.match(stdout, /no issues/i);
-    assert.match(stdout, /5/);   // catalogKeyCount
-    assert.match(stdout, /12/);  // tCallCount
+    assert.match(stdout, /5/); // catalogKeyCount
+    assert.match(stdout, /12/); // tCallCount
   });
 
   test('dirty scan: exitCode 1, output lists issues', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     const fakeScan = () => ({
       issues: [
         { type: 'catalog-missing-locale', key: 'foo.bar', missingLocales: ['en'] },
@@ -124,7 +128,9 @@ describe('runAudit', () => {
 
   test('--format json: emits the scan result as JSON to stdout', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     const fakeScan = () => ({
       issues: [],
       catalogKeyCount: 7,
@@ -147,13 +153,22 @@ describe('runAudit', () => {
 
   test('--quiet: nothing is written to stdout, but exitCode is still correct', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     const cleanScan = () => ({
-      issues: [], catalogKeyCount: 1, tCallCount: 1, usedKeyCount: 1, unusedKeyCount: 0,
+      issues: [],
+      catalogKeyCount: 1,
+      tCallCount: 1,
+      usedKeyCount: 1,
+      unusedKeyCount: 0,
     });
     const dirtyScan = () => ({
       issues: [{ type: 'catalog-unused-key', key: 'x' }],
-      catalogKeyCount: 1, tCallCount: 0, usedKeyCount: 0, unusedKeyCount: 1,
+      catalogKeyCount: 1,
+      tCallCount: 0,
+      usedKeyCount: 0,
+      unusedKeyCount: 1,
     });
     const clean = runAudit({
       args: parseArgs(['--quiet']),
@@ -175,9 +190,14 @@ describe('runAudit', () => {
 
   test('--help: prints usage, does not run the scanner, exits 0', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     let scanCalled = false;
-    const fakeScan = () => { scanCalled = true; return { issues: [] }; };
+    const fakeScan = () => {
+      scanCalled = true;
+      return { issues: [] };
+    };
     const out = runAudit({
       args: parseArgs(['--help']),
       scan: fakeScan,
@@ -191,9 +211,14 @@ describe('runAudit', () => {
 
   test('parse errors: exitCode 1, scanner is not called', () => {
     let stdout = '';
-    const capture = (s) => { stdout += s + '\n'; };
+    const capture = (s) => {
+      stdout += s + '\n';
+    };
     let scanCalled = false;
-    const fakeScan = () => { scanCalled = true; return { issues: [] }; };
+    const fakeScan = () => {
+      scanCalled = true;
+      return { issues: [] };
+    };
     const out = runAudit({
       args: parseArgs(['--bogus']),
       scan: fakeScan,
@@ -218,8 +243,11 @@ describe('audit-cli.js — live l10n-am regression (child process)', () => {
       encoding: 'utf8',
       timeout: 30_000,
     });
-    assert.equal(result.status, 0,
-      `audit-cli should exit 0 on a clean repo.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.equal(
+      result.status,
+      0,
+      `audit-cli should exit 0 on a clean repo.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    );
     assert.match(result.stdout, /no issues/i);
   });
 
@@ -230,10 +258,16 @@ describe('audit-cli.js — live l10n-am regression (child process)', () => {
       encoding: 'utf8',
       timeout: 30_000,
     });
-    assert.equal(result.status, 0,
-      `audit-cli --quiet should exit 0 on a clean repo.\nstderr: ${result.stderr}`);
-    assert.equal(result.stdout, '',
-      `audit-cli --quiet should suppress stdout, got: ${JSON.stringify(result.stdout)}`);
+    assert.equal(
+      result.status,
+      0,
+      `audit-cli --quiet should exit 0 on a clean repo.\nstderr: ${result.stderr}`,
+    );
+    assert.equal(
+      result.stdout,
+      '',
+      `audit-cli --quiet should suppress stdout, got: ${JSON.stringify(result.stdout)}`,
+    );
   });
 
   test('node server/l10n-am/audit-cli.js --format json emits valid JSON', () => {
@@ -243,8 +277,11 @@ describe('audit-cli.js — live l10n-am regression (child process)', () => {
       encoding: 'utf8',
       timeout: 30_000,
     });
-    assert.equal(result.status, 0,
-      `audit-cli --format json should exit 0 on a clean repo.\nstderr: ${result.stderr}`);
+    assert.equal(
+      result.status,
+      0,
+      `audit-cli --format json should exit 0 on a clean repo.\nstderr: ${result.stderr}`,
+    );
     const parsed = JSON.parse(result.stdout);
     assert.deepEqual(parsed.issues, []);
     assert.ok(parsed.catalogKeyCount > 0);
@@ -306,15 +343,20 @@ describe('runExtraChecks — --check-rates', () => {
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-rates-clean-'));
     try {
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-rates']),
         rootDir: dir,
         stdout: capture,
         stderr: capture,
       });
-      assert.equal(out.exitCode, 0,
-        `clean scratch dir should have exitCode 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.equal(
+        out.exitCode,
+        0,
+        `clean scratch dir should have exitCode 0; got ${out.exitCode} stdout=${stdout}`,
+      );
       assert.ok(Array.isArray(out.rates));
       assert.equal(out.rates.length, 0);
     } finally {
@@ -329,20 +371,22 @@ describe('runExtraChecks — --check-rates', () => {
     // Build a tiny scratch dir with one .js file containing a rate literal.
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-rates-'));
     try {
-      writeFileSync(
-        join(dir, 'fixture.js'),
-        "export const STAMP_RATE = 0.05;",
-      );
+      writeFileSync(join(dir, 'fixture.js'), 'export const STAMP_RATE = 0.05;');
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-rates']),
         rootDir: dir,
         stdout: capture,
         stderr: capture,
       });
-      assert.equal(out.exitCode, 1,
-        `expected exitCode 1 when a rate is present, got ${out.exitCode}`);
+      assert.equal(
+        out.exitCode,
+        1,
+        `expected exitCode 1 when a rate is present, got ${out.exitCode}`,
+      );
       assert.equal(out.rates.length, 1);
       assert.match(stdout, /fixture\.js/);
       assert.match(stdout, /0\.05/);
@@ -360,15 +404,20 @@ describe('runExtraChecks — --check-eval', () => {
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-eval-clean-'));
     try {
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-eval']),
         rootDir: dir,
         stdout: capture,
         stderr: capture,
       });
-      assert.equal(out.exitCode, 0,
-        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.equal(
+        out.exitCode,
+        0,
+        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`,
+      );
       assert.ok(Array.isArray(out.eval));
       assert.equal(out.eval.length, 0);
     } finally {
@@ -384,7 +433,9 @@ describe('runExtraChecks — --check-eval', () => {
     try {
       writeFileSync(join(dir, 'fixture.js'), "const r = eval('1+1');");
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-eval']),
         rootDir: dir,
@@ -410,15 +461,20 @@ describe('runExtraChecks — --check-sql', () => {
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-sql-clean-'));
     try {
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-sql']),
         rootDir: dir,
         stdout: capture,
         stderr: capture,
       });
-      assert.equal(out.exitCode, 0,
-        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`);
+      assert.equal(
+        out.exitCode,
+        0,
+        `clean scratch dir should exit 0; got ${out.exitCode} stdout=${stdout}`,
+      );
       assert.ok(Array.isArray(out.sql));
       assert.equal(out.sql.length, 0);
     } finally {
@@ -434,7 +490,9 @@ describe('runExtraChecks — --check-sql', () => {
     try {
       writeFileSync(join(dir, 'fixture.js'), "const q = 'SELECT * FROM t WHERE id=' + id;");
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-sql']),
         rootDir: dir,
@@ -459,9 +517,11 @@ describe('runExtraChecks — --format json', () => {
     }
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-json-'));
     try {
-      writeFileSync(join(dir, 'clean.js'), "const x = 1; // no rates here");
+      writeFileSync(join(dir, 'clean.js'), 'const x = 1; // no rates here');
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       await runExtraChecks({
         args: parseArgs(['--check-rates', '--format', 'json']),
         rootDir: dir,
@@ -473,8 +533,10 @@ describe('runExtraChecks — --format json', () => {
       assert.ok(Array.isArray(parsed.eval), 'parsed.eval must be an array');
       assert.ok(Array.isArray(parsed.sql), 'parsed.sql must be an array');
       assert.equal(typeof parsed.ok, 'boolean');
-      assert.equal(parsed.ok,
-        parsed.rates.length === 0 && parsed.eval.length === 0 && parsed.sql.length === 0);
+      assert.equal(
+        parsed.ok,
+        parsed.rates.length === 0 && parsed.eval.length === 0 && parsed.sql.length === 0,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -488,9 +550,11 @@ describe('runExtraChecks — --quiet', () => {
     }
     const dir = mkdtempSync(join(tmpdir(), 'audit-cli-quiet-'));
     try {
-      writeFileSync(join(dir, 'fixture.js'), "const rate = 0.20;");
+      writeFileSync(join(dir, 'fixture.js'), 'const rate = 0.20;');
       let stdout = '';
-      const capture = (s) => { stdout += s + '\n'; };
+      const capture = (s) => {
+        stdout += s + '\n';
+      };
       const out = await runExtraChecks({
         args: parseArgs(['--check-rates', '--quiet']),
         rootDir: dir,

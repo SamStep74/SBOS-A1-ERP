@@ -102,5 +102,4 @@ function requireRole(roleName) {
   };
 }
 
-export {requirePerm,
-  requireRole,};
+export { requirePerm, requireRole };

@@ -52,7 +52,9 @@ function makePgMock({ failOn = null } = {}) {
         return { rows: [] };
       }
       // INSERT INTO finance.migration_history ...
-      const insertMatch = trimmed.match(/INSERT\s+INTO\s+finance\.migration_history[\s\S]*?VALUES\s*\(\s*\$1\s*,\s*\$2\s*,\s*\$3\s*\)/i);
+      const insertMatch = trimmed.match(
+        /INSERT\s+INTO\s+finance\.migration_history[\s\S]*?VALUES\s*\(\s*\$1\s*,\s*\$2\s*,\s*\$3\s*\)/i,
+      );
       if (insertMatch) {
         // We can't see params here in our simple model; the runner is expected
         // to pass them via .query(sql, params). Capture the *params* from the
@@ -70,7 +72,6 @@ function makePgMock({ failOn = null } = {}) {
   };
 
   // Wrap query so tests can pass params and we capture them for history.
-  const originalQuery = db.query.bind(db);
   db.query = async (sql, params) => {
     db.statements.push(sql);
     if (failOn && sql.includes(failOn)) {
@@ -179,7 +180,8 @@ describe('applyMigrations — pg-style mock', () => {
 
   test('2. single new migration: applies it and records in history', async () => {
     const { dir, migDir } = makeMigrationsDir({
-      '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
+      '0001_init.sql':
+        'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
@@ -207,7 +209,8 @@ describe('applyMigrations — pg-style mock', () => {
 
   test('3. running twice is a no-op the second time (idempotent)', async () => {
     const { dir, migDir } = makeMigrationsDir({
-      '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
+      '0001_init.sql':
+        'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
@@ -228,7 +231,8 @@ describe('applyMigrations — pg-style mock', () => {
   test('4. two new migrations: both applied in lex order', async () => {
     const { dir, migDir } = makeMigrationsDir({
       '0002_invoices.sql': 'CREATE TABLE finance.invoices (id BIGSERIAL PRIMARY KEY);',
-      '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
+      '0001_init.sql':
+        'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
@@ -266,7 +270,7 @@ describe('applyMigrations — pg-style mock', () => {
     const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY);',
       // 'this_is_broken' triggers the mock's failOn check.
-      '0002_broken.sql': "SELECT this_is_broken FROM finance.migration_history;",
+      '0002_broken.sql': 'SELECT this_is_broken FROM finance.migration_history;',
       '0003_after.sql': 'CREATE TABLE finance.invoices (id BIGSERIAL PRIMARY KEY);',
     });
     try {
@@ -301,7 +305,8 @@ describe('applyMigrations — pg-style mock', () => {
 describe('applyMigrations — sqlite-style mock', () => {
   test('7. duck-type dispatch: sqlite DB (no .query) routes through db.exec', async () => {
     const { dir, migDir } = makeMigrationsDir({
-      '0001_init.sql': 'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
+      '0001_init.sql':
+        'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
@@ -318,7 +323,8 @@ describe('applyMigrations — sqlite-style mock', () => {
 
   test('8. sqlite branch: idempotent on second run', async () => {
     const { dir, migDir } = makeMigrationsDir({
-      '0001_init.sql': 'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
+      '0001_init.sql':
+        'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');

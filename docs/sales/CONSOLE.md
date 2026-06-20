@@ -206,7 +206,7 @@ three disjoint surfaces, one merge commit.
 
 ---
 
-*This file ships alongside WALKTHROUGH.md in wave 3. Keep the
+_This file ships alongside WALKTHROUGH.md in wave 3. Keep the
 output samples in sync with reality — every block in this file was
 captured from a real run on `main @ 77366a0` (or noted as
-"post-merge" for sibling-branch output).*
+"post-merge" for sibling-branch output)._

@@ -139,7 +139,7 @@ test('validateVatReturnForm: line 18 (domestic acquisitions) is checked against 
   const realBase18 = form.lines['18'].base;
   const realVat18 = form.lines['18'].vat;
   const realVat17 = form.lines['17'].vat;
-  const offRateVat18 = Math.round(realBase18 * 0.10); // 10%, well outside the 20% ±1% band
+  const offRateVat18 = Math.round(realBase18 * 0.1); // 10%, well outside the 20% ±1% band
   const delta = realVat18 - offRateVat18;
   form.lines['18'].vat = offRateVat18;
   form.lines['17'].vat = realVat17 + delta; // absorb so line 21 = 17 + 18 still ties
@@ -212,7 +212,7 @@ test('validateVatReturnForm: line 17 (imports) is checked against the 20% standa
   const realBase17 = form.lines['17'].base;
   const realVat17 = form.lines['17'].vat;
   const realVat18 = form.lines['18'].vat;
-  const offRateVat17 = Math.round(realBase17 * 0.10); // 10%, well outside the 20% ±1% band
+  const offRateVat17 = Math.round(realBase17 * 0.1); // 10%, well outside the 20% ±1% band
   const delta = realVat17 - offRateVat17;
   form.lines['17'].vat = offRateVat17;
   form.lines['18'].vat = realVat18 + delta; // absorb so line 21 = 17 + 18 still ties
@@ -407,17 +407,11 @@ test('computeVatReturn: 8 new line aggregates sum correctly across a full VAT re
   // The period has one zero-rated sale (200K) and one exempt (50K).
   assert.equal(r.zeroRatedSupplies, 200000);
   // And the helper agrees when called directly on a synthesized invoice.
-  assert.equal(
-    line9_zeroRatedSupplies({ lines: payablePeriod.sales }),
-    200000,
-  );
+  assert.equal(line9_zeroRatedSupplies({ lines: payablePeriod.sales }), 200000);
 
   // Line 12 — exempt supplies (category:'exempt').
   assert.equal(r.exemptSupplies, 50000);
-  assert.equal(
-    line12_exemptSupplies({ lines: payablePeriod.sales }),
-    50000,
-  );
+  assert.equal(line12_exemptSupplies({ lines: payablePeriod.sales }), 50000);
 
   // Line 13 — imports base (source:'import'). Ties out with form line 17 base.
   assert.equal(r.importsVatBase, form.lines['17'].base);
@@ -425,10 +419,7 @@ test('computeVatReturn: 8 new line aggregates sum correctly across a full VAT re
 
   // Line 16 — reverse-charge VAT. No reverse-charge in this period.
   assert.equal(r.reverseChargeVat, 0);
-  assert.equal(
-    line16_reverseChargeVat({ lines: payablePeriod.sales }),
-    0,
-  );
+  assert.equal(line16_reverseChargeVat({ lines: payablePeriod.sales }), 0);
 
   // Line 18 — adjustments. Default 0.
   assert.equal(r.adjustments, 0);

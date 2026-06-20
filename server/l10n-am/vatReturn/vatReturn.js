@@ -161,8 +161,7 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
   const importsVatBase = line13_importsVatBase(purchasesInvoice);
   const reverseChargeVat =
     line16_reverseChargeVat(salesInvoice) + line16_reverseChargeVat(purchasesInvoice);
-  const adjustments =
-    line18_adjustments(salesInvoice) + line18_adjustments(purchasesInvoice);
+  const adjustments = line18_adjustments(salesInvoice) + line18_adjustments(purchasesInvoice);
   const inputVatCreditBase = line23_inputVatCreditBase(purchasesInvoice);
 
   // Line 21 headline (VAT to pay). importVat (output-side) defaults to 0 — no

@@ -10,6 +10,7 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+evals/karpathy/results/
 
 # Worktrees and orchestration scratch
 .claude/worktrees/

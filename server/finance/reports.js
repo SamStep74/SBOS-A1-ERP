@@ -183,9 +183,9 @@ export async function getArAging(db, asOfDate) {
   const paidByInvoice = await buildPaidByInvoice(db);
 
   const buckets = {
-    '0_30':    { invoice_count: 0, amount_amd: 0 },
-    '31_60':   { invoice_count: 0, amount_amd: 0 },
-    '61_90':   { invoice_count: 0, amount_amd: 0 },
+    '0_30': { invoice_count: 0, amount_amd: 0 },
+    '31_60': { invoice_count: 0, amount_amd: 0 },
+    '61_90': { invoice_count: 0, amount_amd: 0 },
     '90_plus': { invoice_count: 0, amount_amd: 0 },
   };
   let totalRaw = 0;
@@ -212,10 +212,22 @@ export async function getArAging(db, asOfDate) {
     asOfDate,
     total_outstanding_amd: roundAmd(totalRaw),
     buckets: {
-      '0_30':    { invoice_count: buckets['0_30'].invoice_count,    amount_amd: roundAmd(buckets['0_30'].amount_amd) },
-      '31_60':   { invoice_count: buckets['31_60'].invoice_count,   amount_amd: roundAmd(buckets['31_60'].amount_amd) },
-      '61_90':   { invoice_count: buckets['61_90'].invoice_count,   amount_amd: roundAmd(buckets['61_90'].amount_amd) },
-      '90_plus': { invoice_count: buckets['90_plus'].invoice_count, amount_amd: roundAmd(buckets['90_plus'].amount_amd) },
+      '0_30': {
+        invoice_count: buckets['0_30'].invoice_count,
+        amount_amd: roundAmd(buckets['0_30'].amount_amd),
+      },
+      '31_60': {
+        invoice_count: buckets['31_60'].invoice_count,
+        amount_amd: roundAmd(buckets['31_60'].amount_amd),
+      },
+      '61_90': {
+        invoice_count: buckets['61_90'].invoice_count,
+        amount_amd: roundAmd(buckets['61_90'].amount_amd),
+      },
+      '90_plus': {
+        invoice_count: buckets['90_plus'].invoice_count,
+        amount_amd: roundAmd(buckets['90_plus'].amount_amd),
+      },
     },
   };
 }
@@ -378,9 +390,7 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
   });
 
   // Build the optional date-range filter.
-  const conds = [
-    `i.status IN (${BILLED_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})`,
-  ];
+  const conds = [`i.status IN (${BILLED_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})`];
   const params = [...BILLED_STATUSES];
   if (since !== undefined) {
     params.push(since);
@@ -391,8 +401,7 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
     conds.push(`i.issue_date <= $${params.length}`);
   }
 
-  const sql =
-    `SELECT c.id AS customer_id, c.name AS customer_name, c.hvhh,
+  const sql = `SELECT c.id AS customer_id, c.name AS customer_name, c.hvhh,
             SUM(i.total_amd) AS total_billed_amd,
             COUNT(*) AS invoice_count
      FROM finance.invoices i
@@ -427,11 +436,9 @@ export async function getTopCustomers(db, { since, until, limit } = {}) {
     const cid = out[i].customer_id;
     // Re-query invoice ids for this customer (cheap, since the top-N
     // list is small).
-    const invs = await runQuery(
-      db,
-      `SELECT id FROM finance.invoices WHERE customer_id = $1`,
-      [cid],
-    );
+    const invs = await runQuery(db, `SELECT id FROM finance.invoices WHERE customer_id = $1`, [
+      cid,
+    ]);
     let totalPaid = 0;
     for (const inv of invs.rows || []) {
       totalPaid += paidByInvoice.get(Number(inv.id)) || 0;

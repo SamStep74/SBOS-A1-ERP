@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/typecheck-if-typescript.mjs",
     "build": "tsc"
   },
   "devDependencies": {

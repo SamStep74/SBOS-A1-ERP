@@ -1,4 +1,5 @@
 <!-- Mirrored from A1-ERP-HY @ 50f5f44d632f8a3112ae5579060b768f0028c5da on 2026-06-16 -->
+
 # A1 ERP-HY RBAC System
 
 > Catalog-driven Role-Based Access Control for the A1 ERP-HY platform.
@@ -64,17 +65,17 @@
 
 ## 2. Core Concepts
 
-| Concept | What it is | Where it lives |
-|---|---|---|
-| **Permission** | A single gated action, e.g. `finance.invoice.create` | `server/rbac/permissions.js` |
-| **Permission Set** | A named bundle of permissions, e.g. `FinanceOperator` | `server/rbac/matrix.js` |
-| **Role** | An org-position in a hierarchy, e.g. `Accountant` | `server/rbac/roles.js` |
-| **Role Matrix** | Which permission sets each role gets by default | `server/rbac/roleMatrix.js` |
-| **Profile** | (Planned) A reusable bundle of role + permission sets for new users | _Phase 0.3_ |
-| **Effective permissions** | The union of role-default PSs + direct PSs, computed per request | `server/rbac/guards.js` |
-| **Sensitivity** | `low` / `medium` / `high` / `critical` tag that drives MFA + dual-control | `permissions.js` |
-| **FLS rule** | A field that is hidden unless the user holds a minimum permission | `guards.js` FLS_RULES |
-| **RLS rule** | A scope (own / team / org / custom) applied to a resource | `guards.js` RLS_RULES |
+| Concept                   | What it is                                                                | Where it lives               |
+| ------------------------- | ------------------------------------------------------------------------- | ---------------------------- |
+| **Permission**            | A single gated action, e.g. `finance.invoice.create`                      | `server/rbac/permissions.js` |
+| **Permission Set**        | A named bundle of permissions, e.g. `FinanceOperator`                     | `server/rbac/matrix.js`      |
+| **Role**                  | An org-position in a hierarchy, e.g. `Accountant`                         | `server/rbac/roles.js`       |
+| **Role Matrix**           | Which permission sets each role gets by default                           | `server/rbac/roleMatrix.js`  |
+| **Profile**               | (Planned) A reusable bundle of role + permission sets for new users       | _Phase 0.3_                  |
+| **Effective permissions** | The union of role-default PSs + direct PSs, computed per request          | `server/rbac/guards.js`      |
+| **Sensitivity**           | `low` / `medium` / `high` / `critical` tag that drives MFA + dual-control | `permissions.js`             |
+| **FLS rule**              | A field that is hidden unless the user holds a minimum permission         | `guards.js` FLS_RULES        |
+| **RLS rule**              | A scope (own / team / org / custom) applied to a resource                 | `guards.js` RLS_RULES        |
 
 ### Mental model
 
@@ -158,7 +159,7 @@ Permissions follow a strict shape:
 
 - `resource`: the domain object (`finance.invoice`, `crm.deal`, …)
 - `action`: one of `view | list | create | update | delete | approve |
-  export | import | share | assign | run | configure`
+export | import | share | assign | run | configure`
 - `scope`: optional, e.g. `own`, `pii`, `fiscal`
 
 Total: **315 permissions** across 18 categories (system, security,
@@ -177,26 +178,26 @@ mrkt, mfg, ai, reports, studio, compliance).
 
 ### Categories
 
-| ID | Label | Order |
-|---|---|---|
-| `system` | System & Administration | 100 |
-| `security` | Security & Access | 200 |
-| `finance` | Finance & Accounting | 300 |
-| `crm` | CRM & Sales | 400 |
-| `inv` | Inventory & Warehouse | 500 |
-| `purchase` | Purchase & Procurement | 600 |
-| `pos` | Point of Sale & Retail | 700 |
-| `hr` | People & HR | 800 |
-| `projects` | Projects & Time | 900 |
-| `desk` | Helpdesk & Service | 1000 |
-| `docs` | Documents & Sign | 1100 |
-| `portal` | Customer Portal | 1200 |
-| `mrkt` | Marketing & Campaigns | 1300 |
-| `mfg` | Manufacturing & Quality | 1400 |
-| `ai` | AI & Copilot | 1500 |
-| `reports` | Reports & Analytics | 1600 |
-| `studio` | Studio & Automation | 1700 |
-| `compliance` | Compliance & Audit | 1800 |
+| ID           | Label                   | Order |
+| ------------ | ----------------------- | ----- |
+| `system`     | System & Administration | 100   |
+| `security`   | Security & Access       | 200   |
+| `finance`    | Finance & Accounting    | 300   |
+| `crm`        | CRM & Sales             | 400   |
+| `inv`        | Inventory & Warehouse   | 500   |
+| `purchase`   | Purchase & Procurement  | 600   |
+| `pos`        | Point of Sale & Retail  | 700   |
+| `hr`         | People & HR             | 800   |
+| `projects`   | Projects & Time         | 900   |
+| `desk`       | Helpdesk & Service      | 1000  |
+| `docs`       | Documents & Sign        | 1100  |
+| `portal`     | Customer Portal         | 1200  |
+| `mrkt`       | Marketing & Campaigns   | 1300  |
+| `mfg`        | Manufacturing & Quality | 1400  |
+| `ai`         | AI & Copilot            | 1500  |
+| `reports`    | Reports & Analytics     | 1600  |
+| `studio`     | Studio & Automation     | 1700  |
+| `compliance` | Compliance & Audit      | 1800  |
 
 ---
 
@@ -204,46 +205,46 @@ mrkt, mfg, ai, reports, studio, compliance).
 
 A permission set is a named, reusable bundle of permissions. Examples:
 
-| Set | Purpose |
-|---|---|
-| `StandardUser` | Default for any signed-in user (own profile, dashboards, time) |
-| `Approver` | Cross-functional approval capabilities (deals, quotes, POs, bills, payroll, time off) |
-| `AIEnabled` | Use Copilot and run agents within a governed scope |
-| `AIMutator` | Let Copilot propose mutations (still requires human approver) |
-| `AIPowerUser` | AI Enabled + Mutator + Configure + Evaluation |
-| `SensitiveDataReader` | Read sensitive PII / fiscal fields |
-| `PIIEditor` | Edit PII (requires MFA, dual-control) |
-| `FinanceOperator` | All finance read/write; AR/AP/Journal; no period admin |
-| `FinancePeriodAdmin` | Lock/unlock periods, year-end close |
-| `TaxFiler` | File VAT return with the tax authority |
-| `CRMOperator` | Full CRM (leads, accounts, deals, quotes, activities) |
-| `InventoryOperator` | Stock receive/deliver/transfer/adjust/scrap |
-| `InventoryAdmin` | Warehouses, valuation, cycle counts |
-| `PurchaseOperator` | RFQ, PO, receipts, returns, vendors |
-| `PurchaseAdmin` | Pricelist, cancel PO, vendor delete |
-| `POSOperator` | Open/close session, sale, void, refund |
-| `POSSupervisor` | Cash drawer, fiscalize, z-report |
-| `HROperator` | Employee records, attendance, leave, contracts |
-| `PayrollOperator` | Run/approve/post payroll |
-| `ProjectsOperator` | Projects, tasks, time, billing |
-| `DeskOperator` | Service cases, replies, knowledge |
-| `DeskAdmin` | SLA, knowledge update, field service |
-| `DocsOperator` | Documents, templates, sign, evidence |
-| `DocsAdmin` | Cabinet, requests, evidence export |
-| `PortalCustomer` | Customer-facing portal only |
-| `PortalVendor` | Vendor-facing portal only |
-| `MarketingOperator` | Campaigns, segments, templates, consent |
-| `ManufacturingOperator` | BoM, work orders, quality, repair |
-| `ComplianceOperator` | Policies, consent, legal sources, retention, GDPR |
-| `RetentionAdmin` | Manage retention rules (critical) |
-| `AuditOperator` | View audit events; export, prepare packets |
-| `AuditDeliver` | Deliver audit packet externally (Owner only) |
-| `StudioBuilder` | Custom fields, workflows, approvals, webhooks, layouts |
-| `ReportBuilder` | Dashboards, financial/operational/spreadsheet |
-| `SystemAdmin` | Tenant, org, settings, integrations, backup |
-| `UserAdmin` | Invite, update, deactivate, reset password |
-| `SecurityAdmin` | Roles, PSs, profiles, MFA, API keys, sessions, audit |
-| `ReadOnly` | Read-only across operational modules |
+| Set                     | Purpose                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `StandardUser`          | Default for any signed-in user (own profile, dashboards, time)                        |
+| `Approver`              | Cross-functional approval capabilities (deals, quotes, POs, bills, payroll, time off) |
+| `AIEnabled`             | Use Copilot and run agents within a governed scope                                    |
+| `AIMutator`             | Let Copilot propose mutations (still requires human approver)                         |
+| `AIPowerUser`           | AI Enabled + Mutator + Configure + Evaluation                                         |
+| `SensitiveDataReader`   | Read sensitive PII / fiscal fields                                                    |
+| `PIIEditor`             | Edit PII (requires MFA, dual-control)                                                 |
+| `FinanceOperator`       | All finance read/write; AR/AP/Journal; no period admin                                |
+| `FinancePeriodAdmin`    | Lock/unlock periods, year-end close                                                   |
+| `TaxFiler`              | File VAT return with the tax authority                                                |
+| `CRMOperator`           | Full CRM (leads, accounts, deals, quotes, activities)                                 |
+| `InventoryOperator`     | Stock receive/deliver/transfer/adjust/scrap                                           |
+| `InventoryAdmin`        | Warehouses, valuation, cycle counts                                                   |
+| `PurchaseOperator`      | RFQ, PO, receipts, returns, vendors                                                   |
+| `PurchaseAdmin`         | Pricelist, cancel PO, vendor delete                                                   |
+| `POSOperator`           | Open/close session, sale, void, refund                                                |
+| `POSSupervisor`         | Cash drawer, fiscalize, z-report                                                      |
+| `HROperator`            | Employee records, attendance, leave, contracts                                        |
+| `PayrollOperator`       | Run/approve/post payroll                                                              |
+| `ProjectsOperator`      | Projects, tasks, time, billing                                                        |
+| `DeskOperator`          | Service cases, replies, knowledge                                                     |
+| `DeskAdmin`             | SLA, knowledge update, field service                                                  |
+| `DocsOperator`          | Documents, templates, sign, evidence                                                  |
+| `DocsAdmin`             | Cabinet, requests, evidence export                                                    |
+| `PortalCustomer`        | Customer-facing portal only                                                           |
+| `PortalVendor`          | Vendor-facing portal only                                                             |
+| `MarketingOperator`     | Campaigns, segments, templates, consent                                               |
+| `ManufacturingOperator` | BoM, work orders, quality, repair                                                     |
+| `ComplianceOperator`    | Policies, consent, legal sources, retention, GDPR                                     |
+| `RetentionAdmin`        | Manage retention rules (critical)                                                     |
+| `AuditOperator`         | View audit events; export, prepare packets                                            |
+| `AuditDeliver`          | Deliver audit packet externally (Owner only)                                          |
+| `StudioBuilder`         | Custom fields, workflows, approvals, webhooks, layouts                                |
+| `ReportBuilder`         | Dashboards, financial/operational/spreadsheet                                         |
+| `SystemAdmin`           | Tenant, org, settings, integrations, backup                                           |
+| `UserAdmin`             | Invite, update, deactivate, reset password                                            |
+| `SecurityAdmin`         | Roles, PSs, profiles, MFA, API keys, sessions, audit                                  |
+| `ReadOnly`              | Read-only across operational modules                                                  |
 
 ---
 
@@ -268,45 +269,45 @@ Each role declares:
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `parent` | Single-inheritance parent. `null` for top-of-hierarchy. |
-| `appSet` | Default app visibility in the sidebar. Effective app set = union up the parent chain. |
-| `mfaRequired` | When true, the user must verify an MFA factor in the current session to perform any `critical` action. |
-| `sessionHardLimitMinutes` | Hard timeout. The most restrictive limit in the parent chain wins. |
-| `canBeImpersonated` | When false, only Owner can impersonate this role (e.g. Owner, Admin, HR Lead, Payroll Clerk, Compliance Officer, Auditor, Copilot Reviewer). |
+| Field                     | Meaning                                                                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parent`                  | Single-inheritance parent. `null` for top-of-hierarchy.                                                                                      |
+| `appSet`                  | Default app visibility in the sidebar. Effective app set = union up the parent chain.                                                        |
+| `mfaRequired`             | When true, the user must verify an MFA factor in the current session to perform any `critical` action.                                       |
+| `sessionHardLimitMinutes` | Hard timeout. The most restrictive limit in the parent chain wins.                                                                           |
+| `canBeImpersonated`       | When false, only Owner can impersonate this role (e.g. Owner, Admin, HR Lead, Payroll Clerk, Compliance Officer, Auditor, Copilot Reviewer). |
 
 ### Default role matrix
 
-| Role | Default Permission Sets |
-|---|---|
-| `Owner` | All 39 system sets (including `AuditDeliver`, `AIPowerUser`, `PIIEditor`) |
-| `Admin` | All 39 except `AuditDeliver` + `AIPowerUser` → `AIMutator`, `AIEnabled` |
-| `FinanceLead` | `FinanceOperator`, `FinancePeriodAdmin`, `TaxFiler`, `CRMOperator`, `InventoryOperator`, `PurchaseOperator`, `DocsOperator`, `ReportBuilder`, `AuditOperator`, `AIPowerUser`, `SensitiveDataReader`, `StandardUser` |
-| `SalesLead` | `CRMOperator`, `InventoryOperator`, `DeskOperator`, `DocsOperator`, `ReportBuilder`, `MarketingOperator`, `AIEnabled`, `StandardUser` |
-| `PurchaseLead` | `PurchaseOperator`, `PurchaseAdmin`, `InventoryOperator`, `DocsOperator`, `ReportBuilder`, `FinanceOperator`, `AIEnabled`, `StandardUser` |
-| `HRLead` | `HROperator`, `PayrollOperator`, `DocsOperator`, `ReportBuilder`, `ComplianceOperator`, `AIEnabled`, `PIIEditor`, `SensitiveDataReader`, `StandardUser` |
-| `InventoryLead` | `InventoryOperator`, `InventoryAdmin`, `PurchaseOperator`, `POSOperator`, `POSSupervisor`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser` |
-| `ProjectLead` | `ProjectsOperator`, `DeskOperator`, `DeskAdmin`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser` |
-| `Accountant` | `FinanceOperator`, `CRMOperator`, `InventoryOperator`, `PurchaseOperator`, `DocsOperator`, `ReportBuilder`, `ComplianceOperator`, `AIEnabled`, `SensitiveDataReader`, `StandardUser` |
-| `Bookkeeper` | `FinanceOperator`, `CRMOperator`, `DocsOperator`, `StandardUser` |
-| `SalesManager` | `CRMOperator`, `InventoryOperator`, `DeskOperator`, `DocsOperator`, `ReportBuilder`, `MarketingOperator`, `AIEnabled`, `Approver`, `StandardUser` |
-| `SalesRep` | `CRMOperator`, `InventoryOperator`, `DocsOperator`, `AIEnabled`, `StandardUser` |
-| `Purchaser` | `PurchaseOperator`, `InventoryOperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser` |
-| `WarehouseClerk` | `InventoryOperator`, `DocsOperator`, `StandardUser` |
-| `HRSpecialist` | `HROperator`, `DocsOperator`, `ComplianceOperator`, `AIEnabled`, `PIIEditor`, `StandardUser` |
-| `PayrollClerk` | `PayrollOperator`, `FinanceOperator`, `HROperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `SensitiveDataReader`, `StandardUser` |
-| `ProjectManager` | `ProjectsOperator`, `DeskOperator`, `DeskAdmin`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `Approver`, `StandardUser` |
-| `ProjectMember` | `ProjectsOperator`, `DocsOperator`, `AIEnabled`, `StandardUser` |
-| `HelpdeskAgent` | `DeskOperator`, `CRMOperator`, `DocsOperator`, `AIEnabled`, `StandardUser` |
-| `POSCashier` | `POSOperator`, `CRMOperator`, `DocsOperator`, `StandardUser` |
-| `CopilotReviewer` | `AIEnabled`, `AIMutator`, `ComplianceOperator`, `AuditOperator`, `ReportBuilder`, `StandardUser` |
-| `ComplianceOfficer` | `ComplianceOperator`, `RetentionAdmin`, `AuditOperator`, `ReportBuilder`, `AIEnabled`, `PIIEditor`, `StandardUser` |
-| `Auditor` | `ReadOnly`, `AuditOperator`, `AuditDeliver`, `ComplianceOperator`, `ReportBuilder`, `SensitiveDataReader`, `StandardUser` |
-| `Operator` | `CRMOperator`, `DeskOperator`, `DocsOperator`, `AIEnabled`, `StandardUser` |
-| `ServiceManager` | `DeskOperator`, `DeskAdmin`, `CRMOperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser` |
-| `CustomerPortal` | `PortalCustomer` |
-| `VendorPortal` | `PortalVendor` |
+| Role                | Default Permission Sets                                                                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Owner`             | All 39 system sets (including `AuditDeliver`, `AIPowerUser`, `PIIEditor`)                                                                                                                                           |
+| `Admin`             | All 39 except `AuditDeliver` + `AIPowerUser` → `AIMutator`, `AIEnabled`                                                                                                                                             |
+| `FinanceLead`       | `FinanceOperator`, `FinancePeriodAdmin`, `TaxFiler`, `CRMOperator`, `InventoryOperator`, `PurchaseOperator`, `DocsOperator`, `ReportBuilder`, `AuditOperator`, `AIPowerUser`, `SensitiveDataReader`, `StandardUser` |
+| `SalesLead`         | `CRMOperator`, `InventoryOperator`, `DeskOperator`, `DocsOperator`, `ReportBuilder`, `MarketingOperator`, `AIEnabled`, `StandardUser`                                                                               |
+| `PurchaseLead`      | `PurchaseOperator`, `PurchaseAdmin`, `InventoryOperator`, `DocsOperator`, `ReportBuilder`, `FinanceOperator`, `AIEnabled`, `StandardUser`                                                                           |
+| `HRLead`            | `HROperator`, `PayrollOperator`, `DocsOperator`, `ReportBuilder`, `ComplianceOperator`, `AIEnabled`, `PIIEditor`, `SensitiveDataReader`, `StandardUser`                                                             |
+| `InventoryLead`     | `InventoryOperator`, `InventoryAdmin`, `PurchaseOperator`, `POSOperator`, `POSSupervisor`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser`                                                             |
+| `ProjectLead`       | `ProjectsOperator`, `DeskOperator`, `DeskAdmin`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser`                                                                                                       |
+| `Accountant`        | `FinanceOperator`, `CRMOperator`, `InventoryOperator`, `PurchaseOperator`, `DocsOperator`, `ReportBuilder`, `ComplianceOperator`, `AIEnabled`, `SensitiveDataReader`, `StandardUser`                                |
+| `Bookkeeper`        | `FinanceOperator`, `CRMOperator`, `DocsOperator`, `StandardUser`                                                                                                                                                    |
+| `SalesManager`      | `CRMOperator`, `InventoryOperator`, `DeskOperator`, `DocsOperator`, `ReportBuilder`, `MarketingOperator`, `AIEnabled`, `Approver`, `StandardUser`                                                                   |
+| `SalesRep`          | `CRMOperator`, `InventoryOperator`, `DocsOperator`, `AIEnabled`, `StandardUser`                                                                                                                                     |
+| `Purchaser`         | `PurchaseOperator`, `InventoryOperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser`                                                                                                               |
+| `WarehouseClerk`    | `InventoryOperator`, `DocsOperator`, `StandardUser`                                                                                                                                                                 |
+| `HRSpecialist`      | `HROperator`, `DocsOperator`, `ComplianceOperator`, `AIEnabled`, `PIIEditor`, `StandardUser`                                                                                                                        |
+| `PayrollClerk`      | `PayrollOperator`, `FinanceOperator`, `HROperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `SensitiveDataReader`, `StandardUser`                                                                             |
+| `ProjectManager`    | `ProjectsOperator`, `DeskOperator`, `DeskAdmin`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `Approver`, `StandardUser`                                                                                           |
+| `ProjectMember`     | `ProjectsOperator`, `DocsOperator`, `AIEnabled`, `StandardUser`                                                                                                                                                     |
+| `HelpdeskAgent`     | `DeskOperator`, `CRMOperator`, `DocsOperator`, `AIEnabled`, `StandardUser`                                                                                                                                          |
+| `POSCashier`        | `POSOperator`, `CRMOperator`, `DocsOperator`, `StandardUser`                                                                                                                                                        |
+| `CopilotReviewer`   | `AIEnabled`, `AIMutator`, `ComplianceOperator`, `AuditOperator`, `ReportBuilder`, `StandardUser`                                                                                                                    |
+| `ComplianceOfficer` | `ComplianceOperator`, `RetentionAdmin`, `AuditOperator`, `ReportBuilder`, `AIEnabled`, `PIIEditor`, `StandardUser`                                                                                                  |
+| `Auditor`           | `ReadOnly`, `AuditOperator`, `AuditDeliver`, `ComplianceOperator`, `ReportBuilder`, `SensitiveDataReader`, `StandardUser`                                                                                           |
+| `Operator`          | `CRMOperator`, `DeskOperator`, `DocsOperator`, `AIEnabled`, `StandardUser`                                                                                                                                          |
+| `ServiceManager`    | `DeskOperator`, `DeskAdmin`, `CRMOperator`, `DocsOperator`, `ReportBuilder`, `AIEnabled`, `StandardUser`                                                                                                            |
+| `CustomerPortal`    | `PortalCustomer`                                                                                                                                                                                                    |
+| `VendorPortal`      | `PortalVendor`                                                                                                                                                                                                      |
 
 ---
 
@@ -314,12 +315,12 @@ Each role declares:
 
 Each permission is tagged `low` / `medium` / `high` / `critical`.
 
-| Tag | MFA | Dual control | Audit |
-|---|---|---|---|
-| `low` | no | no | standard |
-| `medium` | no | no | standard |
-| `high` | no | no | detailed |
-| `critical` | **yes** | **yes** | forensic |
+| Tag        | MFA     | Dual control | Audit    |
+| ---------- | ------- | ------------ | -------- |
+| `low`      | no      | no           | standard |
+| `medium`   | no      | no           | standard |
+| `high`     | no      | no           | detailed |
+| `critical` | **yes** | **yes**      | forensic |
 
 When a user attempts a `critical` action and their role has
 `mfaRequired = true`, the route returns `401 rbac_mfa_required` with the
@@ -337,16 +338,16 @@ the same permission. Approvals live in `rbac_approvals` (status:
 Some fields are sensitive even if the resource is readable. Examples
 defined in `guards.js` `FLS_RULES`:
 
-| Field path | Min permission | Label |
-|---|---|---|
-| `finance.bank.account_number` | `finance.bank.read` | Bank account number |
-| `finance.bank.routing` | `finance.bank.read` | Bank routing code |
-| `hr.employee.ssn` | `hr.employee.pii.read` | Employee SSN |
-| `hr.employee.bank_account` | `hr.employee.pii.read` | Employee bank account |
-| `hr.employee.medical_notes` | `hr.employee.pii.read` | Employee medical notes |
-| `crm.account.tax_id` | `crm.account.read` | Customer tax ID |
-| `security.user.password_hash` | `security.user.read` | Password hash |
-| `security.user.mfa_secret` | `security.user.read` | MFA secret |
+| Field path                    | Min permission         | Label                  |
+| ----------------------------- | ---------------------- | ---------------------- |
+| `finance.bank.account_number` | `finance.bank.read`    | Bank account number    |
+| `finance.bank.routing`        | `finance.bank.read`    | Bank routing code      |
+| `hr.employee.ssn`             | `hr.employee.pii.read` | Employee SSN           |
+| `hr.employee.bank_account`    | `hr.employee.pii.read` | Employee bank account  |
+| `hr.employee.medical_notes`   | `hr.employee.pii.read` | Employee medical notes |
+| `crm.account.tax_id`          | `crm.account.read`     | Customer tax ID        |
+| `security.user.password_hash` | `security.user.read`   | Password hash          |
+| `security.user.mfa_secret`    | `security.user.read`   | MFA secret             |
 
 `redactFields(user, obj, paths)` strips the field if the user lacks
 the min permission. Routes that return sensitive records should call
@@ -367,12 +368,12 @@ return safe;
 `recordLevelClause(user, resource, opts)` returns a `{ clause, params }`
 splice for SELECT queries.
 
-| Scope | SQL fragment | Notes |
-|---|---|---|
-| `own` | `owner_user_id = ?` | User's own records only |
-| `team` | `owner_user_id IN (SELECT … FROM team_members …)` | Records owned by user's team |
-| `org` | `org_id = ?` | All records in the user's org |
-| `custom` | Caller-supplied SQL | Audit-reviewed; only Owner/Admin can write |
+| Scope    | SQL fragment                                      | Notes                                      |
+| -------- | ------------------------------------------------- | ------------------------------------------ |
+| `own`    | `owner_user_id = ?`                               | User's own records only                    |
+| `team`   | `owner_user_id IN (SELECT … FROM team_members …)` | Records owned by user's team               |
+| `org`    | `org_id = ?`                                      | All records in the user's org              |
+| `custom` | Caller-supplied SQL                               | Audit-reviewed; only Owner/Admin can write |
 
 Built-in `RLS_RULES` define the default scope per resource. Most
 modules default to `org`; activities default to `own`; portal modules
@@ -425,49 +426,49 @@ hold the relevant permission. Errors follow the standard A1 envelope:
 
 ### Catalog
 
-| Method | Path | Permission |
-|---|---|---|
-| GET | `/api/rbac/permissions` | `security.permission_set.read` |
-| GET | `/api/rbac/permissions/:key` | `security.permission_set.read` |
-| GET | `/api/rbac/permission-sets` | `security.permission_set.read` |
-| GET | `/api/rbac/permission-sets/:id` | `security.permission_set.read` |
+| Method | Path                            | Permission                     |
+| ------ | ------------------------------- | ------------------------------ |
+| GET    | `/api/rbac/permissions`         | `security.permission_set.read` |
+| GET    | `/api/rbac/permissions/:key`    | `security.permission_set.read` |
+| GET    | `/api/rbac/permission-sets`     | `security.permission_set.read` |
+| GET    | `/api/rbac/permission-sets/:id` | `security.permission_set.read` |
 
 ### Roles
 
-| Method | Path | Permission |
-|---|---|---|
-| GET | `/api/rbac/roles` | `security.role.read` |
-| POST | `/api/rbac/roles` | `security.role.create` |
-| PATCH | `/api/rbac/roles/:id` | `security.role.update` |
+| Method | Path                  | Permission             |
+| ------ | --------------------- | ---------------------- |
+| GET    | `/api/rbac/roles`     | `security.role.read`   |
+| POST   | `/api/rbac/roles`     | `security.role.create` |
+| PATCH  | `/api/rbac/roles/:id` | `security.role.update` |
 | DELETE | `/api/rbac/roles/:id` | `security.role.delete` |
 
 ### User management
 
-| Method | Path | Permission |
-|---|---|---|
-| GET | `/api/rbac/users/:userId/effective` | `security.user.read` |
-| POST | `/api/rbac/users/:userId/permission-sets` | `security.role.assign` |
+| Method | Path                                          | Permission             |
+| ------ | --------------------------------------------- | ---------------------- |
+| GET    | `/api/rbac/users/:userId/effective`           | `security.user.read`   |
+| POST   | `/api/rbac/users/:userId/permission-sets`     | `security.role.assign` |
 | DELETE | `/api/rbac/users/:userId/permission-sets/:ps` | `security.role.assign` |
-| POST | `/api/rbac/users/:userId/role` | `security.role.assign` |
-| GET | `/api/rbac/me/permissions` | (auth required) |
+| POST   | `/api/rbac/users/:userId/role`                | `security.role.assign` |
+| GET    | `/api/rbac/me/permissions`                    | (auth required)        |
 
 ### FLS / RLS overrides
 
-| Method | Path | Permission |
-|---|---|---|
-| GET | `/api/rbac/field-policies` | `security.permission_set.read` |
-| PUT | `/api/rbac/field-policies/:path` | `security.permission_set.update` |
-| GET | `/api/rbac/record-rules` | `security.permission_set.read` |
-| PUT | `/api/rbac/record-rules/:resource` | `security.permission_set.update` |
+| Method | Path                               | Permission                       |
+| ------ | ---------------------------------- | -------------------------------- |
+| GET    | `/api/rbac/field-policies`         | `security.permission_set.read`   |
+| PUT    | `/api/rbac/field-policies/:path`   | `security.permission_set.update` |
+| GET    | `/api/rbac/record-rules`           | `security.permission_set.read`   |
+| PUT    | `/api/rbac/record-rules/:resource` | `security.permission_set.update` |
 
 ### Sessions & audit
 
-| Method | Path | Permission |
-|---|---|---|
-| GET | `/api/rbac/sessions` | `security.session.list` |
-| DELETE | `/api/rbac/sessions/:id` | `security.session.revoke` |
-| GET | `/api/rbac/audit` | `security.audit.read` |
-| GET | `/api/rbac/health` | any of role.read / permission_set.read / audit.read |
+| Method | Path                     | Permission                                          |
+| ------ | ------------------------ | --------------------------------------------------- |
+| GET    | `/api/rbac/sessions`     | `security.session.list`                             |
+| DELETE | `/api/rbac/sessions/:id` | `security.session.revoke`                           |
+| GET    | `/api/rbac/audit`        | `security.audit.read`                               |
+| GET    | `/api/rbac/health`       | any of role.read / permission_set.read / audit.read |
 
 ### Examples
 
@@ -524,13 +525,13 @@ when no user holds them (`DELETE /api/rbac/roles/:id` returns
 
 A1-Suite-Local contains ad-hoc role checks in `server/app.js`. Mapping:
 
-| Old check | New check |
-|---|---|
-| `requireOwner(req)` | `requirePerm("security.user.update")` + role check at the route level |
-| `requireFinanceOperator(req)` | `requirePerm("finance.invoice.create")` (or whichever action) |
-| `requireAccountant(req)` | `requirePerm("finance.journal.post")` |
-| `requirePayrollClerk(req)` | `requirePerm("hr.payroll.run")` |
-| `if (user.role === 'Admin')` | `if (hasPermission(user, "system.org.update"))` |
+| Old check                     | New check                                                             |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `requireOwner(req)`           | `requirePerm("security.user.update")` + role check at the route level |
+| `requireFinanceOperator(req)` | `requirePerm("finance.invoice.create")` (or whichever action)         |
+| `requireAccountant(req)`      | `requirePerm("finance.journal.post")`                                 |
+| `requirePayrollClerk(req)`    | `requirePerm("hr.payroll.run")`                                       |
+| `if (user.role === 'Admin')`  | `if (hasPermission(user, "system.org.update"))`                       |
 
 Search-and-replace recipe:
 
@@ -547,19 +548,19 @@ The goal is **zero hard-coded role strings outside `server/rbac/roles.js`**.
 
 ## 14. Comparison With Industry Systems
 
-| Feature | A1-ERP-HY | Salesforce | NetSuite | Odoo 19 |
-|---|---|---|---|---|
-| Role hierarchy | Single-inheritance | Single-inheritance | Tree | Multi-inheritance groups |
-| Permission sets | Yes (additive) | Yes (additive) | Permission levels | Inherited groups |
-| Profiles | Planned | Yes | n/a | n/a |
-| Field-level security | Catalog + overrides | Yes | Custom fields | `groups=` attribute |
-| Record-level security | Scope (own/team/org/custom) | Sharing rules | Role-based filters | Record rules |
-| Sensitivity-driven MFA | Yes (critical) | Yes (high) | Yes | n/a |
-| Dual control | Yes (critical) | Approval processes | Approval routing | Approvals module |
-| Audit log | Per-action + global | Field-history + events | System notes | mail.thread |
-| Custom roles | Yes, parent-required | Yes | Yes | Groups |
-| Impersonation policy | Catalog-driven | Delegated Admin | n/a | Super-user flag |
-| Multi-tenant scoping | `tenant_id` on every row | OrgId | Subsidiary | Company |
+| Feature                | A1-ERP-HY                   | Salesforce             | NetSuite           | Odoo 19                  |
+| ---------------------- | --------------------------- | ---------------------- | ------------------ | ------------------------ |
+| Role hierarchy         | Single-inheritance          | Single-inheritance     | Tree               | Multi-inheritance groups |
+| Permission sets        | Yes (additive)              | Yes (additive)         | Permission levels  | Inherited groups         |
+| Profiles               | Planned                     | Yes                    | n/a                | n/a                      |
+| Field-level security   | Catalog + overrides         | Yes                    | Custom fields      | `groups=` attribute      |
+| Record-level security  | Scope (own/team/org/custom) | Sharing rules          | Role-based filters | Record rules             |
+| Sensitivity-driven MFA | Yes (critical)              | Yes (high)             | Yes                | n/a                      |
+| Dual control           | Yes (critical)              | Approval processes     | Approval routing   | Approvals module         |
+| Audit log              | Per-action + global         | Field-history + events | System notes       | mail.thread              |
+| Custom roles           | Yes, parent-required        | Yes                    | Yes                | Groups                   |
+| Impersonation policy   | Catalog-driven              | Delegated Admin        | n/a                | Super-user flag          |
+| Multi-tenant scoping   | `tenant_id` on every row    | OrgId                  | Subsidiary         | Company                  |
 
 ---
 
@@ -599,10 +600,9 @@ older than the retention window nightly.
 
 ---
 
-*This document is the canonical reference for the RBAC system. Any
+_This document is the canonical reference for the RBAC system. Any
 change to permissions, roles, or permission sets must update both the
-catalog source and this document.*
-
+catalog source and this document._
 
 ## Provenance
 

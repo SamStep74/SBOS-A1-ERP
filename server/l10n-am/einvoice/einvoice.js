@@ -1,7 +1,7 @@
 // E-invoice XML builder — Armenian invoice export engine.
 //
-// Produces a structured e-invoice document (ported from the A1 schema
-// `urn:hayhashvapah:einvoice:1`), improved with MULTI-LINE support, whole-dram AMD
+// Produces a structured e-invoice document (ported from the A1 schema while
+// preserving its stable XML namespace), improved with MULTI-LINE support, whole-dram AMD
 // amounts (via the localization kernel), and the official SRC e-invoice field set
 // (per the SRC e-Invoicing User Guide): transaction type (Գործարքի տեսակ, mandatory
 // since 2025-03-01), supplier VAT-payer reg № (ԱԱՀՎՀՀ), buyer passport fallback when

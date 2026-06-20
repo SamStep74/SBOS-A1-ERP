@@ -1,4 +1,5 @@
 <!-- Mirrored from A1-ERP-HY @ 50f5f44d632f8a3112ae5579060b768f0028c5da on 2026-06-16 -->
+
 # A1 ERP-HY Project Status
 
 > Snapshot of the first wave of work on A1-ERP-HY. See
@@ -12,17 +13,17 @@
 A complete, production-grade RBAC stack — the foundation of the entire
 ERP. Files at `server/rbac/`:
 
-| File | Purpose | Lines |
-|---|---|---|
-| `permissions.js` | 315 permission keys across 18 categories with sensitivity tags | 459 |
-| `roles.js` | 27 system roles with hierarchy, MFA, session policy, impersonation | 527 |
-| `matrix.js` | 39 system permission sets (named bundles) | 771 |
-| `roleMatrix.js` | Role → permission set map (the bridge) | 204 |
-| `guards.js` | Runtime enforcement (permission, FLS, RLS, session, impersonation) | 396 |
-| `schema.sql` | SQLite tables (catalog mirrors, user assignments, FLS/RLS, audit) | 268 |
-| `seed.js` | Idempotent installer (`seedRBAC(db)`) | 205 |
-| `routes.js` | Fastify admin API (20+ endpoints) | 374 |
-| `index.js` | Public module entry (`rbac.install(app, { db })`) | 83 |
+| File             | Purpose                                                            | Lines |
+| ---------------- | ------------------------------------------------------------------ | ----- |
+| `permissions.js` | 315 permission keys across 18 categories with sensitivity tags     | 459   |
+| `roles.js`       | 27 system roles with hierarchy, MFA, session policy, impersonation | 527   |
+| `matrix.js`      | 39 system permission sets (named bundles)                          | 771   |
+| `roleMatrix.js`  | Role → permission set map (the bridge)                             | 204   |
+| `guards.js`      | Runtime enforcement (permission, FLS, RLS, session, impersonation) | 396   |
+| `schema.sql`     | SQLite tables (catalog mirrors, user assignments, FLS/RLS, audit)  | 268   |
+| `seed.js`        | Idempotent installer (`seedRBAC(db)`)                              | 205   |
+| `routes.js`      | Fastify admin API (20+ endpoints)                                  | 374   |
+| `index.js`       | Public module entry (`rbac.install(app, { db })`)                  | 83    |
 
 Documentation at `docs/RBAC_SYSTEM.md` (~595 lines) covers the design,
 API, migration story, comparison vs Salesforce/NetSuite/Odoo, and the
@@ -54,14 +55,14 @@ $ node --test test/rbac.test.js
 
 ### 3. dmux-style orchestration scaffolding
 
-| File | Purpose |
-|---|---|
-| `scripts/tmux-worktree-orchestrator.js` | Shared helper: `createWorktree`, `overlaySeedPaths`, `writeWorkerFiles`, `launchTmuxPane` |
-| `scripts/orchestrate-worktrees.js` | CLI runner: reads `plan.json`, creates worktrees, launches tmux |
-| `.orchestration/a1-erp-hy-initial.json` | First-wave plan (3 workers: rbac-catalog, dmux-workflows, docs-and-status) |
-| `.orchestration/README.md` | Plan schema + usage |
+| File                                     | Purpose                                                                                   |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `scripts/tmux-worktree-orchestrator.cjs` | Shared helper: `createWorktree`, `overlaySeedPaths`, `writeWorkerFiles`, `launchTmuxPane` |
+| `scripts/orchestrate-worktrees.cjs`      | CLI runner: reads `plan.json`, creates worktrees, launches tmux                           |
+| `.orchestration/a1-erp-hy-initial.json`  | First-wave plan (3 workers: rbac-catalog, dmux-workflows, docs-and-status)                |
+| `.orchestration/README.md`               | Plan schema + usage                                                                       |
 
-The pattern is identical to the ECC `orchestrate-worktrees.js` helper
+The pattern is identical to the ECC `orchestrate-worktrees.cjs` helper
 described in the `dmux-workflows` skill: one branch-backed worktree per
 worker, optional seed-path overlay, per-worker task/handoff/status
 files, all in a single tmux session.
@@ -107,11 +108,11 @@ In execution order, roughly:
 
 After this first wave, the repo has the following branches:
 
-| Branch | Worktree | Worker | Status |
-|---|---|---|---|
-| `main` | (this checkout) | orchestrator | first wave complete |
-| `rbac-catalog` | `.claude/worktrees/rbac-catalog/` | rbac-catalog | done (45/45 tests) |
-| `dmux-workflows` | `.claude/worktrees/dmux-workflows/` | dmux-workflows | done (orchestration scaffolding) |
+| Branch            | Worktree                             | Worker          | Status                                   |
+| ----------------- | ------------------------------------ | --------------- | ---------------------------------------- |
+| `main`            | (this checkout)                      | orchestrator    | first wave complete                      |
+| `rbac-catalog`    | `.claude/worktrees/rbac-catalog/`    | rbac-catalog    | done (45/45 tests)                       |
+| `dmux-workflows`  | `.claude/worktrees/dmux-workflows/`  | dmux-workflows  | done (orchestration scaffolding)         |
 | `docs-and-status` | `.claude/worktrees/docs-and-status/` | docs-and-status | done (RBAC_SYSTEM.md, PROJECT_STATUS.md) |
 
 ## Open questions
@@ -162,11 +163,15 @@ const rbac = require('./rbac');
 rbac.install(fastify, { db: fastify.db });
 
 // In a route handler:
-fastify.post('/api/invoices', {
-  preHandler: rbac.requirePerm('finance.invoice.create'),
-}, async (request) => {
-  // ... handler body ...
-});
+fastify.post(
+  '/api/invoices',
+  {
+    preHandler: rbac.requirePerm('finance.invoice.create'),
+  },
+  async (request) => {
+    // ... handler body ...
+  },
+);
 
 // Redact sensitive fields in responses:
 const safeAccount = rbac.redactFields(request.user, account, [
@@ -181,11 +186,11 @@ return safeAccount;
 Shipped in commit range `352a4a9..411f051`, octopus-merged to `main`
 and pushed to `origin/main` at `411f051`.
 
-| Worker | Branch | Result | Tests added |
-|---|---|---|---|
-| `rbac-migration` | `rbac-migration` (2 commits, also `75866bf`) | 17 new tests + lint CLI | 17 |
-| `session-mfa-tests` | `session-mfa-tests` | 30 new tests across 6 suites | 30 |
-| `ai-copilot-scope` | `ai-copilot-scope` (2 commits) | governance module + 35 tests | 35 + 14 = 49 |
+| Worker              | Branch                                       | Result                       | Tests added  |
+| ------------------- | -------------------------------------------- | ---------------------------- | ------------ |
+| `rbac-migration`    | `rbac-migration` (2 commits, also `75866bf`) | 17 new tests + lint CLI      | 17           |
+| `session-mfa-tests` | `session-mfa-tests`                          | 30 new tests across 6 suites | 30           |
+| `ai-copilot-scope`  | `ai-copilot-scope` (2 commits)               | governance module + 35 tests | 35 + 14 = 49 |
 
 **Side fixes that landed in main as part of this wave:**
 
@@ -214,14 +219,14 @@ wave 3 work) and are unrelated to the RBAC migration. Confirmed by
 running `node --test --test-reporter=tap test/api.test.js` on `main`
 after the wave 2 merge:
 
-| # | TAP # | Test name |
-|---|---|---|
-| 1 | 8   | dashboard launcher source wiring covers every seeded login role app |
-| 2 | 23  | integration connector rejects malformed path keys before mutation |
-| 3 | 130 | customer 360 joins CRM, finance, service, automation, and legal sources |
-| 4 | 168 | failed webhook delivery can be retried manually |
-| 5 | 182 | service case mutations reject malformed metadata before persistence |
-| 6 | 199 | workflow rule state and rollback reject malformed metadata before persistence |
+| #   | TAP # | Test name                                                                     |
+| --- | ----- | ----------------------------------------------------------------------------- |
+| 1   | 8     | dashboard launcher source wiring covers every seeded login role app           |
+| 2   | 23    | integration connector rejects malformed path keys before mutation             |
+| 3   | 130   | customer 360 joins CRM, finance, service, automation, and legal sources       |
+| 4   | 168   | failed webhook delivery can be retried manually                               |
+| 5   | 182   | service case mutations reject malformed metadata before persistence           |
+| 6   | 199   | workflow rule state and rollback reject malformed metadata before persistence |
 
 These are **not** in the rbac / migration / session / orchestrator
 suites (all four of those are 100% green — 211/211 pass). They are
@@ -236,11 +241,11 @@ Three workers, each owning a non-overlapping route family in
 catalog-driven `requirePerm()` preHandlers. The workers ran in `tmux`
 session `a1-erp-hy-wave3`:
 
-| Worker | Owns routes | Line range (approx) |
-|---|---|---|
-| `migrate-auth-security` | `/api/platform/*`, `/api/login*`, `/api/logout`, `/api/me`, `/api/security/mfa*`, `/api/suite`, `/api/apps`, `/api/integrations/connectors/*` | 1–420 (~25 routes) |
-| `migrate-catalog-inventory` | `/api/catalog/*`, `/api/inventory/*`, `/api/purchase/*`, `/api/pilots/*` | 418–600 (~50 routes) |
-| `migrate-finance-crm-hr` | `/api/finance/*`, `/api/crm/*`, `/api/hr/*`, `/api/payroll/*`, `/api/desk/*`, `/api/analytics/*`, `/api/legal/*`, `/api/admin/*` | rest (~200+ routes) |
+| Worker                      | Owns routes                                                                                                                                   | Line range (approx)  |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `migrate-auth-security`     | `/api/platform/*`, `/api/login*`, `/api/logout`, `/api/me`, `/api/security/mfa*`, `/api/suite`, `/api/apps`, `/api/integrations/connectors/*` | 1–420 (~25 routes)   |
+| `migrate-catalog-inventory` | `/api/catalog/*`, `/api/inventory/*`, `/api/purchase/*`, `/api/pilots/*`                                                                      | 418–600 (~50 routes) |
+| `migrate-finance-crm-hr`    | `/api/finance/*`, `/api/crm/*`, `/api/hr/*`, `/api/payroll/*`, `/api/desk/*`, `/api/analytics/*`, `/api/legal/*`, `/api/admin/*`              | rest (~200+ routes)  |
 
 **Result:** octopus-merged to main at `f2fd3c3`, lint clean, all 254
 rbac / migration / session / orchestrator tests pass. BUT a hidden
@@ -259,11 +264,11 @@ catalog permission lookups via
 those permission keys to **more roles** than the original allow-lists
 did. For example:
 
-| Helper | Original allow-list | New perm key | Roles holding the perm |
-|---|---|---|---|
-| `requireSessionAdmin` | `["Owner", "Admin"]` | `security.session.revoke` | Owner, Admin, **Auditor** (and any role with `AuditOperator` PS) |
-| `requireAuditExportWriter` | `["Owner", "Admin"]` | `security.audit.export` | Owner, Admin, Auditor |
-| `requireIntegrationWriter` | (was role-allow-list) | `system.integrations.update` | Owner, Admin, **Operator** (any role with `Operator` PS) |
+| Helper                     | Original allow-list   | New perm key                 | Roles holding the perm                                           |
+| -------------------------- | --------------------- | ---------------------------- | ---------------------------------------------------------------- |
+| `requireSessionAdmin`      | `["Owner", "Admin"]`  | `security.session.revoke`    | Owner, Admin, **Auditor** (and any role with `AuditOperator` PS) |
+| `requireAuditExportWriter` | `["Owner", "Admin"]`  | `security.audit.export`      | Owner, Admin, Auditor                                            |
+| `requireIntegrationWriter` | (was role-allow-list) | `system.integrations.update` | Owner, Admin, **Operator** (any role with `Operator` PS)         |
 
 This is a textbook **fail-open** security regression introduced by an
 automated migration: the new check is "does the user hold this perm?"
@@ -309,11 +314,11 @@ can be cherry-picked individually if a future wave needs them.
 
 Three workers in `tmux` session `a1-erp-hy-wave4`:
 
-| Worker | Scope | Deliverable |
-|---|---|---|
-| `catalog-grant-audit` | Every permission key in `server/rbac/permissions.js` × every role in `server/rbac/roles.js` | A `docs/CATALOG_GRANT_AUDIT.md` (or a new test) that proves: for every legacy role allow-list site in `server/app.js`, the set of roles that hold the corresponding perm key is **a subset of** the legacy allow-list. The auditor's first output: a list of "broad grants" (perm held by more roles than any allow-list requires) that the migration workers must narrow before any re-attempt. |
-| `migrate-preHandlers-only` | The 6 routes that Wave 3 successfully converted to `preHandler: requirePerm(...)` | Re-apply only the preHandler swaps (not the helper-body rewrites) for the auth/security slice. Helper bodies stay as role allow-lists. Lint clean, no api.test.js regression. |
-| `fix-pre-existing-failures` | The 6 documented `api.test.js` failures (TAP #8, #23, #130, #168, #182, #199) | Fix the production code to match the test contract. Tests are the source of truth here — these 6 tests were written first as the API contract; the production code drifted. Wave 4 also adds a `pre-existing-failures.test.js` so the baseline is locked in CI. |
+| Worker                      | Scope                                                                                       | Deliverable                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `catalog-grant-audit`       | Every permission key in `server/rbac/permissions.js` × every role in `server/rbac/roles.js` | A `docs/CATALOG_GRANT_AUDIT.md` (or a new test) that proves: for every legacy role allow-list site in `server/app.js`, the set of roles that hold the corresponding perm key is **a subset of** the legacy allow-list. The auditor's first output: a list of "broad grants" (perm held by more roles than any allow-list requires) that the migration workers must narrow before any re-attempt. |
+| `migrate-preHandlers-only`  | The 6 routes that Wave 3 successfully converted to `preHandler: requirePerm(...)`           | Re-apply only the preHandler swaps (not the helper-body rewrites) for the auth/security slice. Helper bodies stay as role allow-lists. Lint clean, no api.test.js regression.                                                                                                                                                                                                                    |
+| `fix-pre-existing-failures` | The 6 documented `api.test.js` failures (TAP #8, #23, #130, #168, #182, #199)               | Fix the production code to match the test contract. Tests are the source of truth here — these 6 tests were written first as the API contract; the production code drifted. Wave 4 also adds a `pre-existing-failures.test.js` so the baseline is locked in CI.                                                                                                                                  |
 
 **Goal of Wave 4:** test baseline locked at 227/233 (6 documented
 pre-existing → 233/233 once fixed), `scripts/lint-rbac.js` extended
@@ -332,14 +337,14 @@ fails the build.
 
 ### Commits on origin/main (oldest → newest)
 
-| SHA | What |
-|---|---|
-| `2b9d20f` | Wave 4 catalog-grant-audit — broad-grant lint infrastructure + audit doc |
-| `a02356b` | Wave 4 migrate-preHandlers-only — 6 routes converted to pure preHandler |
-| `86c5cad` | Wave 5 narrow-broad-grants — 11 BROAD GRANTs → 0 on requireXxx helpers |
+| SHA       | What                                                                                        |
+| --------- | ------------------------------------------------------------------------------------------- |
+| `2b9d20f` | Wave 4 catalog-grant-audit — broad-grant lint infrastructure + audit doc                    |
+| `a02356b` | Wave 4 migrate-preHandlers-only — 6 routes converted to pure preHandler                     |
+| `86c5cad` | Wave 5 narrow-broad-grants — 11 BROAD GRANTs → 0 on requireXxx helpers                      |
 | `7a167cb` | Wave 5 cleanup — register 10 perm keys + remove system.integrations.read from AuditOperator |
-| `22eca34` | Wave 4 fix-pre-existing-failures — 6 api.test.js canary tests resolved (233/233) |
-| `71b8c21` | Wave 5 annotate-allow-list-sites — 23 NO LEGACY sites annotated |
+| `22eca34` | Wave 4 fix-pre-existing-failures — 6 api.test.js canary tests resolved (233/233)            |
+| `71b8c21` | Wave 5 annotate-allow-list-sites — 23 NO LEGACY sites annotated                             |
 
 ### Catalog-grant audit state (snapshot regen at 71b8c21)
 
@@ -362,15 +367,15 @@ grants). Wave 7+ will narrow these.
 
 ### Test baseline
 
-| Suite | Before Wave 4 | After Wave 5 (71b8c21) |
-|---|---|---|
-| `api.test.js` | 227 pass / 6 fail | **233 pass / 0 fail** |
-| `rbac-broad-grants.test.js` | n/a | 25/25 pass |
-| `rbac.test.js` | 45/45 | 45/45 |
-| `rbac-migration.test.js` | 0 fail (warn-only) | 0 fail |
-| `rbac-session.test.js` | 0 fail | 0 fail |
-| `orchestrator.test.js` | 0 fail | 0 fail |
-| `pre-existing-failures.test.js` | n/a (new) | 3/3 pass |
+| Suite                           | Before Wave 4      | After Wave 5 (71b8c21) |
+| ------------------------------- | ------------------ | ---------------------- |
+| `api.test.js`                   | 227 pass / 6 fail  | **233 pass / 0 fail**  |
+| `rbac-broad-grants.test.js`     | n/a                | 25/25 pass             |
+| `rbac.test.js`                  | 45/45              | 45/45                  |
+| `rbac-migration.test.js`        | 0 fail (warn-only) | 0 fail                 |
+| `rbac-session.test.js`          | 0 fail             | 0 fail                 |
+| `orchestrator.test.js`          | 0 fail             | 0 fail                 |
+| `pre-existing-failures.test.js` | n/a (new)          | 3/3 pass               |
 
 ### What Wave 4+5 proves
 
@@ -405,11 +410,11 @@ silently widens the role set for a perm key fails
 Three workers in tmux session `a1-erp-hy-wave6`, launched at
 2026-06-14T10:51:32Z (PIDs 92139 / 92282 / 92370):
 
-| Worker | Scope | Deliverable | Result |
-|---|---|---|---|
-| `add-armenian-product-fields` | `catalog_items` + `catalog_item_variants` | Armenian/Russian/English names, SKU, barcode, vat_class, excise_marker, fiscal_receipt_category, arm_region_of_origin. CHECK constraints + 10 tests. | Merged `33feea7` |
-| `add-sales-order-primitives` | `sales_orders` + `sales_order_lines` | Fulfillment + billing status enums, 9 endpoints with `sales.order.*` perm keys, order_number generator, 10 tests. | Merged `eb1e1cb` (salvaged — agent exited 0 on socket close) |
-| `expand-localization-dict` | `arm_regions` + label dictionary | 12 marzes + Yerevan city seeded; product/order/excise/fiscal label keys (hy, ru, en); `getLocalizedLabel(key, locale)`; 10 tests. | Merged `66131d0` (salvaged — same socket-close mode) |
+| Worker                        | Scope                                     | Deliverable                                                                                                                                          | Result                                                       |
+| ----------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `add-armenian-product-fields` | `catalog_items` + `catalog_item_variants` | Armenian/Russian/English names, SKU, barcode, vat_class, excise_marker, fiscal_receipt_category, arm_region_of_origin. CHECK constraints + 10 tests. | Merged `33feea7`                                             |
+| `add-sales-order-primitives`  | `sales_orders` + `sales_order_lines`      | Fulfillment + billing status enums, 9 endpoints with `sales.order.*` perm keys, order_number generator, 10 tests.                                    | Merged `eb1e1cb` (salvaged — agent exited 0 on socket close) |
+| `expand-localization-dict`    | `arm_regions` + label dictionary          | 12 marzes + Yerevan city seeded; product/order/excise/fiscal label keys (hy, ru, en); `getLocalizedLabel(key, locale)`; 10 tests.                    | Merged `66131d0` (salvaged — same socket-close mode)         |
 
 **Goal of Wave 6:** ship the Phase 0 foundation — Armenian product
 master, sales-order lifecycle, multilingual label dictionary — that
@@ -431,6 +436,7 @@ with a cryptic `SyntaxError: missing ) after argument list`. Fixed
 in `e985b43` (single line — backticks removed from the comment).
 
 **Post-Wave-6 verification (on `6529b3e`):**
+
 - `node --test test/api.test.js` → 233/233 pass
 - `node --test test/rbac.test.js` → 74/74 pass
 - `node scripts/lint-rbac-broad-grants.js` → 16 PASS / 23 BROAD / 9 NO LEGACY / 0 UNKNOWN
@@ -449,6 +455,7 @@ Detailed plan lives at
 JSON: [.orchestration/a1-erp-hy-wave7.json](../.orchestration/a1-erp-hy-wave7.json).
 
 3 workers, splits the 23 BROAD GRANTs by domain:
+
 - **Worker A** `narrow-catalog-permissions` — 10 catalog/inventory routes. Creates `CatalogReader`, `CatalogEditor`, `StockReader`, `StockReceiver`.
 - **Worker B** `add-inventory-adjust-perms` — registers the missing `inv.stock.{adjust,deliver,transfer,scrap,count}` + `inv.product.delete` + `inv.valuation.run` perm keys in the catalog.
 - **Worker C** `extract-purchase-narrow-sets` — 8 purchase/finance routes. Creates `PurchaseVendorReader`, `PurchaseOrderReader`, `PurchaseAnalyticsReader`, `PurchaseVendorWriter`, `PurchaseOrderWriter`, `PurchaseReceiptWriter`, `PurchaseReturnWriter`, `FinanceBillWriter`.
@@ -466,6 +473,7 @@ The auto-generated snapshot + audit were regenerated and committed
 in `d5a3f28`.
 
 **Post-Wave-7 verification (on `d5a3f28`):**
+
 - `node --test test/api.test.js` → 233/233 pass
 - `node --test test/rbac-broad-grants.test.js test/rbac-migration.test.js` → 71/71 pass
 - `node scripts/lint-rbac-broad-grants.js` → **37 PASS / 2 BROAD / 9 NO LEGACY / 0 UNKNOWN**
@@ -476,6 +484,7 @@ in `d5a3f28`.
 Pushed `6903c90..d5a3f28` to `origin/main`.
 
 **Remaining work for Wave 8:**
+
 1. **2 remaining BROAD grants** (CRM-related, were in Wave 5 scope): `crm.deal.create` (extra: SalesLead/SalesManager/SalesRep/ServiceManager) and `crm.quote.send` (same extras). These were reduced by the Wave 5 `DealCreator`/`QuoteSender` narrow sets but the wide `requireCrmEditor` / `requireCollectionEditor` helpers still grant them. The remaining fix is route-level: convert the routes that use these wide helpers to use `requirePerm` with the narrow perm keys.
 2. **9 NO LEGACY sites** (1 helper + 8 pilot routes): `requireAnalyticsReportReader` + 4 read/4 write `/api/pilots/clinic-wellness/*` routes need `// rbac-audit: expected-roles` annotations.
 3. **The Worker B work (inventory adjust perm keys)** is small enough to fold into Wave 8.
@@ -532,8 +541,6 @@ Workers A and B both touch `server/app.js` but on disjoint line ranges (Worker A
 6. **RBAC UI** (Wave 14+): a frontend for managing roles, permission sets, and user assignments.
 7. **Deal ↔ Inventory ↔ Vendor foreign keys** (Wave 15+): wire the sales_orders, inventory, and purchase tables together so a deal drives stock reservation + auto-reorder.
 
-
-
 ## Provenance
 
 - **Source path:** `/Users/samvelstepanyan/dev/A1-ERP-HY/docs/PROJECT_STATUS.md`
@@ -543,20 +550,20 @@ Workers A and B both touch `server/app.js` but on disjoint line ranges (Worker A
 - **Worktree:** `/Users/samvelstepanyan/dev/SBOS-A1-ERP/.claude/worktrees/seed-from-a1-erp-hy`
 - **Bytes (mirrored body, pre-provenance):** 29389
 
-
 ## SBOS-A1-ERP Wave 3 — PLANNED (2026-06-19)
 
 Adds three orthogonal hardening passes to the live SBOS-A1-ERP platform.
 Lives on `main`; the orchestrator-foundation work (`plan30/orch-foundation-2`
-+ `plan30/orch-foundation-2-stamp-duty`) is tracked separately. The plan
-itself is `.orchestration/sbos-a1-erp-wave-3.json`; the closeout template
-is `docs/WAVE-3-SUMMARY.md`.
 
-| Worker | Scope | Deliverable |
-|---|---|---|
-| `l10n-audit-hardening` | `server/l10n-am/audit.js` + `audit-cli.js` | 3 new check functions (`findHardcodedRates`, `findEvalLike`, `findStringConcatSql`) + 3 new CLI flags (`--check-rates`, `--check-eval`, `--check-sql`) + 12+ new tests |
-| `rbac-fastify-coverage` | `server/rbac/rbac.test.js` (+ tiny `guards.js` / `routes.js` fixes if needed) | 10+ new tests covering impersonation policy, FLS edge cases, role-hierarchy cross-cuts; ≥80% coverage on `server/rbac/` |
-| `docs-walkthrough` | `docs/sales/WALKTHROUGH.md` + `CONSOLE.md` | 30-minute operator walkthrough + console narrative (the `README.md` §3 promise); brand-stripped |
+- `plan30/orch-foundation-2-stamp-duty`) is tracked separately. The plan
+  itself is `.orchestration/sbos-a1-erp-wave-3.json`; the closeout template
+  is `docs/WAVE-3-SUMMARY.md`.
+
+| Worker                  | Scope                                                                         | Deliverable                                                                                                                                                            |
+| ----------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `l10n-audit-hardening`  | `server/l10n-am/audit.js` + `audit-cli.js`                                    | 3 new check functions (`findHardcodedRates`, `findEvalLike`, `findStringConcatSql`) + 3 new CLI flags (`--check-rates`, `--check-eval`, `--check-sql`) + 12+ new tests |
+| `rbac-fastify-coverage` | `server/rbac/rbac.test.js` (+ tiny `guards.js` / `routes.js` fixes if needed) | 10+ new tests covering impersonation policy, FLS edge cases, role-hierarchy cross-cuts; ≥80% coverage on `server/rbac/`                                                |
+| `docs-walkthrough`      | `docs/sales/WALKTHROUGH.md` + `CONSOLE.md`                                    | 30-minute operator walkthrough + console narrative (the `README.md` §3 promise); brand-stripped                                                                        |
 
 Disjoint file groups: `l10n-audit-hardening` owns `server/l10n-am/audit*.js`;
 `rbac-fastify-coverage` owns `server/rbac/`; `docs-walkthrough` owns `docs/sales/`.
@@ -564,8 +571,9 @@ No file is touched by more than one worker. No post-merge integration fix
 expected (ESM stable since wave 1).
 
 **Test baseline target:** 460+ (l10n-am 214 + rbac 55 + 12+ new audit tests
-+ 10+ new rbac tests + sanity 4 + a buffer for the stamp-duty module's 21
-tests if `plan30/orch-foundation-2-stamp-duty` lands first).
+
+- 10+ new rbac tests + sanity 4 + a buffer for the stamp-duty module's 21
+  tests if `plan30/orch-foundation-2-stamp-duty` lands first).
 
 **Carries forward from wave 2:** the `audit-cli --check-eval` and
 `--check-sql` flags introduced in this wave are the machine-readable

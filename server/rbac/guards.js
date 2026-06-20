@@ -30,7 +30,7 @@
 // ai.agent.*, system.tenant.*, and compliance.* keys unless the session
 // has verified MFA. requirePerm respects it automatically.
 import { PERMISSIONS, SENSITIVITY } from './permissions.js';
-import { ROLES, mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated } from './roles.js';
+import { mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated } from './roles.js';
 import { PERMISSION_SETS } from './matrix.js';
 import { expandRolePermissions, listForRole, getParentChain } from './roleMatrix.js';
 // ───────── Permission resolution cache ─────────
@@ -65,7 +65,8 @@ function resolveEffectivePermissions(user) {
   // 4. Owner is the super-user and implicitly holds every permission. This
   //    is the ONLY implicit-all shortcut. Admin gets its powers explicitly
   //    through its role matrix (e.g. SystemAdmin PS).
-  if (user.role === 'Owner') { // rbac-lint: allow-role-check — Owner shortcut
+  if (user.role === 'Owner') {
+    // rbac-lint: allow-role-check — Owner shortcut
     for (const k of Object.keys(PERMISSIONS)) keys.add(k);
   }
   user._effectivePermissions = keys;
@@ -151,7 +152,7 @@ function requirePermissionWithSensitivity(user, permissionKey) {
   const err = new Error(
     result.reason === 'mfa_required'
       ? `MFA required for sensitive action: ${permissionKey}`
-      : `Missing permission: ${permissionKey}`
+      : `Missing permission: ${permissionKey}`,
   );
   err.statusCode = result.reason === 'mfa_required' ? 401 : 403;
   err.code = result.reason === 'mfa_required' ? 'rbac_mfa_required' : 'rbac_forbidden';
@@ -173,22 +174,31 @@ function requirePermissionWithSensitivity(user, permissionKey) {
 
 const FLS_RULES = Object.freeze({
   // Finance
-  'finance.bank.account_number':    { minPermission: 'finance.bank.read',      label: 'Bank account number' },
-  'finance.bank.routing':           { minPermission: 'finance.bank.read',      label: 'Bank routing code' },
+  'finance.bank.account_number': {
+    minPermission: 'finance.bank.read',
+    label: 'Bank account number',
+  },
+  'finance.bank.routing': { minPermission: 'finance.bank.read', label: 'Bank routing code' },
   // HR
-  'hr.employee.ssn':                { minPermission: 'hr.employee.pii.read',   label: 'Employee SSN' },
-  'hr.employee.bank_account':       { minPermission: 'hr.employee.pii.read',   label: 'Employee bank account' },
-  'hr.employee.medical_notes':      { minPermission: 'hr.employee.pii.read',   label: 'Employee medical notes' },
+  'hr.employee.ssn': { minPermission: 'hr.employee.pii.read', label: 'Employee SSN' },
+  'hr.employee.bank_account': {
+    minPermission: 'hr.employee.pii.read',
+    label: 'Employee bank account',
+  },
+  'hr.employee.medical_notes': {
+    minPermission: 'hr.employee.pii.read',
+    label: 'Employee medical notes',
+  },
   // Customer
-  'crm.account.tax_id':             { minPermission: 'crm.account.read',       label: 'Customer tax ID' },
+  'crm.account.tax_id': { minPermission: 'crm.account.read', label: 'Customer tax ID' },
   // Auth
-  'security.user.password_hash':    { minPermission: 'security.user.read',     label: 'Password hash' },
-  'security.user.mfa_secret':       { minPermission: 'security.user.read',     label: 'MFA secret' },
+  'security.user.password_hash': { minPermission: 'security.user.read', label: 'Password hash' },
+  'security.user.mfa_secret': { minPermission: 'security.user.read', label: 'MFA secret' },
 });
 
 function redactFields(user, obj, fieldPaths) {
   if (!obj || typeof obj !== 'object') return obj;
-  const out = Array.isArray(obj) ? obj.map(o => redactFields(user, o, fieldPaths)) : { ...obj };
+  const out = Array.isArray(obj) ? obj.map((o) => redactFields(user, o, fieldPaths)) : { ...obj };
   if (Array.isArray(out)) return out;
   for (const path of fieldPaths) {
     const rule = FLS_RULES[path];
@@ -244,37 +254,59 @@ function redactFields(user, obj, fieldPaths) {
 // RLS_RULES is a list of overrides: { resource, predicate, description }.
 
 const RLS_RULES = Object.freeze([
-  { resource: 'crm.lead',         defaultScope: 'org', description: 'All org leads visible' },
-  { resource: 'crm.deal',         defaultScope: 'org', description: 'All org deals visible' },
-  { resource: 'crm.quote',        defaultScope: 'org', description: 'All org quotes visible' },
-  { resource: 'crm.activity',     defaultScope: 'own', description: 'Default to own activities' },
-  { resource: 'projects.task',    defaultScope: 'team', description: 'Tasks for the user\'s team' },
-  { resource: 'projects.time',    defaultScope: 'own', description: 'Default to own time entries' },
-  { resource: 'desk.case',        defaultScope: 'org', description: 'All org cases visible' },
-  { resource: 'hr.employee',      defaultScope: 'org', description: 'HR is org-wide for HR roles, own for self' },
-  { resource: 'hr.payroll',       defaultScope: 'org', description: 'Payroll visible to payroll roles only' },
-  { resource: 'finance.journal',  defaultScope: 'org', description: 'All org journal entries' },
-  { resource: 'inv.stock',        defaultScope: 'org', description: 'All org stock' },
-  { resource: 'purchase.po',      defaultScope: 'org', description: 'All org POs' },
-  { resource: 'pos.sale',         defaultScope: 'org', description: 'All POS sales' },
-  { resource: 'portal.order',     defaultScope: 'own', description: 'Customer portal: own orders only' },
-  { resource: 'portal.invoice',   defaultScope: 'own', description: 'Customer portal: own invoices only' },
-  { resource: 'portal.ticket',    defaultScope: 'own', description: 'Customer portal: own tickets only' },
+  { resource: 'crm.lead', defaultScope: 'org', description: 'All org leads visible' },
+  { resource: 'crm.deal', defaultScope: 'org', description: 'All org deals visible' },
+  { resource: 'crm.quote', defaultScope: 'org', description: 'All org quotes visible' },
+  { resource: 'crm.activity', defaultScope: 'own', description: 'Default to own activities' },
+  { resource: 'projects.task', defaultScope: 'team', description: "Tasks for the user's team" },
+  { resource: 'projects.time', defaultScope: 'own', description: 'Default to own time entries' },
+  { resource: 'desk.case', defaultScope: 'org', description: 'All org cases visible' },
+  {
+    resource: 'hr.employee',
+    defaultScope: 'org',
+    description: 'HR is org-wide for HR roles, own for self',
+  },
+  {
+    resource: 'hr.payroll',
+    defaultScope: 'org',
+    description: 'Payroll visible to payroll roles only',
+  },
+  { resource: 'finance.journal', defaultScope: 'org', description: 'All org journal entries' },
+  { resource: 'inv.stock', defaultScope: 'org', description: 'All org stock' },
+  { resource: 'purchase.po', defaultScope: 'org', description: 'All org POs' },
+  { resource: 'pos.sale', defaultScope: 'org', description: 'All POS sales' },
+  {
+    resource: 'portal.order',
+    defaultScope: 'own',
+    description: 'Customer portal: own orders only',
+  },
+  {
+    resource: 'portal.invoice',
+    defaultScope: 'own',
+    description: 'Customer portal: own invoices only',
+  },
+  {
+    resource: 'portal.ticket',
+    defaultScope: 'own',
+    description: 'Customer portal: own tickets only',
+  },
 ]);
 
 // Build a SQL WHERE fragment for record-level scope. Returns a clause +
 // params you can splice into a SELECT. NULL clause means "no extra filter".
 function recordLevelClause(user, resource, opts = {}) {
-  const rule = RLS_RULES.find(r => r.resource === resource);
+  const rule = RLS_RULES.find((r) => r.resource === resource);
   const scope = opts.scopeOverride || (rule ? rule.defaultScope : 'org');
 
   // Owner / Admin see everything across the org.
-  if (user.role === 'Owner' || user.role === 'Admin') { // rbac-lint: allow-role-check — RLS super-user shortcut
+  if (user.role === 'Owner' || user.role === 'Admin') {
+    // rbac-lint: allow-role-check — RLS super-user shortcut
     return { clause: '', params: [] };
   }
 
   // Portal users are always tenant-scoped.
-  if (user.role === 'CustomerPortal' || user.role === 'VendorPortal') { // rbac-lint: allow-role-check — RLS portal branch
+  if (user.role === 'CustomerPortal' || user.role === 'VendorPortal') {
+    // rbac-lint: allow-role-check — RLS portal branch
     return {
       clause: `${resourcePrimaryKey(resource)} IN (SELECT id FROM ${resourceTable(resource)} WHERE tenant_id = ?)`,
       params: [user.tenant_id || user.org_id || 0],
@@ -301,7 +333,7 @@ function recordLevelClause(user, resource, opts = {}) {
   }
 }
 
-function resourcePrimaryKey(resource) {
+function resourcePrimaryKey(_resource) {
   // Convention: each resource map to a table whose primary key is "id".
   return 'id';
 }
@@ -327,9 +359,9 @@ function resourceTable(resource) {
 // `checkSensitivity`) as a parallel concern — the catalog can tag any
 // permission "critical" and that will additionally require MFA.
 const MFA_REQUIRED_KEY_PATTERNS = Object.freeze([
-  /^ai\.agent\./,      // AI agent lifecycle
+  /^ai\.agent\./, // AI agent lifecycle
   /^system\.tenant\./, // Tenant administration
-  /^compliance\./,     // Compliance / audit / breach
+  /^compliance\./, // Compliance / audit / breach
 ]);
 
 function requiresMfa(permissionKey) {
@@ -458,7 +490,11 @@ function requireRole(roleName, ctx) {
 
 function requirePermFastify(permissionKey) {
   return async function rbacPreHandler(request, reply) {
-    const ctx = { user: request.user, session: request.session, impersonator: request.impersonator };
+    const ctx = {
+      user: request.user,
+      session: request.session,
+      impersonator: request.impersonator,
+    };
     const ok = requirePerm(permissionKey, ctx);
     if (ok) return;
     if (ctx.mfa_required) {

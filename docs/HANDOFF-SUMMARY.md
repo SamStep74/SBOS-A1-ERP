@@ -1,11 +1,12 @@
 <!-- Mirrored from A1-ERP-HY @ 50f5f44d632f8a3112ae5579060b768f0028c5da on 2026-06-16 -->
+
 # Armosphera One Claude — Handoff & State
 
 _Last updated: 2026-06-07 · Catalog quote margin-rule evidence · 51 tags · **full suite verified**_
 
 > **Repo home:** private GitHub `SamStep74/A1-Suite-Local`, developed locally at `~/dev/A1-Suite-Local` (moved off the OneDrive-synced folder — the old `node --test` "cancelled" stalls were OneDrive FS contention, now gone: the full suite runs clean on local disk).
 
-A **sovereign, self-hostable Armenian business operating system** with phased one-to-one *functional* parity to Zoho One. Runs entirely on the customer's own server: a single Node/Fastify + SQLite process serving a React SPA, with **no external data dependency** except opt-in AI. Built for Armenian organizations that cannot use foreign clouds (government, banks, healthcare, legal).
+A **sovereign, self-hostable Armenian business operating system** with phased one-to-one _functional_ parity to Zoho One. Runs entirely on the customer's own server: a single Node/Fastify + SQLite process serving a React SPA, with **no external data dependency** except opt-in AI. Built for Armenian organizations that cannot use foreign clouds (government, banks, healthcare, legal).
 
 Latest implementation slice: CRM quote lines now persist and expose the matched catalog margin-rule evidence, not only the final margin status. `quote_lines` stores `margin_rule_code`, `margin_rule_minimum_percent`, and `margin_rule_target_percent` with startup repair for existing tenant databases. Catalog-resolved quote lines carry `SERVICE-MIN-35`, `HARDWARE-MIN-25`, minimum percent, and target percent through quote reads; manual overrides and free-text lines keep blank/null rule evidence. The CRM quote evidence chips now show the matched rule code and minimum percent, so a quantity-5 scanner quote surfaces `STANDARD-SALES`, `4,250 AMD discount`, `HARDWARE-MIN-25 min 25%`, and `below minimum`. Quote pricing, public quote reads, workflow reads, finance draft-invoice creation, inventory valuation, purchase costing, POS, and portal flows remain otherwise unchanged. Verification from `~/dev/A1-Suite-Local`: focused catalog regression passes (`node --test --test-concurrency=4 --test-timeout=60000 test/catalog.test.js`, 7 pass, 0 fail); focused migration regression passes (`node --test --test-concurrency=4 --test-timeout=60000 --test-name-pattern="existing quote line tables receive catalog columns" test/api.test.js`, 1 pass, 0 fail); `git diff --check` passes; `npm run build:ui` passes with the existing Vite large-chunk warning; browser proof at `http://127.0.0.1:4198/app/crm` shows `HARDWARE-MIN-25 min 25%` and `below minimum` on desktop and mobile with no overflow; fresh smoke passes with 12 apps (`ARMOSPHERA_ONE_DB=/tmp/a1-suite-catalog-quote-margin-rule-smoke.sqlite ARMOSPHERA_ONE_ALLOW_EGRESS=0 npm run smoke`); full `node --test --test-concurrency=4 --test-timeout=120000` passes (804 pass, 0 fail, 0 cancelled).
 
@@ -14,6 +15,7 @@ Latest implementation slice: CRM quote lines now persist and expose the matched 
 ## 1. What exists today
 
 ### Nine UI domains on one shared data graph — a closed revenue/procurement loop
+
 ```
 Forms (intake) ─▶ CRM (lead→deal→quote) ─▶ Projects (deliver, staffed by People-HR,
    ▲                                          logging billable time)
@@ -22,28 +24,31 @@ Forms (intake) ─▶ CRM (lead→deal→quote) ─▶ Projects (deliver, staffe
                          ▲                         ▲
                          └──── Catalog & Inventory ◀── Purchase ───▶ Finance/AP
 ```
+
 Every arrow is a **validated FK between modules** sharing `customers` / `deals` / `people_employees` — integration depth, not copy-paste.
 
-| Domain | Status | Key capability |
-|---|---|---|
-| **CRM** | complete (BE+UI) | leads, deals, quotes Tube, activity timeline |
-| **Finance** | complete (BE+UI) | double-entry ledger on RA chart of accounts; AR/AP/expenses/payroll/VAT/statements/opening-balances; history lists |
-| **Desk** | complete (BE+UI) | helpdesk: create/list/transition/reassign, escalation governance |
-| **People-HR** | complete (BE+UI) | employee registry (ՀՎՀՀ/salary) → payroll → ledger |
-| **Docs & Sign** | complete (BE+UI) | document + multi-signer e-signature lifecycle, SHA-256 consent, local-only signers, printable Save-as-PDF evidence certificate |
-| **Projects** | complete (BE+UI) | projects→tasks→milestones→time entries; lazy detail expander |
-| **Catalog & Inventory** | complete (BE+UI) | product master, governed stock locations/quants/moves, sidebar stock operation workspace |
-| **Purchase** | complete first slice (BE+UI) | RFQ→PO confirmation→partial/full stock receipts→AP vendor bill with period-lock, vendor/pricelist defaults, receipt evidence, backup evidence, and sidebar workspace controls |
-| **Forms** | complete (BE+UI) | intake forms; PUBLIC submit → creates a CRM lead (rate-limited, key-whitelisted) |
+| Domain                  | Status                       | Key capability                                                                                                                                                                |
+| ----------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CRM**                 | complete (BE+UI)             | leads, deals, quotes Tube, activity timeline                                                                                                                                  |
+| **Finance**             | complete (BE+UI)             | double-entry ledger on RA chart of accounts; AR/AP/expenses/payroll/VAT/statements/opening-balances; history lists                                                            |
+| **Desk**                | complete (BE+UI)             | helpdesk: create/list/transition/reassign, escalation governance                                                                                                              |
+| **People-HR**           | complete (BE+UI)             | employee registry (ՀՎՀՀ/salary) → payroll → ledger                                                                                                                            |
+| **Docs & Sign**         | complete (BE+UI)             | document + multi-signer e-signature lifecycle, SHA-256 consent, local-only signers, printable Save-as-PDF evidence certificate                                                |
+| **Projects**            | complete (BE+UI)             | projects→tasks→milestones→time entries; lazy detail expander                                                                                                                  |
+| **Catalog & Inventory** | complete (BE+UI)             | product master, governed stock locations/quants/moves, sidebar stock operation workspace                                                                                      |
+| **Purchase**            | complete first slice (BE+UI) | RFQ→PO confirmation→partial/full stock receipts→AP vendor bill with period-lock, vendor/pricelist defaults, receipt evidence, backup evidence, and sidebar workspace controls |
+| **Forms**               | complete (BE+UI)             | intake forms; PUBLIC submit → creates a CRM lead (rate-limited, key-whitelisted)                                                                                              |
 
 ### Cross-app seams (the "suite, not a folder of apps" proof)
+
 - **Forms → CRM**: public form submission creates a real CRM lead via `createCrmLead`.
 - **People-HR → Finance**: an employee's salary runs payroll → posts `Dt 714 / Kt 521+525` to the ledger.
 - **Projects → Finance (billing seam)**: unbilled logged minutes → a posted invoice (`Dt 221 / Kt 611+524`), entries marked billed (idempotent per project+period).
 - **Purchase → Inventory → Finance/AP**: confirmed PO receipts create per-receipt stock moves into `WH/STOCK`; only fully received POs convert into vendor bills through the existing AP engine and period-lock checks.
 
 ### Hardening (production-readiness pass — 224 slices)
-1. **Effective-dated tax-rate versioning** (`tax_rates` table; recomputing a historical period uses the rate that applied *then*).
+
+1. **Effective-dated tax-rate versioning** (`tax_rates` table; recomputing a historical period uses the rate that applied _then_).
 2. **Auth/MFA rate-limiting** (per-IP + per-email login throttle, MFA attempt cap → 429).
 3. **UI error surfacing** (all 20 mutation handlers surface server errors in a dismissable banner; previously silent).
 4. **Finance history lists** (expenses / bills / payroll-runs were postable but unviewable — now listed).
@@ -314,6 +319,7 @@ printf 'http://%s:4178/\n' "$MAC_IP"
 The Copilot slice is Armenian-first and now uses OpenRouter as the single opt-in cloud provider (`COPILOT_PROVIDER=openrouter`, `COPILOT_LANGUAGE=hy-AM`) with a live model menu plus local-first fallback. Open Notebook is an opt-in supplemental-source connector only; it sits beside the in-process sovereign RAG layer and cannot satisfy legal citation or professional-review gates. Local verification keeps execution deterministic with outbound disabled by default.
 
 Current checkpoint:
+
 - Current Legal source text-read guard checkpoint: `f893b7f` (`Harden law source text read failures`) on `codex/law-source-text-read-guard` (skips unreadable `.txt`/`.md` law-source files with `read-failed`, keeping one bad text source from aborting the whole offline legal KB build).
 - Latest Legal source text-read guard verification from `~/dev/A1-Suite-Local`: `node --check scripts/ingest-laws.js && node --check test/pdf-text.test.js && node --check server/pdfText.js` pass; focused PDF/source-reader suite pass (`node --test test/pdf-text.test.js`, 13 pass, 0 fail, 0 cancelled); broader legal/RAG ingest suite pass (`node --test test/pdf-text.test.js test/law-ingest.test.js test/law-ingest-homoglyph.test.js test/law-ingest-build.test.js test/law-embed.test.js test/rag.test.js test/legal-search.test.js test/legal-grounding.test.js`, 41 pass, 0 fail, 0 cancelled); local diff review found no issues; `git diff --check` pass; capped full `npm test` pass (553 pass, 0 fail, 0 cancelled); `npm run build:ui` pass with the existing Vite large-chunk warning; `ARMOSPHERA_ONE_DB=/tmp/a1-suite-law-source-text-read-guard-smoke.sqlite ARMOSPHERA_ONE_ALLOW_EGRESS=0 npm run smoke` pass (`smoke ok: Armosphera Demo Clinic, apps=10, kpis=4`).
 - Current Legal source hidden-file guard checkpoint: `a4d6718` (`Harden law source hidden file filtering`) on `codex/law-source-hidden-file-guard` (skips dot-prefixed extension-named sidecars before text reads or PDF extraction, keeping AppleDouble and hidden draft files out of offline law-source ingestion).
@@ -400,7 +406,6 @@ Current checkpoint:
 - Latest clinic subsequent ongoing renewal draft acceptance handoff id guard verification from `~/dev/A1-Suite-Local`: `node --check server/app.js` pass; `node --check test/api.test.js` pass; `git diff --check` pass; focused clinic subsequent-ongoing-renewal draft invoice packet regression (`accountant can record subsequent ongoing renewal HayHashvapah draft invoice packet after owner executes finance approval`) pass (1 target test across 48 files); dashboard sidebar openability regression pass after installing the missing Playwright Chromium headless shell (`dashboard sidebar opens every assigned app for all seeded roles`, 1 pass); interrupted route/tax/VAT tail rerun pass (14 pass, 0 fail); full `npm test` pass (465 pass, 0 fail, 0 cancelled); `npm run build:ui` pass with the existing Vite large-chunk warning; `ARMOSPHERA_ONE_DB=/tmp/a1-suite-clinic-subsequent-ongoing-renewal-draft-acceptance-handoff-id-guard-smoke.sqlite ARMOSPHERA_ONE_ALLOW_EGRESS=0 npm run smoke` pass (`smoke ok: Armosphera Demo Clinic, apps=10, kpis=4`).
 - Current clinic subsequent ongoing renewal acceptance release id guard checkpoint: `99827ca` (`Harden clinic subsequent ongoing acceptance ids`), pushed on `codex/suite-dashboard-route-normalization` (validates clinic/wellness subsequent-ongoing-renewal quote release packet path IDs before subsequent-ongoing-renewal quote acceptance handoff creation).
 
-
 ## Provenance
 
 - **Source path:** `/Users/samvelstepanyan/dev/A1-ERP-HY/HANDOFF.md` (first 400 lines extracted)
@@ -410,4 +415,4 @@ Current checkpoint:
 - **Mirror date:** 2026-06-16
 - **Worktree:** `/Users/samvelstepanyan/dev/SBOS-A1-ERP/.claude/worktrees/seed-from-a1-erp-hy`
 - **Bytes (mirrored body, pre-provenance):** 128372
-- **Note:** This is an *extract* (not a verbatim full copy) of `HANDOFF.md`. For the complete 272631-byte document, consult the A1-ERP-HY source at the path above.
+- **Note:** This is an _extract_ (not a verbatim full copy) of `HANDOFF.md`. For the complete 272631-byte document, consult the A1-ERP-HY source at the path above.

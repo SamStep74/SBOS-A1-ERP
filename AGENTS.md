@@ -33,10 +33,15 @@ and safer under concurrency.
 
 ```ts
 // WRONG
-function setStatus(invoice, status) { invoice.status = status; return invoice; }
+function setStatus(invoice, status) {
+  invoice.status = status;
+  return invoice;
+}
 
 // RIGHT
-function withStatus(invoice, status) { return { ...invoice, status }; }
+function withStatus(invoice, status) {
+  return { ...invoice, status };
+}
 ```
 
 ## 4. Conventional Commits

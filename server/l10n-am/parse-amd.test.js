@@ -125,7 +125,11 @@ test('parseAmd: control characters in raw are stripped from the error', () => {
   assert.ok(err.includes('abc'), 'expected the printable prefix to survive');
   assert.ok(err.includes('end'), 'expected the printable suffix to survive');
   // Equivalent to the kernel's interpolation applied to the sanitized raw.
-  const safe = evil.replace(/[\x00-\x1f\x7f]/g, '');
+  const controlChars = new RegExp(
+    `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
+    'g',
+  );
+  const safe = evil.replace(controlChars, '');
   assert.equal(err, t('en', 'amd.notNumber', { raw: safe }));
 });
 

@@ -48,14 +48,10 @@ function makeMockDb() {
     // production SQL is multi-line). JOINs: invoice↔customer and
     // payment↔invoice need to be detected explicitly so the mock
     // stitches the two tables together.
-    if (
-      /SELECT[\s\S]*FROM\s+FINANCE\.INVOICES/i.test(s) &&
-      /JOIN\s+FINANCE\.CUSTOMERS/i.test(s)
-    ) return 'report-join';
-    if (
-      /SELECT[\s\S]*FROM\s+FINANCE\.PAYMENTS/i.test(s) &&
-      /JOIN\s+FINANCE\.INVOICES/i.test(s)
-    ) return 'report-payments-join';
+    if (/SELECT[\s\S]*FROM\s+FINANCE\.INVOICES/i.test(s) && /JOIN\s+FINANCE\.CUSTOMERS/i.test(s))
+      return 'report-join';
+    if (/SELECT[\s\S]*FROM\s+FINANCE\.PAYMENTS/i.test(s) && /JOIN\s+FINANCE\.INVOICES/i.test(s))
+      return 'report-payments-join';
     if (/SELECT[\s\S]*FROM\s+FINANCE\.INVOICES/i.test(s)) return 'report-invoices';
     if (/SELECT[\s\S]*FROM\s+FINANCE\.PAYMENTS/i.test(s)) return 'report-payments';
     return 'passthrough';
@@ -311,11 +307,18 @@ function makeMockDb() {
           const out = {};
           if (sumMatch) {
             // Strip COALESCE(SUM(col), 0) wrappers for the column lookup.
-            const sumCol = sumMatch[1].replace(/^COALESCE\s*\(\s*|\s*,\s*0\s*\)(\s+AS\s+\w+)?$/gi, '').trim();
+            const sumCol = sumMatch[1]
+              .replace(/^COALESCE\s*\(\s*|\s*,\s*0\s*\)(\s+AS\s+\w+)?$/gi, '')
+              .trim();
             const total = filtered.reduce((acc, row) => acc + Number(row[sumCol] || 0), 0);
             // Find the alias for this SUM. Use a non-greedy scan so we pair
             // the SUM with its nearest AS.
-            const sumAliasMatch = cols.match(new RegExp(`SUM\\s*\\(\\s*${sumCol.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*\\)\\s*(?:,\\s*0\\s*\\))?\\s+AS\\s+(\\w+)`, 'i'));
+            const sumAliasMatch = cols.match(
+              new RegExp(
+                `SUM\\s*\\(\\s*${sumCol.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*\\)\\s*(?:,\\s*0\\s*\\))?\\s+AS\\s+(\\w+)`,
+                'i',
+              ),
+            );
             if (sumAliasMatch) out[sumAliasMatch[1]] = total;
             else out.sum = total;
           }
@@ -402,15 +405,21 @@ function makeMockDb() {
   // sqlite-style .prepare() — same routing.
   function prepare(sql) {
     return {
-      run() { return { changes: 0 }; },
-      async all(...params) { return (await query(sql, params)).rows; },
+      run() {
+        return { changes: 0 };
+      },
+      async all(...params) {
+        return (await query(sql, params)).rows;
+      },
       async get(...params) {
         const r = await query(sql, params);
         return r.rows[0] ?? null;
       },
     };
   }
-  function exec(sql) { return query(sql, []); }
+  function exec(sql) {
+    return query(sql, []);
+  }
 
   return {
     kind: 'mock',
@@ -433,15 +442,30 @@ async function seedCustomer(db, { name, hvhh = null }) {
   return db.customers.size; // last id assigned
 }
 
-async function seedInvoice(db, { customer_id, invoice_number, issue_date, due_date, total_amd, vat_amd = 0, status = 'sent' }) {
+async function seedInvoice(
+  db,
+  { customer_id, invoice_number, issue_date, due_date, total_amd, vat_amd = 0, status = 'sent' },
+) {
   const subtotal = total_amd - vat_amd;
   await db.query(
     `INSERT INTO finance.invoices
        (customer_id, invoice_number, issue_date, due_date,
         subtotal_amd, vat_amd, total_amd, status, notes, sent_at, voided_at, void_reason)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-    [customer_id, invoice_number, issue_date, due_date, subtotal, vat_amd, total_amd, status, null,
-     status !== 'draft' ? new Date().toISOString() : null, null, null],
+    [
+      customer_id,
+      invoice_number,
+      issue_date,
+      due_date,
+      subtotal,
+      vat_amd,
+      total_amd,
+      status,
+      null,
+      status !== 'draft' ? new Date().toISOString() : null,
+      null,
+      null,
+    ],
   );
   return db.invoices.size;
 }
@@ -486,10 +510,10 @@ describe('finance reports', () => {
       assert.equal(out.asOfDate, '2026-06-20');
       assert.equal(out.total_outstanding_amd, 0);
       assert.deepEqual(out.buckets, {
-        '0_30':   { invoice_count: 0, amount_amd: 0 },
-        '31_60':  { invoice_count: 0, amount_amd: 0 },
-        '61_90':  { invoice_count: 0, amount_amd: 0 },
-        '90_plus':{ invoice_count: 0, amount_amd: 0 },
+        '0_30': { invoice_count: 0, amount_amd: 0 },
+        '31_60': { invoice_count: 0, amount_amd: 0 },
+        '61_90': { invoice_count: 0, amount_amd: 0 },
+        '90_plus': { invoice_count: 0, amount_amd: 0 },
       });
     });
 
@@ -505,20 +529,36 @@ describe('finance reports', () => {
       // 61-90 days overdue → due_date in [2026-03-22, 2026-04-20]
       // 90+ days overdue    → due_date <= 2026-03-21
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'A-1', issue_date: '2026-05-01',
-        due_date: '2026-06-10', total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'A-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-06-10',
+        total_amd: 100000,
+        status: 'sent',
       }); // 10 days overdue → 0_30
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'A-2', issue_date: '2026-04-01',
-        due_date: '2026-05-10', total_amd: 200000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'A-2',
+        issue_date: '2026-04-01',
+        due_date: '2026-05-10',
+        total_amd: 200000,
+        status: 'sent',
       }); // 41 days overdue → 31_60
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'A-3', issue_date: '2026-03-01',
-        due_date: '2026-04-10', total_amd: 300000, status: 'overdue',
+        customer_id: custId,
+        invoice_number: 'A-3',
+        issue_date: '2026-03-01',
+        due_date: '2026-04-10',
+        total_amd: 300000,
+        status: 'overdue',
       }); // 71 days overdue → 61_90
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'A-4', issue_date: '2025-12-01',
-        due_date: '2026-01-15', total_amd: 400000, status: 'overdue',
+        customer_id: custId,
+        invoice_number: 'A-4',
+        issue_date: '2025-12-01',
+        due_date: '2026-01-15',
+        total_amd: 400000,
+        status: 'overdue',
       }); // 156 days overdue → 90_plus
       const out = await getArAging(localDb, '2026-06-20');
       assert.equal(out.buckets['0_30'].invoice_count, 1);
@@ -536,8 +576,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'P-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 999999, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'P-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 999999,
+        status: 'paid',
       });
       const out = await getArAging(localDb, '2026-06-20');
       assert.equal(out.total_outstanding_amd, 0);
@@ -548,12 +592,20 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'D-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 100000, status: 'draft',
+        customer_id: custId,
+        invoice_number: 'D-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 100000,
+        status: 'draft',
       });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'V-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 200000, status: 'void',
+        customer_id: custId,
+        invoice_number: 'V-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 200000,
+        status: 'void',
       });
       const out = await getArAging(localDb, '2026-06-20');
       assert.equal(out.total_outstanding_amd, 0);
@@ -563,10 +615,18 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       const invId = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'PP-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'PP-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 100000,
+        status: 'sent',
       });
-      await seedPayment(localDb, { invoice_id: invId, paid_at: '2026-05-01T00:00:00Z', amount_amd: 30000 });
+      await seedPayment(localDb, {
+        invoice_id: invId,
+        paid_at: '2026-05-01T00:00:00Z',
+        amount_amd: 30000,
+      });
       const out = await getArAging(localDb, '2026-06-20');
       // 100000 - 30000 = 70000 outstanding in 90_plus bucket
       assert.equal(out.buckets['90_plus'].amount_amd, 70000);
@@ -577,8 +637,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'F-1', issue_date: '2026-06-01',
-        due_date: '2026-07-15', total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'F-1',
+        issue_date: '2026-06-01',
+        due_date: '2026-07-15',
+        total_amd: 100000,
+        status: 'sent',
       });
       const out = await getArAging(localDb, '2026-06-20');
       assert.equal(out.total_outstanding_amd, 0);
@@ -605,20 +669,36 @@ describe('finance reports', () => {
       const custId = await seedCustomer(localDb, { name: 'Acme LLC' });
       // 30 days overdue
       const inv1 = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'OV-1', issue_date: '2026-04-20',
-        due_date: '2026-05-21', total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'OV-1',
+        issue_date: '2026-04-20',
+        due_date: '2026-05-21',
+        total_amd: 100000,
+        status: 'sent',
       });
       // 90 days overdue
       const inv2 = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'OV-2', issue_date: '2026-02-20',
-        due_date: '2026-03-22', total_amd: 200000, status: 'overdue',
+        customer_id: custId,
+        invoice_number: 'OV-2',
+        issue_date: '2026-02-20',
+        due_date: '2026-03-22',
+        total_amd: 200000,
+        status: 'overdue',
       });
       // 10 days overdue (partial paid)
       const inv3 = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'OV-3', issue_date: '2026-05-01',
-        due_date: '2026-06-10', total_amd: 50000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'OV-3',
+        issue_date: '2026-05-01',
+        due_date: '2026-06-10',
+        total_amd: 50000,
+        status: 'sent',
       });
-      await seedPayment(localDb, { invoice_id: inv3, paid_at: '2026-06-01T00:00:00Z', amount_amd: 20000 });
+      await seedPayment(localDb, {
+        invoice_id: inv3,
+        paid_at: '2026-06-01T00:00:00Z',
+        amount_amd: 20000,
+      });
 
       const out = await listOverdueInvoices(localDb, '2026-06-20');
       assert.equal(out.length, 3);
@@ -671,14 +751,20 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'P-1',
-        issue_date: '2026-01-01', due_date: '2026-01-15',
-        total_amd: 100000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'P-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 100000,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'F-1',
-        issue_date: '2026-06-01', due_date: '2026-07-15',
-        total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'F-1',
+        issue_date: '2026-06-01',
+        due_date: '2026-07-15',
+        total_amd: 100000,
+        status: 'sent',
       });
       const out = await listOverdueInvoices(localDb, '2026-06-20');
       assert.equal(out.length, 0);
@@ -707,20 +793,40 @@ describe('finance reports', () => {
       const custId = await seedCustomer(localDb, { name: 'X' });
       // Invoice A: 100k issued in June, fully paid in June
       const invA = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'M-A', issue_date: '2026-06-05',
-        due_date: '2026-07-05', total_amd: 100000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'M-A',
+        issue_date: '2026-06-05',
+        due_date: '2026-07-05',
+        total_amd: 100000,
+        status: 'paid',
       });
-      await seedPayment(localDb, { invoice_id: invA, paid_at: '2026-06-15T00:00:00Z', amount_amd: 100000 });
+      await seedPayment(localDb, {
+        invoice_id: invA,
+        paid_at: '2026-06-15T00:00:00Z',
+        amount_amd: 100000,
+      });
       // Invoice B: 50k issued in June, partially paid (20k) in June
       const invB = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'M-B', issue_date: '2026-06-10',
-        due_date: '2026-07-10', total_amd: 50000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'M-B',
+        issue_date: '2026-06-10',
+        due_date: '2026-07-10',
+        total_amd: 50000,
+        status: 'sent',
       });
-      await seedPayment(localDb, { invoice_id: invB, paid_at: '2026-06-20T00:00:00Z', amount_amd: 20000 });
+      await seedPayment(localDb, {
+        invoice_id: invB,
+        paid_at: '2026-06-20T00:00:00Z',
+        amount_amd: 20000,
+      });
       // Invoice C: 30k issued in July (out of month)
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'M-C', issue_date: '2026-07-05',
-        due_date: '2026-08-05', total_amd: 30000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'M-C',
+        issue_date: '2026-07-05',
+        due_date: '2026-08-05',
+        total_amd: 30000,
+        status: 'sent',
       });
       const out = await getMonthlyRevenue(localDb, '2026-06');
       assert.equal(out.invoiced_amd, 150000); // A + B
@@ -734,12 +840,20 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'APR', issue_date: '2026-04-15',
-        due_date: '2026-05-15', total_amd: 99999, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'APR',
+        issue_date: '2026-04-15',
+        due_date: '2026-05-15',
+        total_amd: 99999,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'JUL', issue_date: '2026-07-15',
-        due_date: '2026-08-15', total_amd: 88888, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'JUL',
+        issue_date: '2026-07-15',
+        due_date: '2026-08-15',
+        total_amd: 88888,
+        status: 'paid',
       });
       const out = await getMonthlyRevenue(localDb, '2026-06');
       assert.equal(out.invoiced_amd, 0);
@@ -769,27 +883,51 @@ describe('finance reports', () => {
       const c3 = await seedCustomer(localDb, { name: 'Small LLC' }); // hvhh null
       // Big: 3 invoices, 500k total
       await seedInvoice(localDb, {
-        customer_id: c1, invoice_number: 'B-1', issue_date: '2026-05-01',
-        due_date: '2026-05-31', total_amd: 200000, status: 'paid',
-      });
-      const b2 = await seedInvoice(localDb, {
-        customer_id: c1, invoice_number: 'B-2', issue_date: '2026-05-15',
-        due_date: '2026-06-14', total_amd: 200000, status: 'sent',
+        customer_id: c1,
+        invoice_number: 'B-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-05-31',
+        total_amd: 200000,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: c1, invoice_number: 'B-3', issue_date: '2026-06-01',
-        due_date: '2026-07-01', total_amd: 100000, status: 'sent',
+        customer_id: c1,
+        invoice_number: 'B-2',
+        issue_date: '2026-05-15',
+        due_date: '2026-06-14',
+        total_amd: 200000,
+        status: 'sent',
+      });
+      await seedInvoice(localDb, {
+        customer_id: c1,
+        invoice_number: 'B-3',
+        issue_date: '2026-06-01',
+        due_date: '2026-07-01',
+        total_amd: 100000,
+        status: 'sent',
       });
       // Medium: 1 invoice, 300k, fully paid
       const m1 = await seedInvoice(localDb, {
-        customer_id: c2, invoice_number: 'M-1', issue_date: '2026-05-10',
-        due_date: '2026-06-09', total_amd: 300000, status: 'paid',
+        customer_id: c2,
+        invoice_number: 'M-1',
+        issue_date: '2026-05-10',
+        due_date: '2026-06-09',
+        total_amd: 300000,
+        status: 'paid',
       });
-      await seedPayment(localDb, { invoice_id: m1, paid_at: '2026-05-20T00:00:00Z', amount_amd: 300000 });
+      await seedPayment(localDb, {
+        invoice_id: m1,
+        paid_at: '2026-05-20T00:00:00Z',
+        amount_amd: 300000,
+      });
       // Small: 1 invoice, 50k, unpaid
       await seedInvoice(localDb, {
-        customer_id: c3, invoice_number: 'S-1', issue_date: '2026-06-05',
-        due_date: '2026-07-05', total_amd: 50000, status: 'sent',
+        customer_id: c3,
+        invoice_number: 'S-1',
+        issue_date: '2026-06-05',
+        due_date: '2026-07-05',
+        total_amd: 50000,
+        status: 'sent',
       });
 
       const out = await getTopCustomers(localDb);
@@ -813,16 +951,28 @@ describe('finance reports', () => {
       const c2 = await seedCustomer(localDb, { name: 'B' });
       const c3 = await seedCustomer(localDb, { name: 'C' });
       await seedInvoice(localDb, {
-        customer_id: c1, invoice_number: 'A-1', issue_date: '2026-04-15',
-        due_date: '2026-05-15', total_amd: 100000, status: 'paid',
+        customer_id: c1,
+        invoice_number: 'A-1',
+        issue_date: '2026-04-15',
+        due_date: '2026-05-15',
+        total_amd: 100000,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: c2, invoice_number: 'B-1', issue_date: '2026-05-20',
-        due_date: '2026-06-19', total_amd: 200000, status: 'paid',
+        customer_id: c2,
+        invoice_number: 'B-1',
+        issue_date: '2026-05-20',
+        due_date: '2026-06-19',
+        total_amd: 200000,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: c3, invoice_number: 'C-1', issue_date: '2026-06-10',
-        due_date: '2026-07-10', total_amd: 300000, status: 'paid',
+        customer_id: c3,
+        invoice_number: 'C-1',
+        issue_date: '2026-06-10',
+        due_date: '2026-07-10',
+        total_amd: 300000,
+        status: 'paid',
       });
       // Default limit (10) returns all 3
       const all = await getTopCustomers(localDb);
@@ -846,8 +996,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const c1 = await seedCustomer(localDb, { name: 'VCo' });
       await seedInvoice(localDb, {
-        customer_id: c1, invoice_number: 'V-1', issue_date: '2026-05-01',
-        due_date: '2026-05-31', total_amd: 999999, status: 'void',
+        customer_id: c1,
+        invoice_number: 'V-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-05-31',
+        total_amd: 999999,
+        status: 'void',
       });
       const out = await getTopCustomers(localDb);
       assert.equal(out.length, 0);
@@ -874,19 +1028,38 @@ describe('finance reports', () => {
       const custId = await seedCustomer(localDb, { name: 'X' });
       // Invoice 1: 100k subtotal + 20k VAT = 120k total, paid
       const inv1 = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'V-1', issue_date: '2026-05-01',
-        due_date: '2026-05-31', total_amd: 120000, vat_amd: 20000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'V-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-05-31',
+        total_amd: 120000,
+        vat_amd: 20000,
+        status: 'paid',
       });
-      await seedPayment(localDb, { invoice_id: inv1, paid_at: '2026-05-15T00:00:00Z', amount_amd: 120000 });
+      await seedPayment(localDb, {
+        invoice_id: inv1,
+        paid_at: '2026-05-15T00:00:00Z',
+        amount_amd: 120000,
+      });
       // Invoice 2: 50k subtotal + 10k VAT = 60k total, unpaid
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'V-2', issue_date: '2026-06-01',
-        due_date: '2026-07-01', total_amd: 60000, vat_amd: 10000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'V-2',
+        issue_date: '2026-06-01',
+        due_date: '2026-07-01',
+        total_amd: 60000,
+        vat_amd: 10000,
+        status: 'sent',
       });
       // Out of window: 80k total, 16k VAT
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'V-3', issue_date: '2027-01-01',
-        due_date: '2027-02-01', total_amd: 96000, vat_amd: 16000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'V-3',
+        issue_date: '2027-01-01',
+        due_date: '2027-02-01',
+        total_amd: 96000,
+        vat_amd: 16000,
+        status: 'sent',
       });
       const out = await getVatSummary(localDb, '2026-01-01', '2026-12-31');
       assert.equal(out.vat_invoiced_amd, 30000); // 20k + 10k
@@ -899,12 +1072,22 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'IN', issue_date: '2026-06-15',
-        due_date: '2026-07-15', total_amd: 24000, vat_amd: 4000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'IN',
+        issue_date: '2026-06-15',
+        due_date: '2026-07-15',
+        total_amd: 24000,
+        vat_amd: 4000,
+        status: 'paid',
       });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'OUT', issue_date: '2025-12-15',
-        due_date: '2026-01-15', total_amd: 12000, vat_amd: 2000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'OUT',
+        issue_date: '2025-12-15',
+        due_date: '2026-01-15',
+        total_amd: 12000,
+        vat_amd: 2000,
+        status: 'paid',
       });
       const out = await getVatSummary(localDb, '2026-06-01', '2026-06-30');
       assert.equal(out.vat_invoiced_amd, 4000);
@@ -939,8 +1122,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'X-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 1000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'X-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 1000,
+        status: 'sent',
       });
       // limit 9999 should be clamped to 500 (no error, no truncation here
       // because we only have 1 row, but the clamp logic is exercised).
@@ -952,18 +1139,19 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'X' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'X-1', issue_date: '2026-01-01',
-        due_date: '2026-01-15', total_amd: 1000, status: 'paid',
+        customer_id: custId,
+        invoice_number: 'X-1',
+        issue_date: '2026-01-01',
+        due_date: '2026-01-15',
+        total_amd: 1000,
+        status: 'paid',
       });
       const out = await getTopCustomers(localDb, { limit: 9999 });
       assert.equal(out.length, 1);
     });
 
     test('28. getVatSummary: until < since → ValueError', async () => {
-      await assert.rejects(
-        () => getVatSummary(db, '2026-12-31', '2026-01-01'),
-        /until.*>=.*since/,
-      );
+      await assert.rejects(() => getVatSummary(db, '2026-12-31', '2026-01-01'), /until.*>=.*since/);
     });
 
     test('29. listOverdueInvoices: stable sort by id when days_overdue ties', async () => {
@@ -971,12 +1159,20 @@ describe('finance reports', () => {
       const custId = await seedCustomer(localDb, { name: 'X' });
       // Two invoices, both 30 days overdue (same due_date).
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'TIE-A', issue_date: '2026-05-01',
-        due_date: '2026-05-21', total_amd: 10000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'TIE-A',
+        issue_date: '2026-05-01',
+        due_date: '2026-05-21',
+        total_amd: 10000,
+        status: 'sent',
       });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'TIE-B', issue_date: '2026-05-02',
-        due_date: '2026-05-21', total_amd: 20000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'TIE-B',
+        issue_date: '2026-05-02',
+        due_date: '2026-05-21',
+        total_amd: 20000,
+        status: 'sent',
       });
       const out = await listOverdueInvoices(localDb, '2026-06-20');
       assert.equal(out.length, 2);
@@ -996,16 +1192,24 @@ describe('finance reports', () => {
       // sqlite-only surface to getArAging.
       const custId = await seedCustomer(localDb, { name: 'Acme', hvhh: '12345678' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'SQ-1', issue_date: '2026-05-01',
-        due_date: '2026-06-10', total_amd: 100000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'SQ-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-06-10',
+        total_amd: 100000,
+        status: 'sent',
       });
       const sqliteDb = {
         kind: 'sqlite',
         customers: localDb.customers,
         invoices: localDb.invoices,
         payments: localDb.payments,
-        prepare(sql) { return localDb.prepare(sql); },
-        exec(sql) { return localDb.exec(sql); },
+        prepare(sql) {
+          return localDb.prepare(sql);
+        },
+        exec(sql) {
+          return localDb.exec(sql);
+        },
       };
       const out = await getArAging(sqliteDb, '2026-06-20');
       assert.equal(out.buckets['0_30'].invoice_count, 1);
@@ -1019,8 +1223,12 @@ describe('finance reports', () => {
       // amount. balance_amd = 0, so the `if (balance <= 0) continue;`
       // branch is hit and the invoice is excluded from the overdue list.
       const inv = await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'PAID-1', issue_date: '2026-04-01',
-        due_date: '2026-05-01', total_amd: 50000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'PAID-1',
+        issue_date: '2026-04-01',
+        due_date: '2026-05-01',
+        total_amd: 50000,
+        status: 'sent',
       });
       console.log('[DBG] invoice id:', inv, 'payments:', [...localDb.payments.values()]);
       await seedPayment(localDb, { invoice_id: inv, amount_amd: 50000 });
@@ -1034,8 +1242,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'NoPay' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'NOPAY-1', issue_date: '2026-06-05',
-        due_date: '2026-07-05', total_amd: 75000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'NOPAY-1',
+        issue_date: '2026-06-05',
+        due_date: '2026-07-05',
+        total_amd: 75000,
+        status: 'sent',
       });
       const out = await getMonthlyRevenue(localDb, '2026-06');
       assert.equal(out.invoiced_amd, 75000);
@@ -1053,8 +1265,12 @@ describe('finance reports', () => {
       const localDb = makeMockDb();
       const custId = await seedCustomer(localDb, { name: 'OnDue' });
       await seedInvoice(localDb, {
-        customer_id: custId, invoice_number: 'ONDUE-1', issue_date: '2026-05-01',
-        due_date: '2026-06-19', total_amd: 40000, status: 'sent',
+        customer_id: custId,
+        invoice_number: 'ONDUE-1',
+        issue_date: '2026-05-01',
+        due_date: '2026-06-19',
+        total_amd: 40000,
+        status: 'sent',
       });
       const out = await getArAging(localDb, '2026-06-20');
       assert.equal(out.buckets['0_30'].invoice_count, 1);

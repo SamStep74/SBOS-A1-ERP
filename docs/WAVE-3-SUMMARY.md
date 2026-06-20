@@ -36,11 +36,11 @@ integration fix is expected.
 
 ### Workers + deliverables
 
-| Worker | Path | Surface | Commit |
-| --- | --- | --- | --- |
-| l10n-audit-hardening | `server/l10n-am/audit.js` + `audit-cli.js` | 3 new functions + 3 new CLI flags | `<TBD>` |
-| rbac-fastify-coverage | `server/rbac/rbac.test.js` (+ tiny `guards.js` / `routes.js` fixes if needed) | 10+ new tests, ≥80% coverage | `<TBD>` |
-| docs-walkthrough | `docs/sales/WALKTHROUGH.md` + `CONSOLE.md` | 2 new files, brand-stripped | `<TBD>` |
+| Worker                | Path                                                                          | Surface                           | Commit  |
+| --------------------- | ----------------------------------------------------------------------------- | --------------------------------- | ------- |
+| l10n-audit-hardening  | `server/l10n-am/audit.js` + `audit-cli.js`                                    | 3 new functions + 3 new CLI flags | `<TBD>` |
+| rbac-fastify-coverage | `server/rbac/rbac.test.js` (+ tiny `guards.js` / `routes.js` fixes if needed) | 10+ new tests, ≥80% coverage      | `<TBD>` |
+| docs-walkthrough      | `docs/sales/WALKTHROUGH.md` + `CONSOLE.md`                                    | 2 new files, brand-stripped       | `<TBD>` |
 
 ### Wave 3 commit graph (chronological)
 

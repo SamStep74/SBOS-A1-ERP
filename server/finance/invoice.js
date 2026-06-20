@@ -94,7 +94,11 @@ function validateCreateInput(input) {
   }
   const { customer_id, invoice_number, issue_date, due_date, lines, vat_amd } = input;
   assertId(customer_id, 'customer_id');
-  if (typeof invoice_number !== 'string' || invoice_number.length === 0 || invoice_number.length > 32) {
+  if (
+    typeof invoice_number !== 'string' ||
+    invoice_number.length === 0 ||
+    invoice_number.length > 32
+  ) {
     throw new ValueError('invoice_number must be a non-empty string up to 32 characters');
   }
   assertDate(issue_date, 'issue_date');
@@ -114,14 +118,20 @@ function validateCreateInput(input) {
 
 export async function createInvoice(db, input) {
   validateCreateInput(input);
-  const { customer_id, invoice_number, issue_date, due_date, lines, vat_amd = 0, notes = null } = input;
+  const {
+    customer_id,
+    invoice_number,
+    issue_date,
+    due_date,
+    lines,
+    vat_amd = 0,
+    notes = null,
+  } = input;
 
   // FK: customer must exist.
-  const custCheck = await runQuery(
-    db,
-    'SELECT 1 FROM finance.customers WHERE id = $1',
-    [customer_id],
-  );
+  const custCheck = await runQuery(db, 'SELECT 1 FROM finance.customers WHERE id = $1', [
+    customer_id,
+  ]);
   if (!custCheck.rows || custCheck.rows.length === 0) {
     throw new ValueError(`customer_id ${customer_id} does not exist (foreign-key violation)`);
   }
@@ -133,7 +143,9 @@ export async function createInvoice(db, input) {
     [invoice_number],
   );
   if (uniqCheck.rows && uniqCheck.rows.length > 0) {
-    throw new ValueError(`invoice_number "${invoice_number}" already exists (uniqueness violation)`);
+    throw new ValueError(
+      `invoice_number "${invoice_number}" already exists (uniqueness violation)`,
+    );
   }
 
   // Compute totals. roundAmd enforces whole-dram discipline.
@@ -154,9 +166,19 @@ export async function createInvoice(db, input) {
         created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id`,
-    [customer_id, invoice_number, issue_date, due_date,
-     subtotal_amd, vat_amd_rounded, total_amd, 'draft', notes,
-     now, now],
+    [
+      customer_id,
+      invoice_number,
+      issue_date,
+      due_date,
+      subtotal_amd,
+      vat_amd_rounded,
+      total_amd,
+      'draft',
+      notes,
+      now,
+      now,
+    ],
   );
 
   let invoiceId;
@@ -185,11 +207,7 @@ export async function createInvoice(db, input) {
 
 export async function getInvoice(db, id) {
   assertId(id, 'id');
-  const invResult = await runQuery(
-    db,
-    'SELECT * FROM finance.invoices WHERE id = $1',
-    [id],
-  );
+  const invResult = await runQuery(db, 'SELECT * FROM finance.invoices WHERE id = $1', [id]);
   if (!invResult.rows || invResult.rows.length === 0) {
     return null;
   }

@@ -443,8 +443,16 @@ describe('listPaymentsForInvoice (pg mock)', () => {
     const invoice = seedInvoice(db, { total_amd: 120_000, status: 'sent' });
     const { listPaymentsForInvoice, recordPayment } = await import('./payment.js');
     assert.deepEqual(await listPaymentsForInvoice(db, invoice.id), []);
-    await recordPayment(db, { invoice_id: invoice.id, amount_amd: 30_000, paid_at: '2026-02-01T00:00:00.000Z' });
-    await recordPayment(db, { invoice_id: invoice.id, amount_amd: 50_000, paid_at: '2026-02-10T00:00:00.000Z' });
+    await recordPayment(db, {
+      invoice_id: invoice.id,
+      amount_amd: 30_000,
+      paid_at: '2026-02-01T00:00:00.000Z',
+    });
+    await recordPayment(db, {
+      invoice_id: invoice.id,
+      amount_amd: 50_000,
+      paid_at: '2026-02-10T00:00:00.000Z',
+    });
     const rows = await listPaymentsForInvoice(db, invoice.id);
     assert.equal(rows.length, 2);
     // Order is paid_at ASC.
@@ -491,12 +499,20 @@ describe('replay / duplicate payment (pg mock)', () => {
   test('12. duplicate payment: cumulative sums still produce a sensible reconcile', async () => {
     const db = makePgMock();
     const invoice = seedInvoice(db, { total_amd: 120_000, status: 'sent' });
-    seedPayment(db, { invoice_id: invoice.id, amount_amd: 50_000, paid_at: '2026-02-01T00:00:00.000Z' });
+    seedPayment(db, {
+      invoice_id: invoice.id,
+      amount_amd: 50_000,
+      paid_at: '2026-02-01T00:00:00.000Z',
+    });
     // Simulate a retry that double-inserts the same logical payment (the spec
     // documents this as a known limitation: cumulative sums, no idempotency
     // keys). The reconciliation should still return *a* total — but it will
     // be wrong, which is the point of the documentation.
-    seedPayment(db, { invoice_id: invoice.id, amount_amd: 50_000, paid_at: '2026-02-01T00:00:00.000Z' });
+    seedPayment(db, {
+      invoice_id: invoice.id,
+      amount_amd: 50_000,
+      paid_at: '2026-02-01T00:00:00.000Z',
+    });
     const { reconcileInvoice } = await import('./payment.js');
     const recon = await reconcileInvoice(db, invoice.id);
     assert.equal(recon.total_amd, 120_000);
@@ -514,9 +530,8 @@ describe('sqlite dispatch (smoke)', () => {
   test('13. recordPayment works end-to-end against a better-sqlite3-shaped mock', async () => {
     const db = makeSqliteMock();
     seedInvoice(db, { total_amd: 100_000, status: 'sent' });
-    const { recordPayment, listPaymentsForInvoice, reconcileInvoice } = await import(
-      './payment.js'
-    );
+    const { recordPayment, listPaymentsForInvoice, reconcileInvoice } =
+      await import('./payment.js');
     const p = await recordPayment(db, { invoice_id: 1, amount_amd: 100_000 });
     assert.equal(p.amount_amd, 100_000);
     const rows = await listPaymentsForInvoice(db, 1);

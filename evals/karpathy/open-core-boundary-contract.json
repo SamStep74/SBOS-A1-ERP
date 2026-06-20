@@ -1,0 +1,39 @@
+{
+  "id": "open-core-boundary-contract",
+  "productName": "Armosphera SBOS open-core boundary",
+  "runTag": "2026-06-20-open-core-boundary-contract",
+  "branchPrefix": "karpathy/",
+  "editableFiles": [
+    ".gitignore",
+    "README.md",
+    "docs/SBOS_VS_A1_ERP_HY.md",
+    "server/l10n-am/einvoice/einvoice.js",
+    "server/l10n-am/einvoice/einvoice.test.js"
+  ],
+  "readOnlyFiles": ["scripts/check-open-core-boundary-contract.mjs"],
+  "contextFiles": [
+    "package.json",
+    "AGENTS.md",
+    "server/l10n-am/einvoice/einvoice-validate.test.js",
+    "server/l10n-am/einvoice/einvoice-line-consistency.test.js"
+  ],
+  "guardrails": [
+    "Keep SBOS-A1-ERP publishable as a public, open-core, brand-neutral distribution.",
+    "Do not ship Armosphera, HayHashvapah, or Samvel tenant identifiers in runtime/source files except the documented stable e-invoice protocol URN.",
+    "Do not ship key-shaped secrets or tracked env files; operators bring their own deploy-time branding and credentials.",
+    "Keep the e-invoice namespace stable for existing mappers; enforce the exception with the static checker.",
+    "Keep the checker static and narrow; full lint/typecheck/test remain separate gates."
+  ],
+  "eval": {
+    "command": "node",
+    "args": ["scripts/check-open-core-boundary-contract.mjs"],
+    "metric": {
+      "name": "failing_checks",
+      "direction": "minimize"
+    },
+    "successMetricValue": 0,
+    "failureMetricValue": 1,
+    "timeBudgetMinutes": 3,
+    "timeoutMinutes": 10
+  }
+}

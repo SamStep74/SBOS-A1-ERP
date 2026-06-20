@@ -6,7 +6,7 @@
 // in its own tmux pane under a shared session.
 //
 // Usage:
-//   const orch = require('./tmux-worktree-orchestrator');
+//   const orch = require('./tmux-worktree-orchestrator.cjs');
 //   const worktreePath = orch.createWorktree('feat-rbac', 'main');
 //   orch.overlaySeedPaths(worktreePath, ['docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md']);
 //   orch.writeWorkerFiles(worktreePath, 'a1-erp-hy-initial', 'rbac-catalog', '...');
@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const REPO_ROOT = findRepoRoot();
 const WORKTREES_DIR = path.join(REPO_ROOT, '.claude', 'worktrees');
@@ -44,7 +44,7 @@ function git(args, opts = {}) {
   }).trim();
 }
 
-function tmux(args, opts = {}) {
+function tmux(args) {
   return execFileSync('tmux', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -56,7 +56,12 @@ function ensureDir(p) {
 }
 
 function pathExists(p) {
-  try { fs.accessSync(p); return true; } catch (_) { return false; }
+  try {
+    fs.accessSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ───── createWorktree(branchName, baseRef) ─────
@@ -84,7 +89,7 @@ function createWorktree(branchName, baseRef = 'HEAD') {
   try {
     git(['rev-parse', '--verify', `refs/heads/${branchName}`]);
     hasBranch = true;
-  } catch (_) {
+  } catch {
     hasBranch = false;
   }
 
@@ -140,12 +145,18 @@ function writeWorkerFiles(worktreePath, sessionName, workerName, task) {
 
   const handoffPath = path.join(dir, 'handoff.md');
   if (!pathExists(handoffPath)) {
-    fs.writeFileSync(handoffPath, `# Handoff — ${workerName}\n\n(filled in by the worker on completion)\n`);
+    fs.writeFileSync(
+      handoffPath,
+      `# Handoff — ${workerName}\n\n(filled in by the worker on completion)\n`,
+    );
   }
 
   const statusPath = path.join(dir, 'status.md');
   if (!pathExists(statusPath)) {
-    fs.writeFileSync(statusPath, `# Status — ${workerName}\n\n- [ ] task started\n- [ ] task completed\n`);
+    fs.writeFileSync(
+      statusPath,
+      `# Status — ${workerName}\n\n- [ ] task started\n- [ ] task completed\n`,
+    );
   }
 
   return { taskPath, handoffPath, statusPath };
@@ -161,7 +172,7 @@ function sessionExists(sessionName) {
   try {
     tmux(['has-session', '-t', sessionName]);
     return true;
-  } catch (_) {
+  } catch {
     return false;
   }
 }
@@ -222,13 +233,18 @@ function capturePaneOutput(sessionName, workerName, lines = 200) {
 function listWorkers(sessionName) {
   const dir = path.join(ORCH_DIR, sessionName);
   if (!pathExists(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter(d => d.isDirectory())
-    .map(d => d.name);
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
 }
 
 function killSession(sessionName) {
-  try { tmux(['kill-session', '-t', sessionName]); } catch (_) { /* ignore */ }
+  try {
+    tmux(['kill-session', '-t', sessionName]);
+  } catch {
+    /* ignore */
+  }
 }
 
 module.exports = {
@@ -244,5 +260,8 @@ module.exports = {
   listWorkers,
   killSession,
   // helpers
-  git, tmux, pathExists, ensureDir,
+  git,
+  tmux,
+  pathExists,
+  ensureDir,
 };

@@ -56,9 +56,7 @@ function makeMockDb() {
     if (/UPDATE\s+FINANCE\.INVOICES\s+SET/.test(s)) return 'invoice-update';
     if (/SELECT\s+LAST_INSERT_ROWID\(\)/.test(s)) return 'last-insert-rowid';
     if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+ID\s*=/.test(s)) return 'invoice-by-id';
-    if (
-      /SELECT\s+ID\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+INVOICE_NUMBER\s*=/.test(s)
-    )
+    if (/SELECT\s+ID\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+INVOICE_NUMBER\s*=/.test(s))
       return 'invoice-by-number';
     if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICE_LINES\s+WHERE\s+INVOICE_ID\s*=/.test(s))
       return 'lines-by-invoice';
@@ -236,7 +234,7 @@ function makeMockDb() {
     statements.push({ kind: classify(sql), sql, params: null });
     return {
       run(...params) {
-        const result = query(sql, params);
+        void query(sql, params);
         // For INSERTs, simulate better-sqlite3's lastInsertRowid behavior by
         // remembering the largest invoice id we've assigned. (Sqlite's actual
         // last_insert_rowid() is per-connection; this approximation is enough
@@ -291,10 +289,10 @@ describe('invoice CRUD', () => {
   before(async () => {
     db = makeMockDb();
     // Seed a customer so FK checks pass.
-    await db.query(
-      'INSERT INTO finance.customers (name, hvhh) VALUES ($1, $2)',
-      ['Acme LLC', '12345678'],
-    );
+    await db.query('INSERT INTO finance.customers (name, hvhh) VALUES ($1, $2)', [
+      'Acme LLC',
+      '12345678',
+    ]);
     const mod = await import('./invoice.js');
     createInvoice = mod.createInvoice;
     getInvoice = mod.getInvoice;
@@ -562,10 +560,7 @@ describe('invoice CRUD', () => {
   });
 
   test('29. voidInvoice: non-existent id → ValueError', async () => {
-    await assert.rejects(
-      () => voidInvoice(db, 9999, 'some reason'),
-      /not found/,
-    );
+    await assert.rejects(() => voidInvoice(db, 9999, 'some reason'), /not found/);
   });
 
   test('30. updateInvoice: status = current.status → no-op (no error)', async () => {

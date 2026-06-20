@@ -1,4 +1,5 @@
 <!-- Mirrored from A1-ERP-HY @ 50f5f44d632f8a3112ae5579060b768f0028c5da on 2026-06-16 -->
+
 # A1 ERP-HY dmux Workflows
 
 > Parallel agent orchestration for A1-ERP-HY. Adapted from the
@@ -12,8 +13,8 @@ describes the **pattern** (worktree per worker, tmux session, one pane
 per worker) and even includes an ECC helper script. We re-implemented
 that pattern in two files:
 
-- `scripts/tmux-worktree-orchestrator.js` — the shared helper
-- `scripts/orchestrate-worktrees.js` — the CLI runner
+- `scripts/tmux-worktree-orchestrator.cjs` — the shared helper
+- `scripts/orchestrate-worktrees.cjs` — the CLI runner
 
 The plan format is identical to the ECC plan, so future scripts can
 swap to the upstream `dmux` binary if it gets installed.
@@ -25,11 +26,11 @@ swap to the upstream `dmux` binary if it gets installed.
 cat .orchestration/a1-erp-hy-initial.json | jq
 
 # 2. Dry-run
-node scripts/orchestrate-worktrees.js \
+node scripts/orchestrate-worktrees.cjs \
   .orchestration/a1-erp-hy-initial.json --dry-run
 
 # 3. Execute
-node scripts/orchestrate-worktrees.js \
+node scripts/orchestrate-worktrees.cjs \
   .orchestration/a1-erp-hy-initial.json
 
 # 4. Watch
@@ -110,7 +111,6 @@ git branch -d rbac-catalog dmux-workflows docs-and-status
 
 The `.orchestration/<sessionName>/` directory is kept on disk for
 audit; delete it manually if you want a clean slate.
-
 
 ## Provenance
 

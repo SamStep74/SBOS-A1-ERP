@@ -9,7 +9,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -31,8 +31,11 @@ function makeScratchDir(prefix = 'audit-test-') {
 describe('auditCatalog', () => {
   test('every key in the real catalog exists in every locale — current repo is balanced', () => {
     const result = auditCatalog({ strings: STRINGS, locales: LOCALES });
-    assert.equal(result.issues.length, 0,
-      `catalog should be balanced but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.equal(
+      result.issues.length,
+      0,
+      `catalog should be balanced but found: ${JSON.stringify(result.issues, null, 2)}`,
+    );
     assert.ok(result.keyCount > 0, 'catalog should have at least one key');
   });
 
@@ -53,7 +56,9 @@ describe('auditCatalog', () => {
     const synthetic = {
       hy: { 'only.here': 'X' },
       en: { 'only.here': 'X' },
-      ru: { /* missing on purpose */ },
+      ru: {
+        /* missing on purpose */
+      },
     };
     const result = auditCatalog({ strings: synthetic, locales: ['hy', 'en', 'ru'] });
     assert.equal(result.issues.length, 1);
@@ -65,8 +70,11 @@ describe('auditCatalog', () => {
 describe('auditSource', () => {
   test('current l10n-am source has no t() calls referencing missing keys', () => {
     const result = auditSource({ strings: STRINGS, locales: LOCALES });
-    assert.equal(result.issues.length, 0,
-      `current source should be clean but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.equal(
+      result.issues.length,
+      0,
+      `current source should be clean but found: ${JSON.stringify(result.issues, null, 2)}`,
+    );
     assert.ok(result.tCallCount > 0, 'current source should have at least one t() call');
   });
 
@@ -74,9 +82,9 @@ describe('auditSource', () => {
     const syntheticFiles = {
       '/fake/root/vatReturn/vatReturn.js': [
         "import { t } from '../i18n.js';",
-        "const msg = t('en', 'vat.form.missingLine', { id: '7' });",          // OK — exists
-        "const oops = t('en', 'totally.fake.key');",                            // BAD
-        "const more = t('hy', 'also.fake');",                                   // BAD
+        "const msg = t('en', 'vat.form.missingLine', { id: '7' });", // OK — exists
+        "const oops = t('en', 'totally.fake.key');", // BAD
+        "const more = t('hy', 'also.fake');", // BAD
       ].join('\n'),
     };
     const result = auditSource({
@@ -144,13 +152,19 @@ describe('auditSource', () => {
 describe('auditAll — live l10n-am regression', () => {
   test('real catalog + real source tree has zero issues at HEAD', () => {
     const result = auditAll({ strings: STRINGS, locales: LOCALES });
-    assert.equal(result.issues.length, 0,
-      `live repo should be clean but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.equal(
+      result.issues.length,
+      0,
+      `live repo should be clean but found: ${JSON.stringify(result.issues, null, 2)}`,
+    );
     assert.ok(result.catalogKeyCount > 0, 'live catalog should have keys');
     assert.ok(result.tCallCount > 0, 'live source should have t() calls');
     // Reverse direction: every catalog key is used at least once.
-    assert.equal(result.unusedKeyCount, 0,
-      `live repo should have no unused keys but found: ${result.unusedKeyCount}`);
+    assert.equal(
+      result.unusedKeyCount,
+      0,
+      `live repo should have no unused keys but found: ${result.unusedKeyCount}`,
+    );
   });
 });
 
@@ -186,10 +200,10 @@ describe('auditUnusedKeys', () => {
 
   test('flags every unused key when source uses none of them', () => {
     const syntheticStrings = {
-      en: { 'a': 'A', 'b': 'B', 'c': 'C' },
+      en: { a: 'A', b: 'B', c: 'C' },
     };
     const syntheticFiles = {
-      '/fake/root/empty.js': "// no t() calls in here",
+      '/fake/root/empty.js': '// no t() calls in here',
     };
     const result = auditUnusedKeys({
       strings: syntheticStrings,
@@ -204,7 +218,7 @@ describe('auditUnusedKeys', () => {
 
   test('zero issues when every catalog key is used at least once', () => {
     const syntheticStrings = {
-      en: { 'x': 'X', 'y': 'Y' },
+      en: { x: 'X', y: 'Y' },
     };
     const syntheticFiles = {
       '/fake/root/a.js': "t('en', 'x');",
@@ -224,7 +238,7 @@ describe('auditUnusedKeys', () => {
   test('counts a key as used even when referenced by multiple call sites', () => {
     // Three call sites to 'shared', one to 'lonely'. lonely is the only unused.
     const syntheticStrings = {
-      en: { 'shared': 'S', 'lonely': 'L' },
+      en: { shared: 'S', lonely: 'L' },
     };
     const syntheticFiles = {
       '/fake/root/a.js': "t('en', 'shared'); t('en', 'shared');",
@@ -249,7 +263,7 @@ describe('auditUnusedKeys', () => {
       en: { 'only.in.test': 'X' },
     };
     const syntheticFiles = {
-      '/fake/root/real.js': "// no t() calls",
+      '/fake/root/real.js': '// no t() calls',
       '/fake/root/real.test.js': "t('en', 'only.in.test');",
     };
     const result = auditUnusedKeys({
@@ -284,15 +298,10 @@ describe('findHardcodedRates', () => {
   test('flags a single rate literal on a rate-shaped line', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(
-        join(dir, 'vat.js'),
-        [
-          "export const VAT_RATE = 0.20;",
-        ].join('\n'),
-      );
+      writeFileSync(join(dir, 'vat.js'), ['export const VAT_RATE = 0.20;'].join('\n'));
       const out = await findHardcodedRates(dir);
       assert.equal(out.length, 1);
-      assert.equal(out[0].value, 0.20);
+      assert.equal(out[0].value, 0.2);
       assert.match(out[0].file, /vat\.js$/);
       assert.equal(out[0].line, 1);
       assert.ok(out[0].column >= 1);
@@ -307,18 +316,12 @@ describe('findHardcodedRates', () => {
     try {
       writeFileSync(
         join(dir, 'rates.js'),
-        [
-          "const RATES = {",
-          "  income: 0.05,",
-          "  vat: 0.20,",
-          "  pension: 0.10,",
-          "};",
-        ].join('\n'),
+        ['const RATES = {', '  income: 0.05,', '  vat: 0.20,', '  pension: 0.10,', '};'].join('\n'),
       );
       const out = await findHardcodedRates(dir);
       assert.equal(out.length, 3);
       const values = out.map((r) => r.value).sort();
-      assert.deepEqual(values, [0.05, 0.10, 0.20]);
+      assert.deepEqual(values, [0.05, 0.1, 0.2]);
       // Lines are 2, 3, 4 (the opening line { is line 1, } is line 5)
       assert.deepEqual(
         out.map((r) => r.line).sort((a, b) => a - b),
@@ -332,9 +335,9 @@ describe('findHardcodedRates', () => {
   test('finds rates across multiple files in the tree', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(join(dir, 'a.js'), "const rateA = 0.10;");
+      writeFileSync(join(dir, 'a.js'), 'const rateA = 0.10;');
       mkdirSync(join(dir, 'sub'));
-      writeFileSync(join(dir, 'sub', 'b.js'), "const rateB = 0.15;");
+      writeFileSync(join(dir, 'sub', 'b.js'), 'const rateB = 0.15;');
       const out = await findHardcodedRates(dir);
       assert.equal(out.length, 2);
       const files = out.map((r) => r.file).sort();
@@ -348,8 +351,8 @@ describe('findHardcodedRates', () => {
   test('excludes *.test.js so test fixtures do not flag', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(join(dir, 'real.js'), "const rate = 0.20;");          // flagged
-      writeFileSync(join(dir, 'real.test.js'), "const rate = 0.99;");     // NOT flagged (test)
+      writeFileSync(join(dir, 'real.js'), 'const rate = 0.20;'); // flagged
+      writeFileSync(join(dir, 'real.test.js'), 'const rate = 0.99;'); // NOT flagged (test)
       const out = await findHardcodedRates(dir);
       assert.equal(out.length, 1);
       assert.match(out[0].file, /real\.js$/);
@@ -365,9 +368,9 @@ describe('findHardcodedRates', () => {
       writeFileSync(
         join(dir, 'tiny.js'),
         [
-          "const rate = 0.001;",          // 0.001 < 0.01 → ignored (under threshold)
-          "const count = 10;",            // 'count' has no rate identifier → ignored
-          "const factor = 0.5;",          // no rate identifier → ignored
+          'const rate = 0.001;', // 0.001 < 0.01 → ignored (under threshold)
+          'const count = 10;', // 'count' has no rate identifier → ignored
+          'const factor = 0.5;', // no rate identifier → ignored
         ].join('\n'),
       );
       const out = await findHardcodedRates(dir);
@@ -395,10 +398,10 @@ describe('findHardcodedRates', () => {
     const dir = makeScratchDir();
     try {
       mkdirSync(join(dir, 'node_modules'));
-      writeFileSync(join(dir, 'node_modules', 'lib.js'), "const rate = 0.5;");
+      writeFileSync(join(dir, 'node_modules', 'lib.js'), 'const rate = 0.5;');
       mkdirSync(join(dir, '.git'));
-      writeFileSync(join(dir, '.git', 'hook.js'), "const rate = 0.5;");
-      writeFileSync(join(dir, 'real.js'), "const rate = 0.20;");
+      writeFileSync(join(dir, '.git', 'hook.js'), 'const rate = 0.5;');
+      writeFileSync(join(dir, 'real.js'), 'const rate = 0.20;');
       const out = await findHardcodedRates(dir);
       assert.equal(out.length, 1);
       assert.match(out[0].file, /real\.js$/);
@@ -430,11 +433,7 @@ describe('findEvalLike', () => {
     try {
       writeFileSync(
         join(dir, 'danger.js'),
-        [
-          "function run(src) {",
-          "  return eval(src);",
-          "}",
-        ].join('\n'),
+        ['function run(src) {', '  return eval(src);', '}'].join('\n'),
       );
       const out = await findEvalLike(dir);
       assert.equal(out.length, 1);
@@ -449,10 +448,7 @@ describe('findEvalLike', () => {
   test('flags new Function() call sites', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(
-        join(dir, 'ctor.js'),
-        "const fn = new Function('a', 'return a + 1');",
-      );
+      writeFileSync(join(dir, 'ctor.js'), "const fn = new Function('a', 'return a + 1');");
       const out = await findEvalLike(dir);
       assert.equal(out.length, 1);
       assert.equal(out[0].kind, 'new-function');
@@ -467,7 +463,7 @@ describe('findEvalLike', () => {
     try {
       writeFileSync(join(dir, 'a.js'), "eval('1+1');");
       writeFileSync(join(dir, 'b.js'), "new Function('return 1')();");
-      writeFileSync(join(dir, 'c.js'), "const x = 1; // safe");
+      writeFileSync(join(dir, 'c.js'), 'const x = 1; // safe');
       const out = await findEvalLike(dir);
       assert.equal(out.length, 2);
       const kinds = out.map((r) => r.kind).sort();
@@ -511,10 +507,7 @@ describe('findStringConcatSql', () => {
   test('flags SELECT ... + concat', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(
-        join(dir, 'q.js'),
-        "const q = 'SELECT * FROM users WHERE id = ' + userId;",
-      );
+      writeFileSync(join(dir, 'q.js'), "const q = 'SELECT * FROM users WHERE id = ' + userId;");
       const out = await findStringConcatSql(dir);
       assert.equal(out.length, 1);
       assert.equal(out[0].pattern, 'select-+');
@@ -560,8 +553,8 @@ describe('findStringConcatSql', () => {
   test('excludes *.test.js (tests use fake SQL strings legitimately)', async () => {
     const dir = makeScratchDir();
     try {
-      writeFileSync(join(dir, 'real.js'), "const x = 'SELECT 1' + n;");          // flagged
-      writeFileSync(join(dir, 'real.test.js'), "const x = 'SELECT 1' + n;");      // NOT flagged
+      writeFileSync(join(dir, 'real.js'), "const x = 'SELECT 1' + n;"); // flagged
+      writeFileSync(join(dir, 'real.test.js'), "const x = 'SELECT 1' + n;"); // NOT flagged
       const out = await findStringConcatSql(dir);
       assert.equal(out.length, 1);
       assert.match(out[0].file, /real\.js$/);

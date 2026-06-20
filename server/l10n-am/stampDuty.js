@@ -142,9 +142,7 @@ function normalizeAmount(amountAmd) {
   }
   const rounded = roundAmd(amountAmd);
   if (rounded < 0) {
-    throw new RangeError(
-      `stampDutyFor: amountAmd must be non-negative, received ${rounded}`,
-    );
+    throw new RangeError(`stampDutyFor: amountAmd must be non-negative, received ${rounded}`);
   }
   return rounded;
 }

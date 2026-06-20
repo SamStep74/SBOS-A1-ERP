@@ -10,9 +10,9 @@
 //   5. Runs each worker's launcherCommand inside its pane
 //
 // Usage:
-//   node scripts/orchestrate-worktrees.js .orchestration/a1-erp-hy-initial.json
-//   node scripts/orchestrate-worktrees.js <plan.json> --dry-run
-//   node scripts/orchestrate-worktrees.js <plan.json> --execute
+//   node scripts/orchestrate-worktrees.cjs .orchestration/a1-erp-hy-initial.json
+//   node scripts/orchestrate-worktrees.cjs <plan.json> --dry-run
+//   node scripts/orchestrate-worktrees.cjs <plan.json> --execute
 //
 // Flags:
 //   --dry-run   Print the actions without executing them
@@ -41,15 +41,19 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--execute') opts.dryRun = false;
     else if (a === '--no-tmux') opts.noTmux = true;
-    else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
-    else positional.push(a);
+    else if (a === '--help' || a === '-h') {
+      printHelp();
+      process.exit(0);
+    } else positional.push(a);
   }
   opts.planPath = positional[0];
   return opts;
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/orchestrate-worktrees.js <plan.json> [--dry-run] [--execute] [--no-tmux]\n`);
+  process.stdout.write(
+    `Usage: node scripts/orchestrate-worktrees.cjs <plan.json> [--dry-run] [--execute] [--no-tmux]\n`,
+  );
 }
 
 function loadPlan(planPath) {
@@ -76,7 +80,9 @@ function validatePlan(plan) {
   }
   if (plan.baseRef !== undefined) {
     if (typeof plan.baseRef !== 'string' || !VALID_REF.test(plan.baseRef)) {
-      throw new Error(`plan.baseRef must be a git ref string (got ${JSON.stringify(plan.baseRef)})`);
+      throw new Error(
+        `plan.baseRef must be a git ref string (got ${JSON.stringify(plan.baseRef)})`,
+      );
     }
   }
   if (!Array.isArray(plan.workers) || plan.workers.length === 0) {
@@ -146,7 +152,7 @@ function main() {
   process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
 }
 
-// Only run the CLI when invoked directly (`node orchestrate-worktrees.js`).
+// Only run the CLI when invoked directly (`node orchestrate-worktrees.cjs`).
 // `require()` from tests should just expose the helpers.
 if (require.main === module) {
   try {

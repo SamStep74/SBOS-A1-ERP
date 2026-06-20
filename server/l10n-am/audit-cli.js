@@ -14,12 +14,7 @@
 
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname as pathDirname, join as pathJoin } from 'node:path';
-import {
-  auditAll,
-  findHardcodedRates,
-  findEvalLike,
-  findStringConcatSql,
-} from './audit.js';
+import { auditAll, findHardcodedRates, findEvalLike, findStringConcatSql } from './audit.js';
 
 // ---- parseArgs ------------------------------------------------------------
 
@@ -51,7 +46,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
     const arg = argv[i];
     if (arg === '--root') {
       const v = argv[++i];
-      if (!v) { out.errors.push('--root needs a value'); continue; }
+      if (!v) {
+        out.errors.push('--root needs a value');
+        continue;
+      }
       out.root = v;
     } else if (arg === '--format') {
       const v = argv[++i];
@@ -130,7 +128,7 @@ function printUsage(out) {
   out('                [--check-rates] [--check-eval] [--check-sql]');
   out('');
   out('Options:');
-  out('  --root <dir>     Walk this directory for source files (default: this module\'s dir)');
+  out("  --root <dir>     Walk this directory for source files (default: this module's dir)");
   out('  --format <fmt>   Output format: text (default) or json');
   out('  --quiet, -q      Suppress all output; exit code only');
   out('  --help, -h       Print this usage message');
@@ -194,7 +192,6 @@ function printTextReport(result, out) {
  *                                  own conventional default (server/l10n-am
  *                                  for rates, server/ for eval/sql).
  * @param {Function} [ctx.stdout] - defaults to console.log
- * @param {Function} [ctx.stderr] - defaults to console.error
  * @returns {Promise<{
  *   exitCode: number,
  *   rates: Array,
@@ -202,12 +199,7 @@ function printTextReport(result, out) {
  *   sql: Array,
  * }>}
  */
-export async function runExtraChecks({
-  args,
-  rootDir,
-  stdout = console.log.bind(console),
-  stderr = console.error.bind(console),
-} = {}) {
+export async function runExtraChecks({ args, rootDir, stdout = console.log.bind(console) } = {}) {
   // If `args.root` was supplied AND the caller didn't pass an explicit
   // rootDir, prefer args.root. Otherwise use the per-check default.
   const resolvedRoot = rootDir ?? args.root;
@@ -268,8 +260,8 @@ export async function runExtraChecks({
 //   - --check-eval / --check-sql: server/ (whole backend subtree)
 function defaultRootFor(flag) {
   const moduleDir = pathDirname(fileURLToPath(import.meta.url));
-  if (flag === 'rates') return moduleDir;            // server/l10n-am/
-  return pathJoin(moduleDir, '..');                  // server/
+  if (flag === 'rates') return moduleDir; // server/l10n-am/
+  return pathJoin(moduleDir, '..'); // server/
 }
 
 async function main() {
@@ -296,7 +288,6 @@ async function main() {
       args,
       rootDir: args.root,
       stdout: console.log.bind(console),
-      stderr: console.error.bind(console),
     });
     process.exit(exitCode);
   }

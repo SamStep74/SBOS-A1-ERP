@@ -69,13 +69,13 @@ tmux attach -t a1-erp-hy-initial
 
 ### Placeholders in `launcherCommand`
 
-| Placeholder | Expanded to |
-|---|---|
-| `{worktree_path}` | Path to the worker's git worktree |
-| `{task_file}` | Path to `.orchestration/<session>/<worker>/task.md` |
-| `{handoff_file}` | Path to `.orchestration/<session>/<worker>/handoff.md` |
-| `{status_file}` | Path to `.orchestration/<session>/<worker>/status.md` |
-| `{repo_root}` | Path to the repository root |
+| Placeholder       | Expanded to                                            |
+| ----------------- | ------------------------------------------------------ |
+| `{worktree_path}` | Path to the worker's git worktree                      |
+| `{task_file}`     | Path to `.orchestration/<session>/<worker>/task.md`    |
+| `{handoff_file}`  | Path to `.orchestration/<session>/<worker>/handoff.md` |
+| `{status_file}`   | Path to `.orchestration/<session>/<worker>/status.md`  |
+| `{repo_root}`     | Path to the repository root                            |
 
 ### Worker responsibilities
 

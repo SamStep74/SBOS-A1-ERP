@@ -15,14 +15,14 @@ form a single, reviewable atomic story.
 
 ### Modules ported
 
-| Module                | Path                                  | Source files | Tests   | Commit    |
-| --------------------- | ------------------------------------- | ------------ | ------- | --------- |
-| l10n-kernel           | `server/l10n-am/` (root)              | 3 + 1 helper | 3 files | `f22eed0` |
-| l10n-coa              | `server/l10n-am/chartOfAccounts/`     | 1 + 1 data   | 1 file  | `d1d284e` |
-| l10n-vat              | `server/l10n-am/vatReturn/`           | 1            | 4 files | `b63f806` |
-| l10n-einv             | `server/l10n-am/einvoice/`            | 1            | 3 files | `c7abe7c` |
-| l10n-payroll          | `server/l10n-am/` (root)              | 1            | 1 file  | `22239b0` |
-| CJS→ESM conversion    | `server/l10n-am/` (all 21 files)      | —            | —       | `191e9f0` |
+| Module             | Path                              | Source files | Tests   | Commit    |
+| ------------------ | --------------------------------- | ------------ | ------- | --------- |
+| l10n-kernel        | `server/l10n-am/` (root)          | 3 + 1 helper | 3 files | `f22eed0` |
+| l10n-coa           | `server/l10n-am/chartOfAccounts/` | 1 + 1 data   | 1 file  | `d1d284e` |
+| l10n-vat           | `server/l10n-am/vatReturn/`       | 1            | 4 files | `b63f806` |
+| l10n-einv          | `server/l10n-am/einvoice/`        | 1            | 3 files | `c7abe7c` |
+| l10n-payroll       | `server/l10n-am/` (root)          | 1            | 1 file  | `22239b0` |
+| CJS→ESM conversion | `server/l10n-am/` (all 21 files)  | —            | —       | `191e9f0` |
 
 ### Wave 1 commit graph (chronological)
 

@@ -31,8 +31,8 @@ demo commands. Mute your notifications.
 
 ## 1. Cold-start (5 minutes) — "here's the orchestration pattern"
 
-**What to say:** *"Every wave of work on this codebase runs through one
-plan file. Watch what it does in dry-run."*
+**What to say:** _"Every wave of work on this codebase runs through one
+plan file. Watch what it does in dry-run."_
 
 ```bash
 node scripts/orchestrate-worktrees.cjs \
@@ -47,22 +47,22 @@ topology — five workers, five worktrees, five tmux panes — in one
 terminal hit. See [`docs/sales/CONSOLE.md`](./CONSOLE.md) for the
 exact bytes that hit the screen.
 
-**Then say:** *"That was the dry-run. Here's what actually happened
-when we executed it."*
+**Then say:** _"That was the dry-run. Here's what actually happened
+when we executed it."_
 
 Open [`docs/WAVE-1-SUMMARY.md`](../WAVE-1-SUMMARY.md) and scroll to
 the commit graph. Point at the seven leaf branches that all merged
-into main in a single wave. Frame it as: *"one plan JSON, seven
+into main in a single wave. Frame it as: _"one plan JSON, seven
 workers, zero integration bugs — because every worker wrote in its own
-worktree, and the orchestrator handled the merge shape."*
+worktree, and the orchestrator handled the merge shape."_
 
 ---
 
 ## 2. RBAC tour (5 minutes) — "the foundation everything else builds on"
 
-**What to say:** *"Before any feature ships, it has to pass through
+**What to say:** _"Before any feature ships, it has to pass through
 the role-based access control layer. Here's the test suite that gates
-it."*
+it."_
 
 ```bash
 node --test server/rbac/rbac.test.js
@@ -75,8 +75,8 @@ middleware, and seed idempotency. Watch the `pass`/`fail` counter
 at the bottom — every line of red is a feature the prospect can ask
 about.
 
-**Then say:** *"The tests prove the engine. The spec explains the
-model."*
+**Then say:** _"The tests prove the engine. The spec explains the
+model."_
 
 Open [`docs/RBAC_SYSTEM.md`](../RBAC_SYSTEM.md) and read the
 15-section table of contents aloud (Goals & Non-Goals, Core
@@ -84,16 +84,16 @@ Concepts, Hierarchy Model, Permission Catalog, Permission Sets,
 Roles, Sensitivity & MFA, Field-Level Security, Record-Level
 Security, Session Policy & Impersonation, API Reference, Custom
 Roles, Migration From Ad-Hoc Checks, Comparison With Industry
-Systems, Operational Runbook). Frame it as: *"Salesforce-style
+Systems, Operational Runbook). Frame it as: _"Salesforce-style
 composition, with field-level redaction on top. Defense in depth,
-not defense in checkboxes."*
+not defense in checkboxes."_
 
 ---
 
 ## 3. l10n-am fiscal walk (10 minutes) — "Armenian tax law, implemented"
 
-**What to say:** *"The hard part of any country-specific ERP is the
-regulatory math. We don't fake it. Watch."*
+**What to say:** _"The hard part of any country-specific ERP is the
+regulatory math. We don't fake it. Watch."_
 
 ```bash
 node --test \
@@ -115,9 +115,9 @@ node --test \
 Expect 235 tests across 7 suites. The counter ticks fast; that is
 the point — every test is a rule, every rule has a citation.
 
-**Then say:** *"One concrete example. The VAT return — output 20%
+**Then say:** _"One concrete example. The VAT return — output 20%
 on a 1,000,000 dram sale, input 20% recoverable on a 200,000 dram
-purchase."*
+purchase."_
 
 ```bash
 node -e 'import("./server/l10n-am/vatReturn/vatReturn.js").then(m => {
@@ -142,23 +142,23 @@ You should see:
 }
 ```
 
-**Then say:** *"That number is not a mock. It's the output of a pure
+**Then say:** _"That number is not a mock. It's the output of a pure
 function that maps onto Armenian SRC decree N 298-Ն, lines 7-23 —
 the unified VAT and excise return. The full citation is in
 [`server/l10n-am/vatReturn/vatReturn.js`](../../server/l10n-am/vatReturn/vatReturn.js).
 The tests in `vat-return-rate-sanity.test.js` prove the math doesn't
-drift if someone refactors it."*
+drift if someone refactors it."_
 
-If the prospect asks "what about refunds?" answer: *"Armenia does not
+If the prospect asks "what about refunds?" answer: _"Armenia does not
 auto-refund — a negative net carries forward as a credit. That's the
-law; the engine implements it."*
+law; the engine implements it."_
 
 ---
 
 ## 4. Audit scanner (5 minutes) — "the safety net"
 
-**What to say:** *"Before any commit lands, an audit scanner walks
-the codebase and flags the patterns that have bitten us before."*
+**What to say:** _"Before any commit lands, an audit scanner walks
+the codebase and flags the patterns that have bitten us before."_
 
 ```bash
 node server/l10n-am/audit-cli.js --quiet
@@ -178,9 +178,9 @@ node server/l10n-am/audit-cli.js --check-rates --check-eval --check-sql
 After that merge, each finding prints as `file:line:col:
 <value|kind|pattern>`. The scanner then catches hardcoded tax
 rates, `eval(` and `new Function(` calls, and SQL string-concat
-patterns anywhere under `server/`. Frame it as: *"this is the
+patterns anywhere under `server/`. Frame it as: _"this is the
 equivalent of a pre-commit lint, but tuned for the failure modes we
-actually see in fiscal code."*
+actually see in fiscal code."_
 
 If the flags aren't on `main` yet (the merge is racing this
 walkthrough), pull `plan30/wave3-audit-hardening` or just point at
@@ -191,8 +191,8 @@ proof point.
 
 ## 5. Close (3 minutes) — "what landed and what's next"
 
-**What to say:** *"Wave 3 — the wave you're looking at — shipped
-three things:"*
+**What to say:** _"Wave 3 — the wave you're looking at — shipped
+three things:"_
 
 1. The audit scanner hardening (`--check-rates`, `--check-eval`,
    `--check-sql`).
@@ -200,7 +200,7 @@ three things:"*
    impersonation, FLS edge cases, role-hierarchy cross-cuts).
 3. **This walkthrough.** The thing you just sat through.
 
-**Then say:** *"The next waves in the pipeline:"*
+**Then say:** _"The next waves in the pipeline:"_
 
 - **CRM** — accounts, contacts, deals, activities. Phased parity
   to Zoho CRM, with the same RBAC enforcement pattern you just saw.
@@ -211,22 +211,22 @@ three things:"*
   pipeline), each one a pure function with a test, each one backed
   by the audit scanner.
 
-Close with the line that matters: *"If you have a specific module
+Close with the line that matters: _"If you have a specific module
 you want to see first, point at it. The wave plan JSON changes in
-an hour, and your wave ships the next sprint."*
+an hour, and your wave ships the next sprint."_
 
 ---
 
 ## Appendix — what to do when something breaks mid-demo
 
-| Symptom | Fix |
-|---|---|
-| `npm install` fails on Apple Silicon | `nvm use && rm -rf node_modules && npm install` |
-| `npm test` shows a red line | `node --test <that-file>` to isolate; consult `docs/PROJECT_STATUS.md` |
-| `audit-cli` exits 1 | `node server/l10n-am/audit-cli.js --format json` for the structured report |
-| Prospect asks a question you can't answer | *"That's a great question. Let me write it down and route it to the wave planner."* — then do exactly that, in front of them |
+| Symptom                                   | Fix                                                                                                                          |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `npm install` fails on Apple Silicon      | `nvm use && rm -rf node_modules && npm install`                                                                              |
+| `npm test` shows a red line               | `node --test <that-file>` to isolate; consult `docs/PROJECT_STATUS.md`                                                       |
+| `audit-cli` exits 1                       | `node server/l10n-am/audit-cli.js --format json` for the structured report                                                   |
+| Prospect asks a question you can't answer | _"That's a great question. Let me write it down and route it to the wave planner."_ — then do exactly that, in front of them |
 
 ---
 
-*This file ships in wave 3. Next revision when the CRM wave lands —
-swap section 3 (l10n-am fiscal walk) for a CRM deal-pipeline walk.*
+_This file ships in wave 3. Next revision when the CRM wave lands —
+swap section 3 (l10n-am fiscal walk) for a CRM deal-pipeline walk._

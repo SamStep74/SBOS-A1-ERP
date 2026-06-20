@@ -235,7 +235,10 @@ test('vat-return-form: every line definition carries the same shape (section/lab
   for (const id of ['8', '10', '11', '14', '15', '19', '20', '22']) {
     const def = f.lineDefinitions[id];
     assert.ok(def, `line ${id} definition missing`);
-    assert.ok(['output', 'input'].includes(def.section), `line ${id} section must be output or input`);
+    assert.ok(
+      ['output', 'input'].includes(def.section),
+      `line ${id} section must be output or input`,
+    );
     assert.equal(typeof def.labelHy, 'string');
     assert.ok(def.labelHy.length > 0, `line ${id} labelHy must be non-empty`);
     assert.ok(Array.isArray([...def.fields]), `line ${id} fields must be an array`);

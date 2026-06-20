@@ -16,51 +16,94 @@ const ROLES_VERSION = 1;
 // App IDs — keep aligned with server/app.js APP_ASSIGNMENT_ROLE_GUARDS and
 // web navigation.
 const APPS = Object.freeze({
-  DASHBOARD:    'dashboard',
-  CRM:          'crm',
-  FINANCE:      'finance',
-  INVENTORY:    'inventory',
-  PURCHASE:     'purchase',
-  POS:          'pos',
-  HR:           'hr',
-  PROJECTS:     'projects',
-  DESK:         'desk',
-  DOCS:         'docs',
-  PORTAL:       'portal',
-  MARKETING:    'marketing',
-  MFG:          'mfg',
-  AI:           'ai',
-  REPORTS:      'reports',
-  STUDIO:       'studio',
-  COMPLIANCE:   'compliance',
-  SETTINGS:     'settings',
-  AUDIT:        'audit',
-  SYSTEM:       'system',
+  DASHBOARD: 'dashboard',
+  CRM: 'crm',
+  FINANCE: 'finance',
+  INVENTORY: 'inventory',
+  PURCHASE: 'purchase',
+  POS: 'pos',
+  HR: 'hr',
+  PROJECTS: 'projects',
+  DESK: 'desk',
+  DOCS: 'docs',
+  PORTAL: 'portal',
+  MARKETING: 'marketing',
+  MFG: 'mfg',
+  AI: 'ai',
+  REPORTS: 'reports',
+  STUDIO: 'studio',
+  COMPLIANCE: 'compliance',
+  SETTINGS: 'settings',
+  AUDIT: 'audit',
+  SYSTEM: 'system',
 });
 
 // App set presets per role — used as default for new users of that role.
 // Tenant admins can override per-user via app_assignments table.
 const APP_PRESETS = Object.freeze({
   OWNER_ALL: [
-    'dashboard', 'crm', 'finance', 'inventory', 'purchase', 'pos', 'hr',
-    'projects', 'desk', 'docs', 'portal', 'marketing', 'mfg', 'ai',
-    'reports', 'studio', 'compliance', 'settings', 'audit', 'system',
+    'dashboard',
+    'crm',
+    'finance',
+    'inventory',
+    'purchase',
+    'pos',
+    'hr',
+    'projects',
+    'desk',
+    'docs',
+    'portal',
+    'marketing',
+    'mfg',
+    'ai',
+    'reports',
+    'studio',
+    'compliance',
+    'settings',
+    'audit',
+    'system',
   ],
   ADMIN_ALL: [
-    'dashboard', 'crm', 'finance', 'inventory', 'purchase', 'pos', 'hr',
-    'projects', 'desk', 'docs', 'portal', 'marketing', 'mfg', 'ai',
-    'reports', 'studio', 'compliance', 'settings', 'audit', 'system',
+    'dashboard',
+    'crm',
+    'finance',
+    'inventory',
+    'purchase',
+    'pos',
+    'hr',
+    'projects',
+    'desk',
+    'docs',
+    'portal',
+    'marketing',
+    'mfg',
+    'ai',
+    'reports',
+    'studio',
+    'compliance',
+    'settings',
+    'audit',
+    'system',
   ],
-  FINANCE_FULL: ['dashboard', 'crm', 'finance', 'reports', 'compliance', 'audit', 'docs', 'settings'],
-  SALES_FULL:   ['dashboard', 'crm', 'inventory', 'portal', 'reports', 'desk', 'docs'],
-  PURCHASE_FULL:['dashboard', 'purchase', 'inventory', 'finance', 'reports', 'docs'],
-  HR_FULL:      ['dashboard', 'hr', 'reports', 'docs', 'compliance'],
-  INVENTORY_FULL:['dashboard', 'inventory', 'purchase', 'reports', 'docs'],
+  FINANCE_FULL: [
+    'dashboard',
+    'crm',
+    'finance',
+    'reports',
+    'compliance',
+    'audit',
+    'docs',
+    'settings',
+  ],
+  SALES_FULL: ['dashboard', 'crm', 'inventory', 'portal', 'reports', 'desk', 'docs'],
+  PURCHASE_FULL: ['dashboard', 'purchase', 'inventory', 'finance', 'reports', 'docs'],
+  HR_FULL: ['dashboard', 'hr', 'reports', 'docs', 'compliance'],
+  INVENTORY_FULL: ['dashboard', 'inventory', 'purchase', 'reports', 'docs'],
   PROJECT_FULL: ['dashboard', 'projects', 'desk', 'reports', 'docs'],
-  POS_CASHIER:  ['dashboard', 'pos', 'crm', 'docs'],
-  DESK_AGENT:   ['dashboard', 'desk', 'crm', 'docs', 'ai'],
-  READ_ONLY:    ['dashboard', 'reports'],
-  AUDITOR:      ['dashboard', 'reports', 'audit', 'compliance'],
+  POS_CASHIER: ['dashboard', 'pos', 'crm', 'docs'],
+  DESK_AGENT: ['dashboard', 'desk', 'crm', 'docs', 'ai'],
+  READ_ONLY: ['dashboard', 'reports'],
+  AUDITOR: ['dashboard', 'reports', 'audit', 'compliance'],
   PORTAL_CUSTOMER: ['portal'],
 });
 
@@ -73,7 +116,8 @@ const ROLES = Object.freeze({
   Owner: {
     id: 'Owner',
     label: 'Owner',
-    description: 'Top of the role hierarchy. Full control of the organization including billing, deletion, and privileged actions. Required for tenant creation, period unlock, and audit packet delivery.',
+    description:
+      'Top of the role hierarchy. Full control of the organization including billing, deletion, and privileged actions. Required for tenant creation, period unlock, and audit packet delivery.',
     parent: null,
     isSystem: true,
     appSet: APP_PRESETS.OWNER_ALL,
@@ -84,7 +128,8 @@ const ROLES = Object.freeze({
   Admin: {
     id: 'Admin',
     label: 'Admin',
-    description: 'Full administrative control except the most sensitive Owner-only actions (tenant delete, audit packet delivery).',
+    description:
+      'Full administrative control except the most sensitive Owner-only actions (tenant delete, audit packet delivery).',
     parent: 'Owner',
     isSystem: true,
     appSet: APP_PRESETS.ADMIN_ALL,
@@ -97,7 +142,8 @@ const ROLES = Object.freeze({
   FinanceLead: {
     id: 'FinanceLead',
     label: 'Finance Lead',
-    description: 'Leads the finance function. Full read/write on finance, full read on operational modules for cross-functional context.',
+    description:
+      'Leads the finance function. Full read/write on finance, full read on operational modules for cross-functional context.',
     parent: 'Admin',
     isSystem: true,
     appSet: APP_PRESETS.FINANCE_FULL,
@@ -108,7 +154,8 @@ const ROLES = Object.freeze({
   SalesLead: {
     id: 'SalesLead',
     label: 'Sales Lead',
-    description: 'Leads sales/CRM. Full read/write on CRM and inventory (for quoting). Read-only on finance.',
+    description:
+      'Leads sales/CRM. Full read/write on CRM and inventory (for quoting). Read-only on finance.',
     parent: 'Admin',
     isSystem: true,
     appSet: APP_PRESETS.SALES_FULL,
@@ -130,7 +177,8 @@ const ROLES = Object.freeze({
   HRLead: {
     id: 'HRLead',
     label: 'HR Lead',
-    description: 'Leads people operations. Full access to HR and read on finance for payroll context.',
+    description:
+      'Leads people operations. Full access to HR and read on finance for payroll context.',
     parent: 'Admin',
     isSystem: true,
     appSet: APP_PRESETS.HR_FULL,
@@ -165,7 +213,8 @@ const ROLES = Object.freeze({
   Accountant: {
     id: 'Accountant',
     label: 'Accountant',
-    description: 'Day-to-day accounting: invoices, bills, payments, bank rec, VAT, period close. Read on operational modules.',
+    description:
+      'Day-to-day accounting: invoices, bills, payments, bank rec, VAT, period close. Read on operational modules.',
     parent: 'FinanceLead',
     isSystem: true,
     appSet: ['dashboard', 'finance', 'reports', 'crm', 'docs', 'compliance', 'audit'],
@@ -187,7 +236,8 @@ const ROLES = Object.freeze({
   Lawyer: {
     id: 'Lawyer',
     label: 'Lawyer',
-    description: 'Reviews contracts, e-signature workflows, and legal sources. Read-only on operational modules.',
+    description:
+      'Reviews contracts, e-signature workflows, and legal sources. Read-only on operational modules.',
     parent: 'ComplianceOfficer',
     isSystem: true,
     appSet: ['dashboard', 'docs', 'reports', 'compliance'],
@@ -231,7 +281,8 @@ const ROLES = Object.freeze({
   WarehouseClerk: {
     id: 'WarehouseClerk',
     label: 'Warehouse Clerk',
-    description: 'Operates the warehouse: receive, deliver, transfer, adjust stock. Limited to inventory.',
+    description:
+      'Operates the warehouse: receive, deliver, transfer, adjust stock. Limited to inventory.',
     parent: 'InventoryLead',
     isSystem: true,
     appSet: ['dashboard', 'inventory', 'docs'],
@@ -310,7 +361,8 @@ const ROLES = Object.freeze({
   CopilotReviewer: {
     id: 'CopilotReviewer',
     label: 'Copilot Reviewer',
-    description: 'Reviews AI-proposed mutations. Approves or rejects Copilot actions that touch critical data.',
+    description:
+      'Reviews AI-proposed mutations. Approves or rejects Copilot actions that touch critical data.',
     parent: 'Admin',
     isSystem: true,
     appSet: ['dashboard', 'ai', 'compliance', 'audit', 'reports'],
@@ -321,7 +373,8 @@ const ROLES = Object.freeze({
   ComplianceOfficer: {
     id: 'ComplianceOfficer',
     label: 'Compliance Officer',
-    description: 'Manages compliance policies, legal sources, retention, and data subject requests.',
+    description:
+      'Manages compliance policies, legal sources, retention, and data subject requests.',
     parent: 'Admin',
     isSystem: true,
     appSet: ['dashboard', 'compliance', 'audit', 'docs', 'reports'],
@@ -332,7 +385,8 @@ const ROLES = Object.freeze({
   Auditor: {
     id: 'Auditor',
     label: 'Auditor',
-    description: 'Read-only across the org with full audit access. No mutations. Used for internal/external audits.',
+    description:
+      'Read-only across the org with full audit access. No mutations. Used for internal/external audits.',
     parent: 'Admin',
     isSystem: true,
     appSet: APP_PRESETS.AUDITOR,
@@ -345,7 +399,8 @@ const ROLES = Object.freeze({
   Operator: {
     id: 'Operator',
     label: 'Operator',
-    description: 'General operator role for pilot workbenches and cross-functional tasks. Limited scoped permissions.',
+    description:
+      'General operator role for pilot workbenches and cross-functional tasks. Limited scoped permissions.',
     parent: 'Admin',
     isSystem: true,
     appSet: ['dashboard', 'crm', 'desk', 'docs'],
@@ -369,7 +424,8 @@ const ROLES = Object.freeze({
   CustomerPortal: {
     id: 'CustomerPortal',
     label: 'Customer Portal',
-    description: 'External customer. Limited to portal-only access. Tenant-scoped to a single customer account.',
+    description:
+      'External customer. Limited to portal-only access. Tenant-scoped to a single customer account.',
     parent: null,
     isSystem: true,
     appSet: APP_PRESETS.PORTAL_CUSTOMER,
@@ -468,27 +524,38 @@ function canBeImpersonated(id) {
 // Custom roles must declare a parent that is a system role.
 function validateCustomRole(input) {
   if (!isPlainObject(input)) {
-    const err = new Error('Role body must be an object'); err.statusCode = 400; throw err;
+    const err = new Error('Role body must be an object');
+    err.statusCode = 400;
+    throw err;
   }
   const id = String(input.id || '').trim();
   if (!id) {
-    const err = new Error('Role id is required'); err.statusCode = 400; throw err;
+    const err = new Error('Role id is required');
+    err.statusCode = 400;
+    throw err;
   }
   if (id.length > 80 || !/^[A-Za-z][A-Za-z0-9_]*$/.test(id)) {
     const err = new Error('Role id must start with a letter and use letters, digits, underscores');
-    err.statusCode = 400; throw err;
+    err.statusCode = 400;
+    throw err;
   }
   if (ROLES[id]) {
-    const err = new Error('Role id already exists'); err.statusCode = 409; throw err;
+    const err = new Error('Role id already exists');
+    err.statusCode = 409;
+    throw err;
   }
   const parent = String(input.parent || '').trim();
   if (!parent || !ROLES[parent]) {
-    const err = new Error(`Parent role references unknown role: ${input.parent || '(empty)'}`); err.statusCode = 400; throw err;
+    const err = new Error(`Parent role references unknown role: ${input.parent || '(empty)'}`);
+    err.statusCode = 400;
+    throw err;
   }
   const appSet = Array.isArray(input.appSet) ? input.appSet : [];
   for (const app of appSet) {
     if (typeof app !== 'string' || app.length > 40) {
-      const err = new Error('Invalid app id in appSet'); err.statusCode = 400; throw err;
+      const err = new Error('Invalid app id in appSet');
+      err.statusCode = 400;
+      throw err;
     }
   }
   return {
@@ -515,7 +582,8 @@ function clampInt(value, min, max, fallback) {
   return n;
 }
 
-export {ROLES_VERSION,
+export {
+  ROLES_VERSION,
   APPS,
   APP_PRESETS,
   ROLES,
@@ -530,4 +598,5 @@ export {ROLES_VERSION,
   mfaRequiredFor,
   sessionHardLimitMinutesFor,
   canBeImpersonated,
-  validateCustomRole,};
+  validateCustomRole,
+};

@@ -37,7 +37,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = await import('node:sqlite'));
+} catch {
+  // Node 20 CI does not ship node:sqlite. Keep static migration checks active
+  // there and run the dynamic sqlite smoke on runtimes that provide it.
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // node:sqlite → pg-style adapter. The production CRUD code uses $N
@@ -48,13 +55,15 @@ import { DatabaseSync } from 'node:sqlite';
 
 function makePgStyleSqliteAdapter(sqliteDb) {
   function toSqliteSql(sql) {
-    return sql
-      // $N placeholders → ? positional
-      .replace(/\$\d+/g, '?')
-      // pg-style type casts (expr::bigint, expr::text) — sqlite has no ::
-      // cast operator, and our integer-affinity columns handle the conversion
-      // implicitly. Strip the cast.
-      .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '');
+    return (
+      sql
+        // $N placeholders → ? positional
+        .replace(/\$\d+/g, '?')
+        // pg-style type casts (expr::bigint, expr::text) — sqlite has no ::
+        // cast operator, and our integer-affinity columns handle the conversion
+        // implicitly. Strip the cast.
+        .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '')
+    );
   }
   return {
     async query(sql, params = []) {
@@ -149,8 +158,10 @@ describe('finance — schema drift guard (static + real-DB smoke)', () => {
     test('1. 0001_init.sql exists and is non-empty', () => {
       const sql = readFileSync(join(dir, '0001_init.sql'), 'utf8');
       assert.ok(sql.length > 0, '0001_init.sql is empty');
-      assert.ok(/CREATE\s+TABLE\s+finance\.invoices/i.test(sql),
-        '0001 must CREATE TABLE finance.invoices');
+      assert.ok(
+        /CREATE\s+TABLE\s+finance\.invoices/i.test(sql),
+        '0001 must CREATE TABLE finance.invoices',
+      );
     });
 
     test('2. 0002_invoice_status_tracking.sql declares sent_at, voided_at, void_reason', () => {
@@ -158,21 +169,28 @@ describe('finance — schema drift guard (static + real-DB smoke)', () => {
       // The exact assertion that would have caught the wave-5 missing-migration
       // bug at PR review time: the migration file must declare the columns the
       // production invoice CRUD writes to.
-      assert.ok(/sent_at/i.test(sql),
-        '0002 must declare sent_at column (used by updateInvoice({status:"sent"}))');
-      assert.ok(/voided_at/i.test(sql),
-        '0002 must declare voided_at column (used by voidInvoice)');
-      assert.ok(/void_reason/i.test(sql),
-        '0002 must declare void_reason column (used by voidInvoice)');
+      assert.ok(
+        /sent_at/i.test(sql),
+        '0002 must declare sent_at column (used by updateInvoice({status:"sent"}))',
+      );
+      assert.ok(/voided_at/i.test(sql), '0002 must declare voided_at column (used by voidInvoice)');
+      assert.ok(
+        /void_reason/i.test(sql),
+        '0002 must declare void_reason column (used by voidInvoice)',
+      );
       // Idempotent — re-running must be a no-op.
-      assert.ok(/IF\s+NOT\s+EXISTS/i.test(sql),
-        '0002 must use IF NOT EXISTS so re-running the migration is a no-op');
+      assert.ok(
+        /IF\s+NOT\s+EXISTS/i.test(sql),
+        '0002 must use IF NOT EXISTS so re-running the migration is a no-op',
+      );
     });
   });
 
-  describe('dynamic: production code writes against real node:sqlite schema', () => {
+  const describeSqlite = DatabaseSync ? describe : describe.skip;
+
+  describeSqlite('dynamic: production code writes against real node:sqlite schema', () => {
     let db;
-    let createInvoice, getInvoice, updateInvoice, voidInvoice, recordPayment, reconcileInvoice, bootFinance;
+    let createInvoice, updateInvoice, voidInvoice, recordPayment, reconcileInvoice;
 
     before(async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sbos-realdb-'));
@@ -182,14 +200,11 @@ describe('finance — schema drift guard (static + real-DB smoke)', () => {
 
       const invoiceMod = await import('./invoice.js');
       const paymentMod = await import('./payment.js');
-      const bootMod = await import('./boot.js');
       createInvoice = invoiceMod.createInvoice;
-      getInvoice = invoiceMod.getInvoice;
       updateInvoice = invoiceMod.updateInvoice;
       voidInvoice = invoiceMod.voidInvoice;
       recordPayment = paymentMod.recordPayment;
       reconcileInvoice = paymentMod.reconcileInvoice;
-      bootFinance = bootMod.bootFinance;
     });
 
     test('3. invoices table has the lifecycle columns (sqlite introspection)', async () => {
@@ -197,19 +212,19 @@ describe('finance — schema drift guard (static + real-DB smoke)', () => {
       // the columns exist on the real table. This is the dynamic counterpart
       // of the static check in test 2.
       const result = await db.query(
-        `SELECT sql FROM finance.sqlite_master WHERE type = 'table' AND name = 'invoices'`
+        `SELECT sql FROM finance.sqlite_master WHERE type = 'table' AND name = 'invoices'`,
       );
       const ddl = result.rows[0]?.sql || '';
-      assert.ok(/sent_at/i.test(ddl),     `invoices DDL must include sent_at; got: ${ddl}`);
-      assert.ok(/voided_at/i.test(ddl),   `invoices DDL must include voided_at; got: ${ddl}`);
+      assert.ok(/sent_at/i.test(ddl), `invoices DDL must include sent_at; got: ${ddl}`);
+      assert.ok(/voided_at/i.test(ddl), `invoices DDL must include voided_at; got: ${ddl}`);
       assert.ok(/void_reason/i.test(ddl), `invoices DDL must include void_reason; got: ${ddl}`);
     });
 
     test('4. createInvoice works against real schema', async () => {
-      await db.query(
-        `INSERT INTO finance.customers (name, hvhh) VALUES ($1, $2)`,
-        ['Acme LLC', '12345678'],
-      );
+      await db.query(`INSERT INTO finance.customers (name, hvhh) VALUES ($1, $2)`, [
+        'Acme LLC',
+        '12345678',
+      ]);
       const out = await createInvoice(db, {
         customer_id: 1,
         invoice_number: 'INV-REAL-0001',

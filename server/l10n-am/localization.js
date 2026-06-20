@@ -40,16 +40,18 @@ const AMD_DEFAULT_LOCALE = 'en';
 // because raw user input only enters the kernel through this one
 // `amd.notNumber` key. The kernel stays a pure, well-behaved interpolator.
 const RAW_ECHO_MAX = 200;
+const ASCII_CONTROL_CHARS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
+  'g',
+);
 function sanitizeRawEcho(raw) {
-  return String(raw)
-    .slice(0, RAW_ECHO_MAX)
-    .replace(/[\x00-\x1f\x7f]/g, '');
+  return String(raw).slice(0, RAW_ECHO_MAX).replace(ASCII_CONTROL_CHARS, '');
 }
 
 function normalizeHvhh(value) {
   if (value === null || value === undefined) return '';
   // Strip separators users commonly type (spaces, dots, hyphens).
-  return String(value).replace(/[\s.\-]/g, '');
+  return String(value).replace(/[\s.-]/g, '');
 }
 
 function validateHvhh(value, { checkDigitVerifier, locale = HVHH_DEFAULT_LOCALE } = {}) {

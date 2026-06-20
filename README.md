@@ -19,14 +19,14 @@ tenant secrets, and brand-specific code are still in flux.
 `SBOS-A1-ERP` (this repo) is where **de-privatized, brand-neutral** code lands for
 public release. Code flows **A1-ERP-HY → SBOS-A1-ERP** via dmux-workflows waves:
 
-| | A1-ERP-HY (private) | SBOS-A1-ERP (public) |
-|---|---|---|
-| **Purpose** | R&D, hardening, vendor integration | Public open-core distribution |
-| **Brand** | Armosphera + HayHashvapah identifiers | Brand-neutral (rebrandable) |
-| **Tests** | 800+ (full) | 55+ (RBAC port only) and growing |
-| **Domains** | All 9 + i18n + Armenia tax | RBAC first; others port per wave |
-| **CI** | Internal | GitHub Actions |
-| **License** | Proprietary | TBD (open-core proposal) |
+|             | A1-ERP-HY (private)                   | SBOS-A1-ERP (public)             |
+| ----------- | ------------------------------------- | -------------------------------- |
+| **Purpose** | R&D, hardening, vendor integration    | Public open-core distribution    |
+| **Brand**   | Armosphera + HayHashvapah identifiers | Brand-neutral (rebrandable)      |
+| **Tests**   | 800+ (full)                           | 55+ (RBAC port only) and growing |
+| **Domains** | All 9 + i18n + Armenia tax            | RBAC first; others port per wave |
+| **CI**      | Internal                              | GitHub Actions                   |
+| **License** | Proprietary                           | TBD (open-core proposal)         |
 
 See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
 
@@ -36,12 +36,12 @@ Wave 0 (bootstrap) is in progress — 4 workers run in parallel via the
 `sbos-a1-erp-bootstrap` plan. See `.orchestration/sbos-a1-erp-bootstrap.json`
 and `docs/PROJECT_STATUS.md` for the live state.
 
-| Worker | Scope | Status |
-|---|---|---|
-| `repo-foundation` | package.json, tsconfig, eslint, prettier, CI, sanity test | starting |
+| Worker                | Scope                                                              | Status   |
+| --------------------- | ------------------------------------------------------------------ | -------- |
+| `repo-foundation`     | package.json, tsconfig, eslint, prettier, CI, sanity test          | starting |
 | `seed-from-a1-erp-hy` | Mirror canonical docs (RBAC, DMUX, ERP-comparison, project status) | starting |
-| `rbac-port` | Port `server/rbac/*` from A1-ERP-HY with brand-strip + hardening | starting |
-| `dmux-docs` | SBOS-A1-ERP-tuned DMUX_WORKFLOWS, PROJECT_STATUS, AGENT_BRIEF | starting |
+| `rbac-port`           | Port `server/rbac/*` from A1-ERP-HY with brand-strip + hardening   | starting |
+| `dmux-docs`           | SBOS-A1-ERP-tuned DMUX_WORKFLOWS, PROJECT_STATUS, AGENT_BRIEF      | starting |
 
 ## How to run
 
@@ -57,22 +57,40 @@ npm run format:check
 
 ```bash
 # Dry-run: shows worktree + tmux pane plan, no side effects
-node scripts/orchestrate-worktrees.js \
+node scripts/orchestrate-worktrees.cjs \
   .orchestration/sbos-a1-erp-bootstrap.json \
   --dry-run
 
 # Execute: create worktrees, write per-worker task/handoff/status files,
 # launch one tmux pane per worker
-node scripts/orchestrate-worktrees.js \
+node scripts/orchestrate-worktrees.cjs \
   .orchestration/sbos-a1-erp-bootstrap.json
 
 # Just create worktrees and write files, no tmux
-node scripts/orchestrate-worktrees.js \
+node scripts/orchestrate-worktrees.cjs \
   .orchestration/<next-wave>.json \
   --no-tmux
 ```
 
 See `docs/DMUX_WORKFLOWS.md` for the full guide.
+
+## Karpathy Eval
+
+The open-core release boundary is covered by a fixed, local eval:
+
+```bash
+node scripts/check-open-core-boundary-contract.mjs
+node scripts/karpathy-eval.mjs --run open-core-boundary-contract
+```
+
+The contract keeps this repo publishable as a brand-neutral, open-core
+distribution: no tenant identifiers in shipped source, no tracked env files, no
+key-shaped secrets, and deploy-time operator branding instead of compiled-in
+customer names. The one source exception is the stable e-invoice XML protocol
+namespace preserved for mapper compatibility.
+
+While first attaching or editing the eval harness itself, use
+`--allow-harness-dirty`; after the harness is committed, run without that flag.
 
 ## Layout
 
@@ -87,8 +105,8 @@ SBOS-A1-ERP/
 ├── .nvmrc                          ← 20
 ├── .github/workflows/ci.yml        ← CI on push / PR
 ├── scripts/
-│   ├── orchestrate-worktrees.js    ← plan.json runner
-│   ├── tmux-worktree-orchestrator.js  ← shared helper (worktree + tmux)
+│   ├── orchestrate-worktrees.cjs    ← plan.json runner
+│   ├── tmux-worktree-orchestrator.cjs  ← shared helper (worktree + tmux)
 │   └── orchestrate-codex-worker.sh ← codex CLI launcher
 ├── docs/
 │   ├── DMUX_WORKFLOWS.md           ← orchestration guide (SBOS-A1-ERP tuned)

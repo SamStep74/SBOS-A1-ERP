@@ -21,7 +21,7 @@ import { STRINGS, LOCALES } from './i18n.js';
 // ---- helpers --------------------------------------------------------------
 
 /**
- * Replace the contents of JS line (//...) and block (/* ... *​/) comments
+ * Replace the contents of JS line and block comments
  * with spaces of the same length, so source positions (line numbers) are
  * preserved. The linter should not match `t()` calls that appear in
  * JSDoc examples or developer comments.
@@ -30,7 +30,7 @@ export function stripJsComments(source) {
   let out = '';
   let i = 0;
   const n = source.length;
-  let inStr = null;          // ' " or ` if inside a string
+  let inStr = null; // ' " or ` if inside a string
   while (i < n) {
     const c = source[i];
     const next = source[i + 1];

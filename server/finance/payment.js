@@ -158,13 +158,11 @@ function sqliteAdapter(db) {
     },
     async updateInvoiceStatus(id, status) {
       const updated_at = new Date().toISOString();
-      db
-        .prepare(
-          `UPDATE finance.invoices
+      db.prepare(
+        `UPDATE finance.invoices
            SET status = ?, updated_at = ?
            WHERE id = ?`,
-        )
-        .run(status, updated_at, id);
+      ).run(status, updated_at, id);
     },
     async listPayments(invoiceId) {
       return db
@@ -191,11 +189,7 @@ function sqliteAdapter(db) {
 function isValidIsoTimestamp(s) {
   if (typeof s !== 'string') return false;
   // Basic shape: YYYY-MM-DDTHH:MM:SS[.fraction][Z|±HH:MM]
-  if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.test(
-      s,
-    )
-  ) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.test(s)) {
     return false;
   }
   // Cross-check: Date.parse must agree the string is a real instant.
@@ -207,9 +201,7 @@ function validateAmount(amount) {
   // roundAmd coerces non-finite / NaN to 0; the >0 check below catches it.
   const n = roundAmd(amount);
   if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
-    throw new ValueError(
-      `amount_amd must be a positive integer (got ${String(amount)})`,
-    );
+    throw new ValueError(`amount_amd must be a positive integer (got ${String(amount)})`);
   }
   return n;
 }
@@ -230,9 +222,7 @@ function validateReference(reference) {
     throw new ValueError(`reference must be a string (got ${typeof reference})`);
   }
   if (reference.length > REFERENCE_MAX) {
-    throw new ValueError(
-      `reference must be ≤ ${REFERENCE_MAX} chars (got ${reference.length})`,
-    );
+    throw new ValueError(`reference must be ≤ ${REFERENCE_MAX} chars (got ${reference.length})`);
   }
   return reference;
 }
@@ -242,9 +232,7 @@ function validatePaidAt(paidAt) {
     return new Date().toISOString();
   }
   if (!isValidIsoTimestamp(paidAt)) {
-    throw new ValueError(
-      `paid_at must be a valid ISO timestamp (got ${String(paidAt)})`,
-    );
+    throw new ValueError(`paid_at must be a valid ISO timestamp (got ${String(paidAt)})`);
   }
   return paidAt;
 }
@@ -280,9 +268,7 @@ export async function recordPayment(db, input) {
   // ── Validate inputs (no DB round-trip needed) ──
   const invoice_id = Number(input.invoice_id);
   if (!Number.isInteger(invoice_id) || invoice_id <= 0) {
-    throw new ValueError(
-      `invoice_id must be a positive integer (got ${String(input.invoice_id)})`,
-    );
+    throw new ValueError(`invoice_id must be a positive integer (got ${String(input.invoice_id)})`);
   }
   const amount_amd = validateAmount(input.amount_amd);
   const method = validateMethod(input.method);
@@ -298,14 +284,10 @@ export async function recordPayment(db, input) {
     throw new ValueError(`invoice ${invoice_id} not found`);
   }
   if (invoice.status === 'draft') {
-    throw new ValueError(
-      `cannot record payment against draft invoice ${invoice_id}`,
-    );
+    throw new ValueError(`cannot record payment against draft invoice ${invoice_id}`);
   }
   if (invoice.status === 'void') {
-    throw new ValueError(
-      `cannot record payment against void invoice ${invoice_id}`,
-    );
+    throw new ValueError(`cannot record payment against void invoice ${invoice_id}`);
   }
   // The "already paid" guard is balance-aware: if the invoice is marked paid
   // but balance_amd === 0, refuse. If it's marked paid with a non-zero balance
@@ -314,9 +296,7 @@ export async function recordPayment(db, input) {
     const alreadyPaid = await adapter.sumPayments(invoice_id);
     const balance = Number(invoice.total_amd) - alreadyPaid;
     if (balance === 0) {
-      throw new ValueError(
-        `invoice ${invoice_id} is already fully paid (balance_amd = 0)`,
-      );
+      throw new ValueError(`invoice ${invoice_id} is already fully paid (balance_amd = 0)`);
     }
   }
 
@@ -349,9 +329,7 @@ export async function listPaymentsForInvoice(db, invoice_id) {
   const adapter = pickAdapter(db);
   const id = Number(invoice_id);
   if (!Number.isInteger(id) || id <= 0) {
-    throw new ValueError(
-      `invoice_id must be a positive integer (got ${String(invoice_id)})`,
-    );
+    throw new ValueError(`invoice_id must be a positive integer (got ${String(invoice_id)})`);
   }
   return adapter.listPayments(id);
 }
@@ -366,9 +344,7 @@ export async function reconcileInvoice(db, invoice_id) {
   const adapter = pickAdapter(db);
   const id = Number(invoice_id);
   if (!Number.isInteger(id) || id <= 0) {
-    throw new ValueError(
-      `invoice_id must be a positive integer (got ${String(invoice_id)})`,
-    );
+    throw new ValueError(`invoice_id must be a positive integer (got ${String(invoice_id)})`);
   }
   const invoice = await adapter.getInvoice(id);
   if (!invoice) {
