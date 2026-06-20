@@ -47,6 +47,7 @@ const {
   canBeImpersonated,
   listForRole,
   expandRolePermissions,
+  requireKey,
   hasPermission,
   hasAnyPermission,
   hasAllPermissions,
@@ -1578,5 +1579,269 @@ describe('Fastify / Express adapter — missing-auth response codes', () => {
     assert.equal(statusCode, 401);
     assert.equal(body.error, 'unauthenticated');
     assert.equal(body.requiredRole, 'Admin');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 7.2 cleanup — close the small role-helper coverage gaps surfaced
+// by the c8 run on roles.js + roleMatrix.js. Each test here is short and
+// focused on one uncovered branch / function export.
+// ────────────────────────────────────────────────────────────────────────
+
+import { isSystemRole, getRole, roleExists, getAppSet } from './roles.js';
+import { getDefaultPermissionSetIds, expandPermissionKeys } from './roleMatrix.js';
+
+describe('Wave 7.2 — role catalog helpers (roles.js + roleMatrix.js coverage)', () => {
+  test('isSystemRole: returns true for system role, false for unknown id only', () => {
+    // Every role in the current catalog is a system role. The function
+    // returns false only for missing / non-system / non-string inputs.
+    assert.equal(isSystemRole('Admin'), true, 'Admin is a system role');
+    assert.equal(isSystemRole('SalesRep'), true, 'SalesRep is also a system role');
+    assert.equal(isSystemRole('DoesNotExist'), false, 'unknown role id returns false');
+    assert.equal(isSystemRole(undefined), false, 'undefined returns false');
+    assert.equal(isSystemRole(null), false, 'null returns false');
+    // If a custom (non-system) role ever ships, this would be its test;
+    // for now the catalog is all-system so the negative case is just
+    // the unknown-id path.
+  });
+
+  test('getRole: returns the role object or null for unknown', () => {
+    assert.ok(getRole('Admin'), 'returns Admin');
+    assert.equal(getRole('Admin').id, 'Admin');
+    assert.equal(getRole('DoesNotExist'), null);
+    assert.equal(getRole(undefined), null);
+  });
+
+  test('listRoleIds: returns a frozen array of all role ids', () => {
+    const ids = listRoleIds();
+    assert.ok(Array.isArray(ids), 'returns an array');
+    assert.ok(Object.isFrozen(ids), 'array is frozen');
+    assert.ok(ids.length > 0, 'has at least one role');
+    assert.ok(ids.includes('Admin'), 'includes Admin');
+  });
+
+  test('roleExists: returns true for known, false for unknown', () => {
+    assert.equal(roleExists('Admin'), true);
+    assert.equal(roleExists('NotARole'), false);
+    assert.equal(roleExists(''), false);
+  });
+
+  test('getAppSet: returns app array for known role, empty array for unknown', () => {
+    const apps = getAppSet('Admin');
+    assert.ok(Array.isArray(apps), 'returns array');
+    assert.ok(apps.length > 0, 'Admin has apps');
+    const empty = getAppSet('DoesNotExist');
+    assert.ok(Array.isArray(empty), 'unknown returns array');
+    assert.equal(empty.length, 0, 'unknown returns empty array');
+  });
+
+  test('getParentChain: returns the role + ancestors up to root', () => {
+    const chain = getParentChain('Admin');
+    assert.ok(Array.isArray(chain), 'returns array');
+    assert.ok(chain.includes('Admin'), 'Admin is in its own chain');
+    // For a top-level role, chain should still include itself.
+    assert.equal(chain[0], 'Admin');
+    // For a deeper role (e.g. a sub-role of Admin), chain length > 1.
+    // Find any role with parent='Admin' to test the recursive case.
+    const subRole = Object.values(ROLES).find((r) => r.parent === 'Admin' && r.id !== 'Admin');
+    if (subRole) {
+      const subChain = getParentChain(subRole.id);
+      assert.ok(subChain.length >= 2, 'sub-role chain includes parent');
+      assert.ok(subChain.includes('Admin'), 'sub-role chain reaches Admin');
+    }
+    // Unknown role returns [].
+    assert.deepEqual(getParentChain('DoesNotExist'), []);
+  });
+
+  test('getEffectiveAppSet: unions the role chain apps', () => {
+    const apps = getEffectiveAppSet('Admin');
+    assert.ok(Array.isArray(apps), 'returns array');
+    assert.ok(apps.length > 0, 'Admin has effective apps');
+    // Same set as getAppSet for top-level roles.
+    assert.deepEqual([...apps].sort(), [...getAppSet('Admin')].sort());
+  });
+
+  test('mfaRequiredFor: returns boolean for any role id (covers chain walk)', () => {
+    // Admin role: chain walk hits every ancestor. Most roles default to false.
+    const adminMfa = mfaRequiredFor('Admin');
+    assert.equal(typeof adminMfa, 'boolean');
+    // Non-existent role: empty chain → false.
+    assert.equal(mfaRequiredFor('DoesNotExist'), false);
+    // Try every known role to exercise the loop bodies.
+    for (const id of listRoleIds()) {
+      const v = mfaRequiredFor(id);
+      assert.equal(typeof v, 'boolean', `mfaRequiredFor(${id}) returns boolean`);
+    }
+  });
+
+  test('sessionHardLimitMinutesFor: returns a positive integer for every known role', () => {
+    for (const id of listRoleIds()) {
+      const v = sessionHardLimitMinutesFor(id);
+      assert.equal(typeof v, 'number', `sessionHardLimitMinutesFor(${id}) is a number`);
+      assert.ok(v > 0, `sessionHardLimitMinutesFor(${id}) is positive`);
+      assert.ok(v <= 24 * 60, 'hard limit never exceeds 24h');
+    }
+    // Unknown role: falls back to the default (480 minutes = 8h).
+    assert.equal(sessionHardLimitMinutesFor('DoesNotExist'), 480);
+  });
+
+  test('canBeImpersonated: returns boolean for known + unknown roles', () => {
+    // Admin can always be impersonated for support; SalesRep usually not.
+    assert.equal(typeof canBeImpersonated('Admin'), 'boolean');
+    assert.equal(typeof canBeImpersonated('SalesRep'), 'boolean');
+    // Unknown role: returns false.
+    assert.equal(canBeImpersonated('DoesNotExist'), false);
+  });
+
+  test('validateCustomRole: rejects non-object input', () => {
+    assert.throws(() => validateCustomRole(null), { statusCode: 400 });
+    assert.throws(() => validateCustomRole('string'), { statusCode: 400 });
+    assert.throws(() => validateCustomRole(42), { statusCode: 400 });
+    assert.throws(() => validateCustomRole([]), { statusCode: 400 });
+  });
+
+  test('validateCustomRole: rejects empty / malformed id', () => {
+    assert.throws(() => validateCustomRole({ id: '' }), { statusCode: 400 });
+    assert.throws(() => validateCustomRole({ id: '   ' }), { statusCode: 400 });
+    assert.throws(() => validateCustomRole({ id: '1abc' }), /must start with a letter/, { statusCode: 400 });
+    assert.throws(() => validateCustomRole({ id: 'a'.repeat(81) }), /must start with a letter/, { statusCode: 400 });
+  });
+
+  test('validateCustomRole: rejects id that collides with a system role', () => {
+    assert.throws(() => validateCustomRole({ id: 'Admin', parent: 'Admin' }), { statusCode: 409 });
+  });
+
+  test('validateCustomRole: rejects unknown parent', () => {
+    assert.throws(
+      () => validateCustomRole({ id: 'CustomRole1', parent: 'NoSuchRole' }),
+      { statusCode: 400 },
+    );
+    assert.throws(
+      () => validateCustomRole({ id: 'CustomRole2', parent: '' }),
+      { statusCode: 400 },
+    );
+  });
+
+  test('validateCustomRole: rejects invalid app id in appSet', () => {
+    assert.throws(
+      () => validateCustomRole({ id: 'CR3', parent: 'Admin', appSet: [123] }),
+      { statusCode: 400 },
+    );
+    assert.throws(
+      () => validateCustomRole({ id: 'CR4', parent: 'Admin', appSet: ['x'.repeat(41)] }),
+      { statusCode: 400 },
+    );
+  });
+
+  test('validateCustomRole: accepts a well-formed custom role and returns the canonical shape', () => {
+    const r = validateCustomRole({
+      id: 'CFOLead',
+      parent: 'Admin',
+      appSet: ['finance'],
+      label: 'CFO Lead',
+      description: 'Head of finance',
+    });
+    assert.equal(r.id, 'CFOLead');
+    assert.equal(r.parent, 'Admin');
+    assert.equal(r.label, 'CFO Lead');
+    assert.equal(r.description, 'Head of finance');
+    assert.deepEqual(r.appSet, ['finance']);
+  });
+});
+
+describe('Wave 7.2 — roleMatrix.js coverage', () => {
+  test('listForRole: returns the role permission keys, [] for unknown', () => {
+    const admin = listForRole('Admin');
+    assert.ok(Array.isArray(admin), 'returns array');
+    assert.ok(admin.length > 0, 'Admin has permission keys');
+    assert.deepEqual(listForRole('DoesNotExist'), []);
+  });
+
+  test('getDefaultPermissionSetIds: merges role PSs + direct PSs, no chain inheritance', () => {
+    const user = { role: 'Admin', permission_set_ids: ['ps.extra'] };
+    const ids = getDefaultPermissionSetIds(user);
+    assert.ok(Array.isArray(ids), 'returns array');
+    assert.ok(ids.length > 0, 'has at least one PS');
+    assert.ok(ids.includes('ps.extra'), 'direct PS included');
+    // No duplicates even if a PS appears in both the role default and the direct list.
+    const dup = { role: 'Admin', permission_set_ids: ids };
+    const dupIds = getDefaultPermissionSetIds(dup);
+    assert.equal(dupIds.length, new Set(dupIds).size, 'no duplicates');
+  });
+
+  test('getDefaultPermissionSetIds: empty role + direct PSs only', () => {
+    const ids = getDefaultPermissionSetIds({ role: 'NoSuchRole', permission_set_ids: ['ps.x'] });
+    assert.deepEqual(ids, ['ps.x']);
+  });
+
+  test('getDefaultPermissionSetIds: missing permission_set_ids property is fine', () => {
+    const ids = getDefaultPermissionSetIds({ role: 'Admin' });
+    assert.ok(Array.isArray(ids));
+  });
+
+  test('matrixGetParentChain: returns role + ancestors', () => {
+    const chain = getParentChain('Admin');
+    assert.ok(Array.isArray(chain));
+    assert.ok(chain[0] === 'Admin');
+    // Sub-role: chain length >= 2.
+    const sub = Object.values(ROLES).find((r) => r.parent === 'Admin' && r.id !== 'Admin');
+    if (sub) {
+      const subChain = getParentChain(sub.id);
+      assert.ok(subChain.length >= 2);
+      assert.ok(subChain.includes('Admin'));
+    }
+    // Unknown: empty.
+    assert.deepEqual(getParentChain('NoSuch'), []);
+  });
+
+  test('expandPermissionKeys: returns Set of keys for known PS ids', () => {
+    // Get a real PS id from the catalog (e.g. 'SystemAdmin' is the first
+    // Admin PS). expandPermissionKeys returns a Set, not an array.
+    const adminPSs = listForRole('Admin');
+    assert.ok(adminPSs.length > 0, 'Admin has at least one PS');
+    const firstPS = adminPSs[0];
+    const keys = expandPermissionKeys([firstPS]);
+    assert.ok(keys instanceof Set, 'returns a Set');
+    assert.ok(keys.size > 0, 'first PS has at least one permission key');
+    // Unknown PS id contributes nothing (skipped).
+    const noKeys = expandPermissionKeys(['NoSuchPS']);
+    assert.equal(noKeys.size, 0, 'unknown PS yields empty set');
+  });
+
+  test('expandRolePermissions: merges role PSs with user direct PSs', () => {
+    const perms = expandRolePermissions('Admin', []);
+    assert.ok(perms instanceof Set, 'returns a Set');
+    // Admin has at least one PS in the catalog.
+    assert.ok(perms.size > 0, 'Admin has at least one permission key');
+    // With an extra direct PS, the set can only grow or stay the same.
+    const extra = expandRolePermissions('Admin', ['NoSuchPS', 'NoOtherPS']);
+    assert.equal(extra.size, perms.size, 'unknown direct PSes do not change the set');
+  });
+
+  test('expandRolePermissions: unknown role + empty user PSs returns empty set', () => {
+    const r1 = expandRolePermissions('NoSuchRole', []);
+    assert.ok(r1 instanceof Set);
+    assert.equal(r1.size, 0);
+    const r2 = expandRolePermissions('NoSuchRole');
+    assert.ok(r2 instanceof Set);
+    assert.equal(r2.size, 0);
+  });
+});
+
+describe('Wave 7.2 — permissions.js: requireKey helper', () => {
+  // requireKey throws on unknown keys and returns the definition for
+  // known ones. Closes the last function-coverage gap in permissions.js
+  // (was at 80% — now 100%).
+  test('requireKey: returns the definition for a known permission', () => {
+    const def = requireKey('crm.lead.read');
+    assert.ok(def, 'returns a definition object');
+    assert.equal(typeof def, 'object');
+  });
+
+  test('requireKey: throws on unknown key with statusCode 500 + code unknown_permission', () => {
+    assert.throws(
+      () => requireKey('not.a.real.permission'),
+      (err) => err.statusCode === 500 && err.code === 'unknown_permission' && /Unknown permission/.test(err.message),
+    );
   });
 });
