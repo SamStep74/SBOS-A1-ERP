@@ -47,6 +47,54 @@ function registerRbacRoutes(app, opts = {}) {
     throw new Error('rbac routes require db: pass opts.db or set app.db');
   }
 
+  // ───── Role lookup helpers ─────
+  //
+  // Roles can live in two places:
+  //   1. The in-code ROLES catalog (system roles shipped with the app).
+  //   2. The sbos_rbac_roles table (custom roles created by tenants
+  //      via POST /api/rbac/roles).
+  //
+  // The original handler only consulted the in-code catalog, which made
+  // PATCH/DELETE silently 404 for any DB-only custom role. These two
+  // helpers unify the lookup: in-code first (so system role fields like
+  // isSystem are read from the source of truth), then the DB row.
+  //
+  // The returned object has the same shape regardless of source, so
+  // callers can branch on r.isSystem without caring which side the row
+  // came from.
+
+  function loadRoleFromDb(id) {
+    // Returns the DB row in the same shape as the in-code ROLES[id]
+    // (camelCase), or null if the id is not in the table.
+    const row = db
+      .prepare(
+        `SELECT id, label, description, parent, is_system, app_set_json,
+                mfa_required, session_hard_limit_minutes, can_be_impersonated
+           FROM sbos_rbac_roles WHERE id = ?`,
+      )
+      .get(id);
+    if (!row) return null;
+    return {
+      id: row.id,
+      label: row.label,
+      description: row.description,
+      parent: row.parent,
+      isSystem: !!row.is_system,
+      appSet: row.app_set_json ? JSON.parse(row.app_set_json) : [],
+      mfaRequired: !!row.mfa_required,
+      sessionHardLimitMinutes: row.session_hard_limit_minutes,
+      canBeImpersonated: !!row.can_be_impersonated,
+    };
+  }
+
+  function loadRole(id) {
+    // In-code catalog wins for system roles (single source of truth).
+    // DB fallback for custom roles.
+    const fromCode = ROLES[id];
+    if (fromCode) return fromCode;
+    return loadRoleFromDb(id);
+  }
+
   // ───── Catalog endpoints (read-only) ─────
 
   app.get(
@@ -100,7 +148,13 @@ function registerRbacRoutes(app, opts = {}) {
   // ───── Role management ─────
 
   app.get('/api/rbac/roles', { preHandler: requirePermFastify('security.role.read') }, async () => {
+    // System roles (in-code catalog) first, then any custom roles in
+    // the DB that aren't already in the catalog. Custom roles get an
+    // empty defaultPermissionSets (their direct assignments come from
+    // sbos_rbac_user_permission_sets, not the role matrix).
+    const seen = new Set();
     const items = listRoleIds().map((id) => {
+      seen.add(id);
       const r = ROLES[id];
       return {
         id,
@@ -115,6 +169,30 @@ function registerRbacRoutes(app, opts = {}) {
         defaultPermissionSets: listForRole(id),
       };
     });
+    // Append DB-only custom roles.
+    const customRows = db
+      .prepare(
+        `SELECT id, label, description, parent, is_system,
+                app_set_json, mfa_required, session_hard_limit_minutes, can_be_impersonated
+           FROM sbos_rbac_roles
+          WHERE id NOT IN (${listRoleIds().map(() => '?').join(',')})`,
+      )
+      .all(...listRoleIds());
+    for (const row of customRows) {
+      if (seen.has(row.id)) continue;
+      items.push({
+        id: row.id,
+        label: row.label,
+        description: row.description,
+        parent: row.parent,
+        isSystem: !!row.is_system,
+        mfaRequired: !!row.mfa_required,
+        sessionHardLimitMinutes: row.session_hard_limit_minutes,
+        canBeImpersonated: !!row.can_be_impersonated,
+        appSet: row.app_set_json ? JSON.parse(row.app_set_json) : [],
+        defaultPermissionSets: [],
+      });
+    }
     return { items };
   });
 
@@ -149,7 +227,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.role.update') },
     async (request, reply) => {
       const id = request.params.id;
-      const r = getRole(id);
+      const r = loadRole(id);
       if (!r) return reply.code(404).send({ error: 'not_found' });
       if (r.isSystem) {
         // System roles are mostly read-only; only appSet/description mutable.
@@ -211,7 +289,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.role.delete') },
     async (request, reply) => {
       const id = request.params.id;
-      const r = getRole(id);
+      const r = loadRole(id);
       if (!r) return reply.code(404).send({ error: 'not_found' });
       if (r.isSystem) return reply.code(409).send({ error: 'system_role_immutable' });
       // Refuse if anyone still holds this role.

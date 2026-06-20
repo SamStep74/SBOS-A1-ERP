@@ -2078,6 +2078,23 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     assert.ok(r.body.items.length > 0, 'has roles from DB join');
   });
 
+  test('GET /api/rbac/roles includes custom roles created via POST', async () => {
+    // Create a custom role and verify it appears in the list response
+    // (the wave 8 fix extends GET to read DB rows too).
+    await dispatch(routes, 'POST', '/api/rbac/roles', {
+      user: { id: 1 },
+      body: { id: 'CustomListMe', parent: 'Admin', appSet: ['finance'] },
+    }, makeReply().reply);
+    const r = makeReply();
+    await dispatch(routes, 'GET', '/api/rbac/roles', { user: { id: 1 } }, r.reply);
+    const found = r.body.items.find((it) => it.id === 'CustomListMe');
+    assert.ok(found, 'custom role surfaces in the GET list');
+    assert.equal(found.isSystem, false);
+    assert.equal(found.parent, 'Admin');
+    assert.deepEqual(found.appSet, ['finance']);
+    assert.deepEqual(found.defaultPermissionSets, [], 'custom roles have no default PSs in the role matrix');
+  });
+
   test('POST /api/rbac/roles creates a custom role and returns 201', async () => {
     const req = {
       user: { id: 1 },
@@ -2126,25 +2143,30 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     assert.equal(r.body.error, 'not_found');
   });
 
-  test('PATCH /api/rbac/roles/:id — custom role PATCH is a known limitation (in-code catalog only)', async () => {
-    // KNOWN LIMITATION: PATCH/DELETE in routes.js only consults the
-    // in-code ROLES catalog via getRole(id), not the DB. Custom roles
-    // created via POST land in the DB but are invisible to PATCH/DELETE
-    // because the handler 404s when getRole returns null. This is a
-    // pre-existing design constraint — surfacing it here so it shows
-    // up in the test output. The POST + read-back path works (covered
-    // elsewhere); only the modify/delete API for custom roles is gated.
+  test('PATCH /api/rbac/roles/:id — custom role PATCH works via DB fallback', async () => {
+    // After the wave 8 fix, loadRole() checks the in-code catalog
+    // first, then falls back to the DB. PATCH on a DB-only custom
+    // role now reaches the "Custom roles" branch and updates the row.
     const createReq = {
       user: { id: 1 },
       body: { id: 'CustomSkip', parent: 'Admin', appSet: ['finance'] },
     };
     await dispatch(routes, 'POST', '/api/rbac/roles', createReq, makeReply().reply);
-    const patchReq = { user: { id: 1 }, params: {}, body: { description: 'X' } };
+
+    const patchReq = { user: { id: 1 }, params: {}, body: { description: 'X', appSet: ['finance', 'rpt'] } };
     const r = makeReply();
     await dispatch(routes, 'PATCH', '/api/rbac/roles/CustomSkip', patchReq, r.reply);
-    // Document the current behavior, don't assert against an aspirational one.
-    assert.equal(r.status, 404, 'PATCH on DB-only custom role returns 404 (catalog gate)');
-    assert.equal(r.body.error, 'not_found');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.id, 'CustomSkip');
+    assert.equal(r.body.description, 'X');
+    assert.deepEqual(r.body.appSet, ['finance', 'rpt']);
+
+    // Verify the row was actually updated in the DB.
+    const row = db
+      .prepare(`SELECT description, app_set_json FROM sbos_rbac_roles WHERE id = ?`)
+      .get('CustomSkip');
+    assert.equal(row.description, 'X');
+    assert.deepEqual(JSON.parse(row.app_set_json), ['finance', 'rpt']);
   });
 
   test('DELETE /api/rbac/roles/:id — system role returns 409', async () => {
@@ -2162,28 +2184,38 @@ describe('Wave 8 — RBAC routes (server/rbac/routes.js)', () => {
     assert.equal(r.status, 404);
   });
 
-  test('DELETE /api/rbac/roles/:id — DB-only custom role returns 404 (known limitation)', () => {
-    // KNOWN LIMITATION: see the PATCH test above. Custom roles in the
-    // DB are not deletable via the API because the handler only checks
-    // the in-code ROLES catalog. We assert the current behavior so the
-    // gap is visible in CI rather than silently.
+  test('DELETE /api/rbac/roles/:id — unused custom role is deletable via DB fallback', async () => {
+    // After the wave 8 fix, loadRole() also fixes DELETE.
+    await dispatch(routes, 'POST', '/api/rbac/roles', {
+      user: { id: 1 },
+      body: { id: 'ToDelete2', parent: 'Admin' },
+    }, makeReply().reply);
+    // Confirm the row is there pre-delete.
+    assert.ok(db.prepare(`SELECT id FROM sbos_rbac_roles WHERE id = ?`).get('ToDelete2'));
     const req = { user: { id: 1 }, params: {} };
     const r = makeReply();
-    return dispatch(routes, 'DELETE', '/api/rbac/roles/NotInCatalog', req, r.reply).then(() => {
-      assert.equal(r.status, 404);
-      assert.equal(r.body.error, 'not_found');
-    });
+    await dispatch(routes, 'DELETE', '/api/rbac/roles/ToDelete2', req, r.reply);
+    assert.equal(r.status, 204);
+    assert.equal(
+      db.prepare(`SELECT id FROM sbos_rbac_roles WHERE id = ?`).get('ToDelete2'),
+      undefined,
+      'row removed',
+    );
   });
 
-  test('DELETE /api/rbac/roles/:id — in-use custom role is gated the same way (returns 404)', async () => {
-    // Same limitation: the in-use branch is never reached because
-    // getRole(id) returns null for DB-only custom roles. The 404 is
-    // returned first.
+  test('DELETE /api/rbac/roles/:id — in-use custom role returns 409 role_in_use', async () => {
+    await dispatch(routes, 'POST', '/api/rbac/roles', {
+      user: { id: 1 },
+      body: { id: 'InUse2', parent: 'Admin' },
+    }, makeReply().reply);
+    db.prepare(`INSERT INTO sbos_rbac_user_roles (user_id, role_id, tenant_id) VALUES (?, ?, ?)`)
+      .run(1, 'InUse2', 0);
     const req = { user: { id: 1 }, params: {} };
     const r = makeReply();
-    await dispatch(routes, 'DELETE', '/api/rbac/roles/SomeDBOnlyRole', req, r.reply);
-    assert.equal(r.status, 404);
-    assert.equal(r.body.error, 'not_found');
+    await dispatch(routes, 'DELETE', '/api/rbac/roles/InUse2', req, r.reply);
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, 'role_in_use');
+    assert.ok(r.body.count >= 1);
   });
 
   test('GET /api/rbac/users/:userId/effective — known user returns chain + effective set', async () => {
