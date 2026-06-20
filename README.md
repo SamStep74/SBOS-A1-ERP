@@ -53,6 +53,24 @@ npm run lint
 npm run format:check
 ```
 
+## Karpathy Eval Harness
+
+This repo exposes a narrow product-research contract for the public open-core
+boundary:
+
+```bash
+npm run karpathy:list
+npm run karpathy:program -- open-core-boundary-contract
+npm run karpathy:run -- open-core-boundary-contract --best 0
+node scripts/check-open-core-boundary-contract.mjs
+```
+
+The `open-core-boundary-contract` eval uses `failing_checks` as a minimize metric.
+It keeps the editable surface limited to open-core boundary docs, ignore rules, and
+the e-invoice namespace exception, while guarding against tracked env files,
+key-shaped secrets, source-level brand leaks, and accidental removal of the stable
+e-invoice protocol URN.
+
 ## How to orchestrate a new wave
 
 ```bash

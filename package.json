@@ -11,6 +11,9 @@
   "scripts": {
     "test": "node --test --test-concurrency=4 --test-timeout=60000",
     "test:unit": "node --test --test-concurrency=4 --test-timeout=60000",
+    "karpathy:list": "node scripts/karpathy-eval.mjs --list",
+    "karpathy:program": "node scripts/karpathy-eval.mjs --program",
+    "karpathy:run": "node scripts/karpathy-eval.mjs --run",
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",

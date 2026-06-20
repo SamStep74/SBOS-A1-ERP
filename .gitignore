@@ -20,6 +20,7 @@ yarn-error.log*
 dist/
 build/
 coverage/
+evals/karpathy/results/
 
 # Editor / IDE
 .vscode/
