@@ -46,6 +46,12 @@ function makeMockDb() {
   }
 
   // Helper: detect a SQL kind by regex.
+  // Wave-13 added `tenant_id = $N AND` to every WHERE clause, so the
+  // single-column regexes below now match `WHERE TENANT_ID = $N AND
+  // <col> = $M` as well as the pre-wave-13 `WHERE <col> = $M`. The
+  // dispatchers (invoice-by-id, lines-by-invoice, invoice-by-number)
+  // handle both shapes and default tenant_id to 0 when the row has no
+  // tenant_id field.
   function classify(sql) {
     const s = sql.trim().toUpperCase();
     if (/SELECT\s+1\s+FROM\s+FINANCE\.CUSTOMERS/.test(s)) return 'customer-exists';
@@ -55,10 +61,11 @@ function makeMockDb() {
     if (/DELETE\s+FROM\s+FINANCE\.INVOICE_LINES/.test(s)) return 'lines-delete';
     if (/UPDATE\s+FINANCE\.INVOICES\s+SET/.test(s)) return 'invoice-update';
     if (/SELECT\s+LAST_INSERT_ROWID\(\)/.test(s)) return 'last-insert-rowid';
-    if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+ID\s*=/.test(s)) return 'invoice-by-id';
-    if (/SELECT\s+ID\s+FROM\s+FINANCE\.INVOICES\s+WHERE\s+INVOICE_NUMBER\s*=/.test(s))
+    if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICES\s+WHERE/.test(s) && /\bID\s*=/.test(s))
+      return 'invoice-by-id';
+    if (/SELECT\s+ID\s+FROM\s+FINANCE\.INVOICES\s+WHERE/.test(s) && /\bINVOICE_NUMBER\s*=/.test(s))
       return 'invoice-by-number';
-    if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICE_LINES\s+WHERE\s+INVOICE_ID\s*=/.test(s))
+    if (/SELECT\s+\*\s+FROM\s+FINANCE\.INVOICE_LINES\s+WHERE/.test(s) && /\bINVOICE_ID\s*=/.test(s))
       return 'lines-by-invoice';
     if (/SELECT\s+.*\s+FROM\s+FINANCE\.INVOICES(\s|$)/.test(s)) return 'invoice-list';
     return 'other';
@@ -76,8 +83,18 @@ function makeMockDb() {
       return { rows: [{ id: maxId }] };
     }
     if (kind === 'customer-exists') {
-      const id = Number(ps[0]);
-      return { rows: customers.has(id) ? [{ ok: 1 }] : [] };
+      // After wave-13 the FK check is tenant-scoped: `WHERE tenant_id = $1
+      // AND id = $2`. Pre-wave-13 mocks may still match the un-scoped form
+      // `WHERE id = $1`. We accept both — tenant id 0 is the bootstrap
+      // (default) so a row seeded without tenant_id matches the new
+      // WHERE clause transparently.
+      const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
+      const id = ps.length > 1 ? Number(ps[1]) : Number(ps[0]);
+      for (const c of customers.values()) {
+        const cTenant = c.tenant_id ?? 0;
+        if (c.id === id && cTenant === tenantId) return { rows: [{ ok: 1 }] };
+      }
+      return { rows: [] };
     }
     if (kind === 'customer-insert') {
       const id = nextIdFor(customers);
@@ -85,16 +102,26 @@ function makeMockDb() {
       return { rows: [] };
     }
     if (kind === 'invoice-by-number') {
+      // Wave-13: scoped to tenant. pre-wave-13 mock seeds pass tenant=0
+      // implicitly, so we default `row.tenant_id ?? 0` to match.
+      const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
+      const number = ps.length > 1 ? ps[1] : ps[0];
       for (const inv of invoices.values()) {
-        if (inv.invoice_number === ps[0]) return { rows: [{ id: inv.id }] };
+        if (inv.invoice_number === number && (inv.tenant_id ?? 0) === tenantId) {
+          return { rows: [{ id: inv.id }] };
+        }
       }
       return { rows: [] };
     }
     if (kind === 'invoice-insert') {
       const id = nextIdFor(invoices);
-      // Schema columns in INSERT VALUES order (created_at + updated_at are
-      // populated by the impl; sent_at / voided_at / void_reason default to NULL
-      // here and are filled by later UPDATE statements).
+      // Schema columns in INSERT VALUES order:
+      //   customer_id, invoice_number, issue_date, due_date,
+      //   subtotal_amd, vat_amd, total_amd, status, notes,
+      //   tenant_id, created_at, updated_at
+      // (Wave-13 added tenant_id between notes and created_at.) The mock
+      // accepts both forms: if a test inserts without tenant_id, it is
+      // recorded as 0 so the always-on `WHERE tenant_id = $N` reads match.
       const inv = {
         id,
         customer_id: Number(ps[0]),
@@ -106,8 +133,12 @@ function makeMockDb() {
         total_amd: Number(ps[6]),
         status: ps[7] ?? 'draft',
         notes: ps[8] ?? null,
-        created_at: ps[9] ?? null,
-        updated_at: ps[10] ?? null,
+        // Wave-13: tenant_id lives at ps[9]. Pre-wave-13 seeds used
+        // ps[9]=created_at; if the value at that position parses as a
+        // timestamp, assume the old shape and treat tenant_id=0.
+        tenant_id: ps.length >= 12 ? Number(ps[9] ?? 0) : 0,
+        created_at: ps.length >= 12 ? (ps[10] ?? null) : (ps[9] ?? null),
+        updated_at: ps.length >= 12 ? (ps[11] ?? null) : (ps[10] ?? null),
         sent_at: null,
         voided_at: null,
         void_reason: null,
@@ -121,6 +152,9 @@ function makeMockDb() {
     }
     if (kind === 'invoice-line-insert') {
       const id = nextIdFor(lines);
+      // Wave-13: tenant_id is the LAST param on invoice_lines. Pre-wave-13
+      // inserts had 5 params; wave-13 inserts have 6. Default to 0 when
+      // missing.
       lines.set(id, {
         id,
         invoice_id: Number(ps[0]),
@@ -128,21 +162,43 @@ function makeMockDb() {
         quantity: String(ps[2]),
         unit_price_amd: Number(ps[3]),
         line_total_amd: Number(ps[4]),
+        tenant_id: ps.length >= 6 ? Number(ps[5] ?? 0) : 0,
       });
       return { rows: [] };
     }
     if (kind === 'lines-delete') {
-      const id = Number(ps[0]);
+      // Wave-13: scoped. `WHERE tenant_id = $1 AND invoice_id = $2`. The
+      // pre-wave-13 form was `WHERE invoice_id = $1`. Accept both.
+      const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
+      const id = ps.length > 1 ? Number(ps[1]) : Number(ps[0]);
       for (const [lid, l] of lines) {
-        if (l.invoice_id === id) lines.delete(lid);
+        if (l.invoice_id === id && (l.tenant_id ?? 0) === tenantId) lines.delete(lid);
       }
       return { rows: [] };
     }
     if (kind === 'invoice-update') {
-      // Look up the target invoice by $N (last param).
-      const id = Number(ps[ps.length - 1]);
+      // Wave-13: the WHERE clause ends with `tenant_id = $N AND id = $M`.
+      // We pull the id and tenant out of the WHERE clause; the SET clause
+      // still uses 0-indexed params (which is what the production
+      // code emits).
+      const whereMatch = sql.match(/WHERE\s+([\s\S]+)$/i);
+      let tenantId = 0;
+      let id = null;
+      if (whereMatch) {
+        const t = whereMatch[1].match(/tenant_id\s*=\s*\$(\d+)/i);
+        const i = whereMatch[1].match(/\bid\s*=\s*\$(\d+)/i);
+        if (t) tenantId = Number(ps[Number(t[1]) - 1] ?? 0);
+        if (i) id = Number(ps[Number(i[1]) - 1]);
+      }
+      // Pre-wave-13 fallback: id is the last param, no tenant predicate.
+      if (id === null) {
+        id = Number(ps[ps.length - 1]);
+      }
       const inv = invoices.get(id);
       if (!inv) return { rows: [] };
+      // Tenant guard: if the row's tenant_id doesn't match the predicate,
+      // treat it as a no-op (the real DB would silently UPDATE 0 rows).
+      if ((inv.tenant_id ?? 0) !== tenantId) return { rows: [] };
       // Parse the SET clause to figure out which columns changed.
       const setMatch = sql.match(/SET\s+([\s\S]+?)\s+WHERE/i);
       if (!setMatch) return { rows: [] };
@@ -150,9 +206,6 @@ function makeMockDb() {
         .split(',')
         .map((c) => c.trim())
         .filter(Boolean);
-      // cols[i] is something like "status = $1"; map 0-indexed into ps[].
-      // (All other branches in this mock are 0-indexed; this branch was
-      // off-by-one — fixed in commit 099b900 to align with the rest.)
       let paramIdx = 0;
       for (const col of cols) {
         const eq = col.split('=');
@@ -174,23 +227,31 @@ function makeMockDb() {
       return { rows: [] };
     }
     if (kind === 'invoice-by-id') {
-      const id = Number(ps[0]);
-      const inv = invoices.get(id);
-      if (!inv) return { rows: [] };
-      return { rows: [inv] };
+      // Wave-13: scoped. `WHERE tenant_id = $1 AND id = $2`.
+      const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
+      const id = ps.length > 1 ? Number(ps[1]) : Number(ps[0]);
+      for (const inv of invoices.values()) {
+        if (inv.id === id && (inv.tenant_id ?? 0) === tenantId) {
+          return { rows: [inv] };
+        }
+      }
+      return { rows: [] };
     }
     if (kind === 'lines-by-invoice') {
-      const id = Number(ps[0]);
+      // Wave-13: scoped. `WHERE tenant_id = $1 AND invoice_id = $2`. The
+      // pre-wave-13 form was `WHERE invoice_id = $1`. Accept both.
+      const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
+      const id = ps.length > 1 ? Number(ps[1]) : Number(ps[0]);
       const out = [];
       for (const l of lines.values()) {
-        if (l.invoice_id === id) out.push(l);
+        if (l.invoice_id === id && (l.tenant_id ?? 0) === tenantId) out.push(l);
       }
       return { rows: out };
     }
     if (kind === 'invoice-list') {
-      // Very small WHERE-clause parser: only the filters we actually use.
-      // Filters (any order): status = $N, customer_id = $N, issue_date >= $N,
-      // issue_date <= $N, id DESC LIMIT $N.
+      // Wave-13: tenant_id is the FIRST WHERE condition. We accept either
+      // form (with or without the leading tenant_id) and default missing
+      // tenant_id to 0 on every row, so pre-wave-13 fixtures still work.
       let out = [...invoices.values()];
       const whereMatch = sql.match(/WHERE\s+([\s\S]+?)(?:\s+ORDER|\s+LIMIT|$)/i);
       const orderDesc = /ORDER\s+BY\s+ID\s+DESC/i.test(sql);
@@ -206,7 +267,7 @@ function makeMockDb() {
           const idx = Number(m[3]) - 1;
           const val = ps[idx];
           out = out.filter((inv) => {
-            const v = inv[col];
+            const v = col === 'tenant_id' ? (inv[col] ?? 0) : inv[col];
             if (op === '=') return v === val;
             if (op === '>=') return v >= val;
             if (op === '<=') return v <= val;

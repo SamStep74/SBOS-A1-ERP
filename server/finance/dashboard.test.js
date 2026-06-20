@@ -28,6 +28,7 @@ function makeRealDb() {
     CREATE TABLE finance.customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL, hvhh TEXT, address TEXT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -43,6 +44,7 @@ function makeRealDb() {
       status TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft','sent','paid','overdue','void')),
       notes TEXT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       sent_at TEXT, voided_at TEXT, void_reason TEXT
@@ -52,14 +54,16 @@ function makeRealDb() {
       invoice_id INTEGER NOT NULL,
       description TEXT NOT NULL,
       quantity REAL NOT NULL, unit_price_amd INTEGER NOT NULL,
-      line_total_amd INTEGER NOT NULL
+      line_total_amd INTEGER NOT NULL,
+      tenant_id INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE finance.payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       invoice_id INTEGER NOT NULL,
       paid_at TEXT NOT NULL DEFAULT (datetime('now')),
       amount_amd INTEGER NOT NULL, method TEXT NOT NULL DEFAULT 'bank_transfer',
-      reference TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      reference TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      tenant_id INTEGER NOT NULL DEFAULT 0
     );
   `);
   return sqliteDb;
@@ -82,15 +86,39 @@ async function seedCustomer(db, { name, hvhh = null }) {
   const r = await db.query('SELECT MAX(id) AS id FROM finance.customers');
   return Number(r.rows[0].id);
 }
-async function seedInvoice(db, { customer_id, invoice_number, issue_date, due_date, total_amd, vat_amd = 0, status = 'sent', sent_at = null }) {
+async function seedInvoice(
+  db,
+  {
+    customer_id,
+    invoice_number,
+    issue_date,
+    due_date,
+    total_amd,
+    vat_amd = 0,
+    status = 'sent',
+    sent_at = null,
+  },
+) {
   const subtotal = total_amd - vat_amd;
   await db.query(
     `INSERT INTO finance.invoices
        (customer_id, invoice_number, issue_date, due_date,
         subtotal_amd, vat_amd, total_amd, status, notes, sent_at, voided_at, void_reason)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-    [customer_id, invoice_number, issue_date, due_date, subtotal, vat_amd, total_amd, status, null,
-     sent_at || (status !== 'draft' ? '2026-06-01T00:00:00Z' : null), null, null],
+    [
+      customer_id,
+      invoice_number,
+      issue_date,
+      due_date,
+      subtotal,
+      vat_amd,
+      total_amd,
+      status,
+      null,
+      sent_at || (status !== 'draft' ? '2026-06-01T00:00:00Z' : null),
+      null,
+      null,
+    ],
   );
   const r = await db.query('SELECT MAX(id) AS id FROM finance.invoices');
   return Number(r.rows[0].id);
@@ -125,7 +153,10 @@ describe('CFO dashboard — server-rendered HTML view', () => {
   test('1. renderDashboard returns a complete HTML page with the as-of date in the title', async () => {
     const html = await renderDashboard(db, '2026-06-20');
     assert.ok(html.startsWith('<!DOCTYPE html>'), 'must start with DOCTYPE');
-    assert.ok(html.includes('<title>CFO Dashboard — 2026-06-20</title>'), 'title must include asOfDate');
+    assert.ok(
+      html.includes('<title>CFO Dashboard — 2026-06-20</title>'),
+      'title must include asOfDate',
+    );
     assert.ok(html.includes('As of 2026-06-20'), 'meta must include asOfDate');
     assert.ok(html.includes('<style>'), 'inline CSS must be present');
   });
@@ -144,10 +175,38 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const freshDb = makePgAdapter(freshSqlite);
     const custId = await seedCustomer(freshDb, { name: 'ARTest', hvhh: '11111111' });
     // 4 invoices across the 4 buckets.
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'AR-0_30', issue_date: '2026-06-15', due_date: '2026-07-15', total_amd: 50000, status: 'sent' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'AR-31_60', issue_date: '2026-04-15', due_date: '2026-05-15', total_amd: 80000, status: 'sent' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'AR-61_90', issue_date: '2026-03-15', due_date: '2026-04-15', total_amd: 120000, status: 'sent' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'AR-90', issue_date: '2026-01-15', due_date: '2026-02-15', total_amd: 200000, status: 'sent' });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'AR-0_30',
+      issue_date: '2026-06-15',
+      due_date: '2026-07-15',
+      total_amd: 50000,
+      status: 'sent',
+    });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'AR-31_60',
+      issue_date: '2026-04-15',
+      due_date: '2026-05-15',
+      total_amd: 80000,
+      status: 'sent',
+    });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'AR-61_90',
+      issue_date: '2026-03-15',
+      due_date: '2026-04-15',
+      total_amd: 120000,
+      status: 'sent',
+    });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'AR-90',
+      issue_date: '2026-01-15',
+      due_date: '2026-02-15',
+      total_amd: 200000,
+      status: 'sent',
+    });
     const html = await renderDashboard(freshDb, '2026-06-20');
     assert.ok(/0–30 days[\s\S]+1 inv[\s\S]+50 000 AMD/.test(html), '0-30 bucket 1 inv 50k');
     assert.ok(/31–60 days[\s\S]+1 inv[\s\S]+80 000 AMD/.test(html), '31-60 bucket 1 inv 80k');
@@ -160,7 +219,14 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     const custId = await seedCustomer(freshDb, { name: 'Overdue Co' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'OD-1', issue_date: '2026-01-01', due_date: '2026-05-01', total_amd: 100000, status: 'sent' });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'OD-1',
+      issue_date: '2026-01-01',
+      due_date: '2026-05-01',
+      total_amd: 100000,
+      status: 'sent',
+    });
     const html = await renderDashboard(freshDb, '2026-06-20');
     assert.ok(html.includes('OD-1'), 'invoice number OD-1');
     assert.ok(html.includes('Overdue Co'), 'customer name');
@@ -175,8 +241,13 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const freshDb = makePgAdapter(freshSqlite);
     const custId = await seedCustomer(freshDb, { name: 'Monthly Co' });
     const inv = await seedInvoice(freshDb, {
-      customer_id: custId, invoice_number: 'MONTH-1', issue_date: '2026-06-10',
-      due_date: '2026-07-10', total_amd: 200000, vat_amd: 20000, status: 'sent',
+      customer_id: custId,
+      invoice_number: 'MONTH-1',
+      issue_date: '2026-06-10',
+      due_date: '2026-07-10',
+      total_amd: 200000,
+      vat_amd: 20000,
+      status: 'sent',
     });
     await seedPayment(freshDb, { invoice_id: inv, amount_amd: 50000 });
     const html = await renderDashboard(freshDb, '2026-06-20');
@@ -193,7 +264,14 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     const custId = await seedCustomer(freshDb, { name: 'Big Customer LLC', hvhh: '99999999' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'TOP-1', issue_date: '2026-03-15', due_date: '2026-04-15', total_amd: 1000000, status: 'paid' });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'TOP-1',
+      issue_date: '2026-03-15',
+      due_date: '2026-04-15',
+      total_amd: 1000000,
+      status: 'paid',
+    });
     const html = await renderDashboard(freshDb, '2026-06-20');
     assert.ok(html.includes('Big Customer LLC'), 'customer name');
     assert.ok(html.includes('99999999'), 'hvhh');
@@ -221,15 +299,20 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     await seedInvoice(freshDb, {
       customer_id: xssCustId,
       invoice_number: 'INV"><img src=x>',
-      issue_date: '2026-05-01', due_date: '2026-05-15',
-      total_amd: 10000, status: 'sent',
+      issue_date: '2026-05-01',
+      due_date: '2026-05-15',
+      total_amd: 10000,
+      status: 'sent',
     });
     const html = await renderDashboard(freshDb, '2026-06-20');
     // The raw <script> must NOT appear — must be escaped to &lt;script&gt;
     assert.ok(!html.includes('<script>alert'), 'raw <script> tag must not be in HTML');
     assert.ok(html.includes('&lt;script&gt;alert'), 'script tag must be HTML-escaped');
     assert.ok(!html.includes('INV"><img'), 'raw invoice number with attributes must not appear');
-    assert.ok(html.includes('INV&quot;&gt;&lt;img'), 'invoice number with HTML chars must be escaped');
+    assert.ok(
+      html.includes('INV&quot;&gt;&lt;img'),
+      'invoice number with HTML chars must be escaped',
+    );
   });
 
   test('9. rejects bad asOfDate format', async () => {
@@ -246,9 +329,12 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const custId = await seedCustomer(freshDb, { name: 'Limit Co' });
     for (let i = 0; i < 5; i++) {
       await seedInvoice(freshDb, {
-        customer_id: custId, invoice_number: `L-${i}`,
-        issue_date: '2026-01-01', due_date: `2026-05-0${i + 1}`,
-        total_amd: 10000, status: 'sent',
+        customer_id: custId,
+        invoice_number: `L-${i}`,
+        issue_date: '2026-01-01',
+        due_date: `2026-05-0${i + 1}`,
+        total_amd: 10000,
+        status: 'sent',
       });
     }
     const html = await renderDashboard(freshDb, '2026-06-20', { overdueLimit: 2 });
@@ -260,7 +346,14 @@ describe('CFO dashboard — server-rendered HTML view', () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
     const custId = await seedCustomer(freshDb, { name: 'Fmt Co' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'FMT-1', issue_date: '2026-06-15', due_date: '2026-07-15', total_amd: 1234567, status: 'sent' });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'FMT-1',
+      issue_date: '2026-06-15',
+      due_date: '2026-07-15',
+      total_amd: 1234567,
+      status: 'sent',
+    });
     const html = await renderDashboard(freshDb, '2026-06-20');
     assert.ok(html.includes('1 234 567 AMD'), 'AMD formatted with space separators');
   });
@@ -374,8 +467,18 @@ describe('CFO dashboard — server-rendered HTML view', () => {
   test('22. dashboard still escapes user-supplied data (XSS safety preserved)', async () => {
     const freshSqlite = makeRealDb();
     const freshDb = makePgAdapter(freshSqlite);
-    const custId = await seedCustomer(freshDb, { name: '<script>alert(1)</script>', hvhh: '11111111' });
-    await seedInvoice(freshDb, { customer_id: custId, invoice_number: 'XSS-1', issue_date: '2026-06-01', due_date: '2026-07-01', total_amd: 50000, status: 'sent' });
+    const custId = await seedCustomer(freshDb, {
+      name: '<script>alert(1)</script>',
+      hvhh: '11111111',
+    });
+    await seedInvoice(freshDb, {
+      customer_id: custId,
+      invoice_number: 'XSS-1',
+      issue_date: '2026-06-01',
+      due_date: '2026-07-01',
+      total_amd: 50000,
+      status: 'sent',
+    });
     const html = await renderDashboard(freshDb, '2026-06-20', { locale: 'hy' });
     // User data must be escaped even when serving in Armenian.
     assert.ok(!html.includes('<script>alert(1)</script>'), 'raw script tag must not appear');

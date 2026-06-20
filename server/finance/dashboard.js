@@ -259,6 +259,10 @@ function renderVatSection(locale, v) {
  * @param {number} [opts.overdueLimit=10]  how many overdue invoices to show
  * @param {number} [opts.topCustomersLimit=10]
  * @param {string} [opts.locale='en']  one of LOCALES (hy/en/ru); unknown values fall back to 'en'
+ * @param {number} [opts.tenantId=0]  tenant scope; defaults to the bootstrap
+ *   tenant. Pre-wave-13 callers can omit this; the 5 report functions
+ *   then default to tenant 0 (the row default), which matches the
+ *   pre-migration data.
  * @returns {Promise<string>}  the full HTML page
  */
 export async function renderDashboard(db, asOfDate, opts = {}) {
@@ -268,16 +272,19 @@ export async function renderDashboard(db, asOfDate, opts = {}) {
   const locale = resolveLocale(opts.locale);
   const overdueLimit = opts.overdueLimit ?? 10;
   const topLimit = opts.topCustomersLimit ?? 10;
+  const tenantId = opts.tenantId ?? 0;
   const yearMonth = asOfDate.substring(0, 7);
   const yearStart = `${asOfDate.substring(0, 4)}-01-01`;
 
-  // Run all 5 reports in parallel — they're independent reads.
+  // Run all 5 reports in parallel — they're independent reads. Each is
+  // scoped to the caller's tenantId so a multi-tenant deployment can
+  // render the dashboard per tenant without any cross-tenant data leak.
   const [arAging, overdue, monthRevenue, topCustomers, vatSummary] = await Promise.all([
-    getArAging(db, asOfDate),
-    listOverdueInvoices(db, asOfDate, overdueLimit),
-    getMonthlyRevenue(db, yearMonth),
-    getTopCustomers(db, { since: yearStart, until: asOfDate, limit: topLimit }),
-    getVatSummary(db, yearStart, asOfDate),
+    getArAging(db, asOfDate, tenantId),
+    listOverdueInvoices(db, asOfDate, overdueLimit, tenantId),
+    getMonthlyRevenue(db, yearMonth, tenantId),
+    getTopCustomers(db, { since: yearStart, until: asOfDate, limit: topLimit }, tenantId),
+    getVatSummary(db, yearStart, asOfDate, tenantId),
   ]);
 
   return `<!DOCTYPE html>

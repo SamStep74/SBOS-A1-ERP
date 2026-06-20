@@ -88,6 +88,38 @@ Systems, Operational Runbook). Frame it as: _"Salesforce-style
 composition, with field-level redaction on top. Defense in depth,
 not defense in checkboxes."_
 
+**Then say:** _"The library is one thing — the bootable server is
+another. Here's the entire product on one port."_
+
+```bash
+npm run serve
+# → [sbos-server] opening DB at ./.sbos.db
+# → [sbos-server] listening on http://127.0.0.1:3000
+```
+
+In a second terminal:
+
+```bash
+curl -s http://127.0.0.1:3000/api/health
+# → {"ok":true,"version":"0.1.0"}
+
+curl -s http://127.0.0.1:3000/api/rbac/permissions | head -c 200
+# → {"version":1,"categories":[ ... ]}
+
+curl -s "http://127.0.0.1:3000/api/finance/dashboard?asOfDate=2026-06-20" | head -c 200
+# → <!DOCTYPE html><html lang="en"><head>...CFO Dashboard...
+```
+
+Every domain module you saw in §2 and §3 (RBAC, finance, l10n-am,
+e-invoice) is now reachable over HTTP through one Express entry
+point. `server/index.js` wires the Fastify-style RBAC routes through
+a thin facade; `server/finance/routes.js` is a 50-line wrapper
+around the pure finance functions; `bin/sbos-server.mjs` opens a
+`node:sqlite` file at `process.env.SBOS_DB` (defaults to `./.sbos.db`)
+and applies the schema. The whole stack — Express, body parser, auth
+middleware, RBAC, finance, dashboard, health, 404, 500 — fits in
+one `npm run serve`.
+
 ---
 
 ## 3. l10n-am fiscal walk (10 minutes) — "Armenian tax law, implemented"

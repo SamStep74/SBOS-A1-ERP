@@ -59,52 +59,52 @@ function pickAdapter(db) {
 function pgAdapter(db) {
   return {
     kind: 'pg',
-    async getInvoice(id) {
+    async getInvoice(id, tenantId) {
       const { rows } = await db.query(
         `SELECT id, customer_id, invoice_number, issue_date, due_date,
                 subtotal_amd, vat_amd, total_amd, status, notes,
                 created_at, updated_at
          FROM finance.invoices
-         WHERE id = $1`,
-        [id],
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
       );
       return rows[0] ?? null;
     },
-    async sumPayments(invoiceId) {
+    async sumPayments(invoiceId, tenantId) {
       const { rows } = await db.query(
         `SELECT COALESCE(SUM(amount_amd), 0)::bigint AS paid_amd
          FROM finance.payments
-         WHERE invoice_id = $1`,
-        [invoiceId],
+         WHERE tenant_id = $1 AND invoice_id = $2`,
+        [tenantId, invoiceId],
       );
       return Number(rows[0]?.paid_amd ?? 0);
     },
-    async insertPayment(p) {
+    async insertPayment(p, tenantId) {
       const { rows } = await db.query(
         `INSERT INTO finance.payments
-           (invoice_id, paid_at, amount_amd, method, reference)
-         VALUES ($1, $2, $3, $4, $5)
+           (invoice_id, paid_at, amount_amd, method, reference, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, invoice_id, paid_at, amount_amd, method, reference, created_at`,
-        [p.invoice_id, p.paid_at, p.amount_amd, p.method, p.reference],
+        [p.invoice_id, p.paid_at, p.amount_amd, p.method, p.reference, tenantId],
       );
       return rows[0];
     },
-    async updateInvoiceStatus(id, status) {
+    async updateInvoiceStatus(id, status, tenantId) {
       const updated_at = new Date().toISOString();
       await db.query(
         `UPDATE finance.invoices
          SET status = $1, updated_at = $2
-         WHERE id = $3`,
-        [status, updated_at, id],
+         WHERE tenant_id = $3 AND id = $4`,
+        [status, updated_at, tenantId, id],
       );
     },
-    async listPayments(invoiceId) {
+    async listPayments(invoiceId, tenantId) {
       const { rows } = await db.query(
         `SELECT id, invoice_id, paid_at, amount_amd, method, reference
          FROM finance.payments
-         WHERE invoice_id = $1
+         WHERE tenant_id = $1 AND invoice_id = $2
          ORDER BY paid_at ASC, id ASC`,
-        [invoiceId],
+        [tenantId, invoiceId],
       );
       return rows;
     },
@@ -114,36 +114,36 @@ function pgAdapter(db) {
 function sqliteAdapter(db) {
   return {
     kind: 'sqlite',
-    async getInvoice(id) {
+    async getInvoice(id, tenantId) {
       const row = db
         .prepare(
           `SELECT id, customer_id, invoice_number, issue_date, due_date,
                   subtotal_amd, vat_amd, total_amd, status, notes,
                   created_at, updated_at
            FROM finance.invoices
-           WHERE id = ?`,
+           WHERE tenant_id = ? AND id = ?`,
         )
-        .get(id);
+        .get(tenantId, id);
       return row ?? null;
     },
-    async sumPayments(invoiceId) {
+    async sumPayments(invoiceId, tenantId) {
       const row = db
         .prepare(
           `SELECT COALESCE(SUM(amount_amd), 0) AS paid_amd
            FROM finance.payments
-           WHERE invoice_id = ?`,
+           WHERE tenant_id = ? AND invoice_id = ?`,
         )
-        .get(invoiceId);
+        .get(tenantId, invoiceId);
       return Number(row?.paid_amd ?? 0);
     },
-    async insertPayment(p) {
+    async insertPayment(p, tenantId) {
       const info = db
         .prepare(
           `INSERT INTO finance.payments
-             (invoice_id, paid_at, amount_amd, method, reference)
-           VALUES (?, ?, ?, ?, ?)`,
+             (invoice_id, paid_at, amount_amd, method, reference, tenant_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(p.invoice_id, p.paid_at, p.amount_amd, p.method, p.reference);
+        .run(p.invoice_id, p.paid_at, p.amount_amd, p.method, p.reference, tenantId);
       const id = Number(info.lastInsertRowid);
       // Sqlite has no RETURNING — fetch the row back so the caller sees the
       // DB-assigned id and created_at.
@@ -156,23 +156,23 @@ function sqliteAdapter(db) {
         .get(id);
       return row ?? null;
     },
-    async updateInvoiceStatus(id, status) {
+    async updateInvoiceStatus(id, status, tenantId) {
       const updated_at = new Date().toISOString();
       db.prepare(
         `UPDATE finance.invoices
            SET status = ?, updated_at = ?
-           WHERE id = ?`,
-      ).run(status, updated_at, id);
+         WHERE tenant_id = ? AND id = ?`,
+      ).run(status, updated_at, tenantId, id);
     },
-    async listPayments(invoiceId) {
+    async listPayments(invoiceId, tenantId) {
       return db
         .prepare(
           `SELECT id, invoice_id, paid_at, amount_amd, method, reference
            FROM finance.payments
-           WHERE invoice_id = ?
+           WHERE tenant_id = ? AND invoice_id = ?
            ORDER BY paid_at ASC, id ASC`,
         )
-        .all(invoiceId);
+        .all(tenantId, invoiceId);
     },
   };
 }
@@ -248,6 +248,10 @@ function validatePaidAt(paidAt) {
  * responsibility — the adapter issues sequential statements; wrap with a
  * real BEGIN/COMMIT in production if your DB requires it.
  *
+ * Wave-13: every SELECT and INSERT is scoped to the caller's tenant
+ * (`tenantId`, default 0 = bootstrap). The new payment row is written
+ * with the same tenant_id so future cross-tenant queries can't see it.
+ *
  * @param {Db} db pg-style or better-sqlite3-style DB.
  * @param {{
  *   invoice_id: number,
@@ -256,10 +260,12 @@ function validatePaidAt(paidAt) {
  *   reference?: string,    // ≤ 256 chars
  *   paid_at?: string       // ISO timestamp; defaults to now()
  * }} input
+ * @param {number} [tenantId=0] tenant scope; pre-wave-13 callers omit
+ *   this and see only the bootstrap tenant's data (back-compat).
  * @returns {Promise<{id: number, invoice_id: number, paid_at: string, amount_amd: number, method: string, reference: string|null, created_at: string}>}
  * @throws {ValueError} on validation failure.
  */
-export async function recordPayment(db, input) {
+export async function recordPayment(db, input, tenantId = 0) {
   if (!input || typeof input !== 'object') {
     throw new ValueError('input must be an object');
   }
@@ -276,7 +282,7 @@ export async function recordPayment(db, input) {
   const paid_at = validatePaidAt(input.paid_at);
 
   // ── Load invoice + pre-state checks ──
-  const invoice = await adapter.getInvoice(invoice_id);
+  const invoice = await adapter.getInvoice(invoice_id, tenantId);
   if (!invoice) {
     // The DB would also enforce this via the FK on finance.payments.invoice_id,
     // but we surface it as a ValueError before issuing the INSERT — cleaner
@@ -293,7 +299,7 @@ export async function recordPayment(db, input) {
   // but balance_amd === 0, refuse. If it's marked paid with a non-zero balance
   // (e.g., an out-of-band refund since), still allow the new payment.
   if (invoice.status === 'paid') {
-    const alreadyPaid = await adapter.sumPayments(invoice_id);
+    const alreadyPaid = await adapter.sumPayments(invoice_id, tenantId);
     const balance = Number(invoice.total_amd) - alreadyPaid;
     if (balance === 0) {
       throw new ValueError(`invoice ${invoice_id} is already fully paid (balance_amd = 0)`);
@@ -301,19 +307,22 @@ export async function recordPayment(db, input) {
   }
 
   // ── INSERT ──
-  const inserted = await adapter.insertPayment({
-    invoice_id,
-    paid_at,
-    amount_amd,
-    method,
-    reference,
-  });
+  const inserted = await adapter.insertPayment(
+    {
+      invoice_id,
+      paid_at,
+      amount_amd,
+      method,
+      reference,
+    },
+    tenantId,
+  );
 
   // ── Auto-transition: re-read cumulative sum, update invoice if covered ──
   const total = Number(invoice.total_amd);
-  const paidNow = await adapter.sumPayments(invoice_id);
+  const paidNow = await adapter.sumPayments(invoice_id, tenantId);
   if (paidNow >= total && PAYABLE_STATUSES.has(invoice.status)) {
-    await adapter.updateInvoiceStatus(invoice_id, 'paid');
+    await adapter.updateInvoiceStatus(invoice_id, 'paid', tenantId);
   }
 
   return inserted;
@@ -323,35 +332,37 @@ export async function recordPayment(db, input) {
  * List all payments for an invoice, ordered by `paid_at` ASC, then `id` ASC
  * (so equal timestamps get a deterministic tie-break).
  *
+ * @param {number} [tenantId=0]
  * @returns {Promise<Array<{id, invoice_id, paid_at, amount_amd, method, reference}>>}
  */
-export async function listPaymentsForInvoice(db, invoice_id) {
+export async function listPaymentsForInvoice(db, invoice_id, tenantId = 0) {
   const adapter = pickAdapter(db);
   const id = Number(invoice_id);
   if (!Number.isInteger(id) || id <= 0) {
     throw new ValueError(`invoice_id must be a positive integer (got ${String(invoice_id)})`);
   }
-  return adapter.listPayments(id);
+  return adapter.listPayments(id, tenantId);
 }
 
 /**
  * Compute the reconciliation summary for an invoice: total, paid, balance,
  * and current status. `balance_amd` may be negative for overpayments.
  *
+ * @param {number} [tenantId=0]
  * @returns {Promise<{total_amd: number, paid_amd: number, balance_amd: number, status: string}>}
  */
-export async function reconcileInvoice(db, invoice_id) {
+export async function reconcileInvoice(db, invoice_id, tenantId = 0) {
   const adapter = pickAdapter(db);
   const id = Number(invoice_id);
   if (!Number.isInteger(id) || id <= 0) {
     throw new ValueError(`invoice_id must be a positive integer (got ${String(invoice_id)})`);
   }
-  const invoice = await adapter.getInvoice(id);
+  const invoice = await adapter.getInvoice(id, tenantId);
   if (!invoice) {
     throw new ValueError(`invoice ${id} not found`);
   }
   const total_amd = Number(invoice.total_amd);
-  const paid_amd = await adapter.sumPayments(id);
+  const paid_amd = await adapter.sumPayments(id, tenantId);
   return {
     total_amd,
     paid_amd,

@@ -256,6 +256,41 @@ CREATE INDEX IF NOT EXISTS idx_sbos_rbac_imp_actor ON sbos_rbac_impersonation_lo
 CREATE INDEX IF NOT EXISTS idx_sbos_rbac_imp_target ON sbos_rbac_impersonation_log(target_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sbos_rbac_imp_tenant ON sbos_rbac_impersonation_log(tenant_id, started_at DESC);
 
+-- ───────────── Profiles (Phase 0.3) ─────────────
+--
+-- Reusable role+permission-set bundles for new users. Catalog stays in
+-- code; profiles are tenant data. The PS list is denormalized as JSON
+-- on the profile row (mirrors how sbos_rbac_roles stores app_set_json).
+-- See server/rbac/migrations/0002_profiles.sql for the canonical
+-- versioned DDL and server/rbac/profiles.js for the CRUD functions.
+
+CREATE TABLE IF NOT EXISTS sbos_rbac_profiles (
+  id                     TEXT PRIMARY KEY,
+  tenant_id              INTEGER NOT NULL DEFAULT 0,
+  label                  TEXT NOT NULL,
+  description            TEXT NOT NULL DEFAULT '',
+  role_id                TEXT NOT NULL,
+  permission_set_ids_json TEXT NOT NULL DEFAULT '[]',
+  is_system              INTEGER NOT NULL DEFAULT 0,
+  created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sbos_rbac_profiles_tenant ON sbos_rbac_profiles(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_sbos_rbac_profiles_role   ON sbos_rbac_profiles(tenant_id, role_id);
+
+CREATE TABLE IF NOT EXISTS sbos_rbac_user_profile (
+  user_id      INTEGER NOT NULL,
+  profile_id   TEXT NOT NULL,
+  tenant_id    INTEGER NOT NULL,
+  applied_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  applied_by   INTEGER,
+  PRIMARY KEY (tenant_id, user_id, profile_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sbos_rbac_user_profile_user    ON sbos_rbac_user_profile(user_id, profile_id);
+CREATE INDEX IF NOT EXISTS idx_sbos_rbac_user_profile_profile ON sbos_rbac_user_profile(profile_id);
+
 -- ───────────── Bookkeeping ─────────────
 
 CREATE TABLE IF NOT EXISTS sbos_rbac_meta (

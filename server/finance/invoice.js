@@ -116,7 +116,7 @@ function validateCreateInput(input) {
 // Public API.
 // ────────────────────────────────────────────────────────────────────────
 
-export async function createInvoice(db, input) {
+export async function createInvoice(db, input, tenantId = 0) {
   validateCreateInput(input);
   const {
     customer_id,
@@ -128,19 +128,25 @@ export async function createInvoice(db, input) {
     notes = null,
   } = input;
 
-  // FK: customer must exist.
-  const custCheck = await runQuery(db, 'SELECT 1 FROM finance.customers WHERE id = $1', [
-    customer_id,
-  ]);
+  // FK: customer must exist (scoped to the caller's tenant — a customer
+  // in another tenant is invisible here, so the FK check correctly fails).
+  const custCheck = await runQuery(
+    db,
+    'SELECT 1 FROM finance.customers WHERE tenant_id = $1 AND id = $2',
+    [tenantId, customer_id],
+  );
   if (!custCheck.rows || custCheck.rows.length === 0) {
     throw new ValueError(`customer_id ${customer_id} does not exist (foreign-key violation)`);
   }
 
-  // UNIQUE: invoice_number must not already exist.
+  // UNIQUE: invoice_number must not already exist WITHIN the tenant.
+  // (invoice_number is globally unique per the schema's UNIQUE
+  // constraint, but we still scope the existence check so the error
+  // message reflects "this tenant already has it".)
   const uniqCheck = await runQuery(
     db,
-    'SELECT id FROM finance.invoices WHERE invoice_number = $1',
-    [invoice_number],
+    'SELECT id FROM finance.invoices WHERE tenant_id = $1 AND invoice_number = $2',
+    [tenantId, invoice_number],
   );
   if (uniqCheck.rows && uniqCheck.rows.length > 0) {
     throw new ValueError(
@@ -163,8 +169,8 @@ export async function createInvoice(db, input) {
     `INSERT INTO finance.invoices
        (customer_id, invoice_number, issue_date, due_date,
         subtotal_amd, vat_amd, total_amd, status, notes,
-        created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        tenant_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING id`,
     [
       customer_id,
@@ -176,6 +182,7 @@ export async function createInvoice(db, input) {
       total_amd,
       'draft',
       notes,
+      tenantId,
       now,
       now,
     ],
@@ -190,38 +197,43 @@ export async function createInvoice(db, input) {
     invoiceId = Number(lastId.rows[0].id);
   }
 
-  // INSERT each line item.
+  // INSERT each line item. tenant_id is propagated so a future
+  // "all lines for tenant X" query can use the column without a join.
   for (const line of lines) {
     const line_total_amd = roundAmd(line.quantity * line.unit_price_amd);
     await runQuery(
       db,
       `INSERT INTO finance.invoice_lines
-         (invoice_id, description, quantity, unit_price_amd, line_total_amd)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [invoiceId, line.description, line.quantity, line.unit_price_amd, line_total_amd],
+         (invoice_id, description, quantity, unit_price_amd, line_total_amd, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [invoiceId, line.description, line.quantity, line.unit_price_amd, line_total_amd, tenantId],
     );
   }
 
-  return await getInvoice(db, invoiceId);
+  return await getInvoice(db, invoiceId, tenantId);
 }
 
-export async function getInvoice(db, id) {
+export async function getInvoice(db, id, tenantId = 0) {
   assertId(id, 'id');
-  const invResult = await runQuery(db, 'SELECT * FROM finance.invoices WHERE id = $1', [id]);
+  const invResult = await runQuery(
+    db,
+    'SELECT * FROM finance.invoices WHERE tenant_id = $1 AND id = $2',
+    [tenantId, id],
+  );
   if (!invResult.rows || invResult.rows.length === 0) {
     return null;
   }
   const invoice = invResult.rows[0];
   const linesResult = await runQuery(
     db,
-    'SELECT * FROM finance.invoice_lines WHERE invoice_id = $1',
-    [id],
+    'SELECT * FROM finance.invoice_lines WHERE tenant_id = $1 AND invoice_id = $2',
+    [tenantId, id],
   );
   invoice.lines = linesResult.rows || [];
   return invoice;
 }
 
-export async function listInvoices(db, filters = {}) {
+export async function listInvoices(db, filters = {}, tenantId = 0) {
   // Validate filter types.
   if (filters.status !== undefined && typeof filters.status !== 'string') {
     throw new ValueError('filters.status must be a string');
@@ -241,9 +253,11 @@ export async function listInvoices(db, filters = {}) {
     }
   }
 
-  // Build the WHERE clause dynamically.
-  const conds = [];
-  const params = [];
+  // Build the WHERE clause dynamically. tenant_id is the first condition
+  // so the planner can use the composite (tenant_id, status) /
+  // (tenant_id, issue_date) indexes.
+  const conds = ['tenant_id = $1'];
+  const params = [tenantId];
   if (filters.status !== undefined) {
     params.push(filters.status);
     conds.push(`status = $${params.length}`);
@@ -261,10 +275,7 @@ export async function listInvoices(db, filters = {}) {
     conds.push(`issue_date <= $${params.length}`);
   }
 
-  let sql = 'SELECT * FROM finance.invoices';
-  if (conds.length > 0) {
-    sql += ' WHERE ' + conds.join(' AND ');
-  }
+  let sql = 'SELECT * FROM finance.invoices WHERE ' + conds.join(' AND ');
   sql += ' ORDER BY id DESC';
   if (filters.limit !== undefined) {
     params.push(filters.limit);
@@ -275,13 +286,13 @@ export async function listInvoices(db, filters = {}) {
   return result.rows || [];
 }
 
-export async function updateInvoice(db, id, patch) {
+export async function updateInvoice(db, id, patch, tenantId = 0) {
   assertId(id, 'id');
   if (!patch || typeof patch !== 'object') {
     throw new ValueError('patch must be an object');
   }
 
-  const current = await getInvoice(db, id);
+  const current = await getInvoice(db, id, tenantId);
   if (!current) {
     throw new ValueError(`invoice ${id} not found`);
   }
@@ -302,24 +313,30 @@ export async function updateInvoice(db, id, patch) {
     );
     const newTotal = newSubtotal + newVat;
 
-    // Replace all lines.
-    await runQuery(db, 'DELETE FROM finance.invoice_lines WHERE invoice_id = $1', [id]);
+    // Replace all lines. Scoped to the tenant so a stray row from
+    // another tenant (which shouldn't exist, but defense in depth) is
+    // not deleted here.
+    await runQuery(
+      db,
+      'DELETE FROM finance.invoice_lines WHERE tenant_id = $1 AND invoice_id = $2',
+      [tenantId, id],
+    );
     for (const line of patch.lines) {
       const line_total_amd = roundAmd(line.quantity * line.unit_price_amd);
       await runQuery(
         db,
         `INSERT INTO finance.invoice_lines
-           (invoice_id, description, quantity, unit_price_amd, line_total_amd)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [id, line.description, line.quantity, line.unit_price_amd, line_total_amd],
+           (invoice_id, description, quantity, unit_price_amd, line_total_amd, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, line.description, line.quantity, line.unit_price_amd, line_total_amd, tenantId],
       );
     }
     await runQuery(
       db,
       `UPDATE finance.invoices
          SET subtotal_amd = $1, vat_amd = $2, total_amd = $3, updated_at = $4
-       WHERE id = $5`,
-      [newSubtotal, newVat, newTotal, now, id],
+       WHERE tenant_id = $5 AND id = $6`,
+      [newSubtotal, newVat, newTotal, now, tenantId, id],
     );
   }
 
@@ -331,8 +348,8 @@ export async function updateInvoice(db, id, patch) {
         db,
         `UPDATE finance.invoices
            SET status = $1, sent_at = $2, updated_at = $3
-         WHERE id = $4`,
-        ['sent', now, now, id],
+         WHERE tenant_id = $4 AND id = $5`,
+        ['sent', now, now, tenantId, id],
       );
     } else if (patch.status !== current.status) {
       throw new ValueError(
@@ -342,10 +359,10 @@ export async function updateInvoice(db, id, patch) {
     // patch.status === current.status → no-op, no error.
   }
 
-  return await getInvoice(db, id);
+  return await getInvoice(db, id, tenantId);
 }
 
-export async function voidInvoice(db, id, reason) {
+export async function voidInvoice(db, id, reason, tenantId = 0) {
   assertId(id, 'id');
   if (!reason || typeof reason !== 'string' || reason.length === 0) {
     throw new ValueError('voidInvoice requires a non-empty reason string');
@@ -354,7 +371,7 @@ export async function voidInvoice(db, id, reason) {
     throw new ValueError('void reason must be 500 characters or fewer');
   }
 
-  const current = await getInvoice(db, id);
+  const current = await getInvoice(db, id, tenantId);
   if (!current) {
     throw new ValueError(`invoice ${id} not found`);
   }
@@ -364,9 +381,9 @@ export async function voidInvoice(db, id, reason) {
     db,
     `UPDATE finance.invoices
        SET status = $1, voided_at = $2, void_reason = $3, updated_at = $4
-     WHERE id = $5`,
-    ['void', now, reason, now, id],
+     WHERE tenant_id = $5 AND id = $6`,
+    ['void', now, reason, now, tenantId, id],
   );
 
-  return await getInvoice(db, id);
+  return await getInvoice(db, id, tenantId);
 }
