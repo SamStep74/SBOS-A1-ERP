@@ -27,7 +27,15 @@ import {
   requirePerm as expressRequirePerm,
   requireRole as expressRequireRole,
 } from './express-adapter.js';
-import { requirePermFastify, requireAnyPerm } from './guards.js';
+import {
+  requirePermFastify,
+  requireAnyPerm,
+  requireAllPermissions,
+  checkSensitivity,
+  enforceSessionPolicy,
+  FLS_RULES,
+  RLS_RULES,
+} from './guards.js';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
@@ -1843,6 +1851,233 @@ describe('Wave 7.2 — permissions.js: requireKey helper', () => {
       () => requireKey('not.a.real.permission'),
       (err) => err.statusCode === 500 && err.code === 'unknown_permission' && /Unknown permission/.test(err.message),
     );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 10 — close the rbac/guards.js branch-coverage gap (was 80.88%).
+// The uncovered branches are: requireAllPermissions throw, checkSensitivity
+// (no_permission + mfa_required), team-scope record clause, the
+// impersonation_widens_rights branch, and enforceSessionPolicy (mfa +
+// hard-limit). All paths are unit-testable with a tiny user/session object.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('Wave 10 — rbac/guards.js branch coverage', () => {
+  test('requireAllPermissions: throws 403 rbac_forbidden when any perm is missing', () => {
+    // SalesRep does NOT have system.org.update but has crm.lead.read.
+    // requireAllPermissions should throw on the missing perm.
+    const user = { id: 1, role: 'SalesRep', permission_set_ids: [] };
+    assert.throws(
+      () => requireAllPermissions(user, ['crm.lead.read', 'system.org.update']),
+      (err) => err.statusCode === 403
+        && err.code === 'rbac_forbidden'
+        && Array.isArray(err.requiredAll)
+        && err.requiredAll.includes('system.org.update'),
+    );
+  });
+
+  test('requireAllPermissions: returns undefined when all perms are held', () => {
+    const user = { id: 1, role: 'Owner', permission_set_ids: [] };
+    // Owner should have everything.
+    assert.equal(
+      requireAllPermissions(user, ['crm.lead.read', 'crm.lead.delete']),
+      undefined,
+    );
+  });
+
+  test('checkSensitivity: returns no_user when user is null/undefined', () => {
+    const r = checkSensitivity(null, 'crm.lead.read');
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'no_user');
+  });
+
+  test('checkSensitivity: returns no_permission when user lacks the perm', () => {
+    // SalesRep doesn't have finance.invoice.create.
+    const r = checkSensitivity(
+      { id: 1, role: 'SalesRep', permission_set_ids: [] },
+      'finance.invoice.create',
+    );
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'no_permission');
+  });
+
+  test('checkSensitivity: returns mfa_required when high-sensitivity perm + unverified MFA', () => {
+    // Critical-sensitivity perms (e.g. system.tenant.create) require
+    // MFA. With mfa_required=true + mfa_verified=false, the guard
+    // should return mfa_required.
+    const user = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
+    const r = checkSensitivity(user, 'system.tenant.create');
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'mfa_required');
+    assert.equal(r.sensitivity, 'critical');
+  });
+
+  test('checkSensitivity: returns allowed=true when MFA is verified', () => {
+    const user = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
+    const r = checkSensitivity(user, 'system.tenant.create');
+    assert.equal(r.allowed, true);
+  });
+
+  test('checkSensitivity: returns no_permission for unknown perm (defensive code)', () => {
+    // The 'no def in PERMISSIONS' branch on line 141 is essentially
+    // unreachable because hasPermission can only return true for keys
+    // that ARE in the catalog. The defensive line exists for
+    // forward-compat with custom permission set grants. This test
+    // documents the actual current behavior.
+    const user = { id: 1, role: 'Owner', permission_set_ids: [] };
+    const r = checkSensitivity(user, 'not.a.real.permission');
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'no_permission');
+  });
+
+  test('requirePermissionWithSensitivity: throws mfa_required for high + unverified', () => {
+    const user = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
+    assert.throws(
+      () => requirePermissionWithSensitivity(user, 'system.tenant.create'),
+      (err) => err.code === 'rbac_mfa_required' && err.statusCode === 401,
+    );
+  });
+
+  test('requirePermissionWithSensitivity: returns undefined on success', () => {
+    const user = { id: 1, role: 'Owner', permission_set_ids: [] };
+    assert.equal(
+      requirePermissionWithSensitivity(user, 'crm.lead.read'),
+      undefined,
+    );
+  });
+
+  test('recordLevelClause: team scope returns the team-membership SQL', () => {
+    // projects.task is the resource with default scope 'team'.
+    const user = { id: 42, role: 'SalesRep', permission_set_ids: [] };
+    const r = recordLevelClause(user, 'projects.task', { scopeOverride: 'team' });
+    assert.ok(r.clause);
+    assert.ok(/team_members/.test(r.clause), 'references team_members');
+    assert.deepEqual(r.params, [42]);
+  });
+
+  test('recordLevelClause: own scope returns owner_user_id = ?', () => {
+    // crm.activity defaults to own.
+    const user = { id: 7, role: 'SalesRep', permission_set_ids: [] };
+    const r = recordLevelClause(user, 'crm.activity');
+    assert.equal(r.clause, 'owner_user_id = ?');
+    assert.deepEqual(r.params, [7]);
+  });
+
+  test('recordLevelClause: Owner role short-circuits to no clause', () => {
+    const user = { id: 1, role: 'Owner', permission_set_ids: [] };
+    const r = recordLevelClause(user, 'crm.lead', { scope: 'own' });
+    assert.equal(r.clause, '');
+    assert.deepEqual(r.params, []);
+  });
+
+  test('recordLevelClause: missing rule falls back to org scope', () => {
+    // With no matching RLS rule, the scope defaults to 'org', which
+    // produces a tenant/org filter rather than no filter. This is
+    // a safe default (fail closed).
+    const user = { id: 1, role: 'SalesRep', permission_set_ids: [], org_id: 5 };
+    const r = recordLevelClause(user, 'totally.unknown.resource');
+    assert.equal(r.clause, 'org_id = ?');
+    assert.deepEqual(r.params, [5]);
+  });
+
+  test('enforceSessionPolicy: throws 401 Unauthenticated when no user', () => {
+    assert.throws(
+      () => enforceSessionPolicy(null, {}),
+      (err) => err.statusCode === 401 && /Unauthenticated/.test(err.message),
+    );
+  });
+
+  test('enforceSessionPolicy: throws mfa_required when role requires MFA but session has it', () => {
+    // Find a role that requires MFA (Owner or any role with mfaRequired=true).
+    // SalesRep doesn't require MFA. Let's use a session that has an MFA factor
+    // but the user is a role that requires MFA + mfa is unverified.
+    // Actually, looking at the code: mfa_required && !mfa_verified && session?.mfa_factor
+    // is the trigger. So we need session.mfa_factor to be truthy.
+    const user = {
+      id: 1,
+      role: 'Owner', // Owner has mfaRequired in the chain
+      mfa_required: true,
+      mfa_verified: false,
+    };
+    const session = { mfa_factor: 'totp' };
+    assert.throws(
+      () => enforceSessionPolicy(user, session),
+      (err) => err.code === 'mfa_required' && err.statusCode === 401,
+    );
+  });
+
+  test('enforceSessionPolicy: throws session_hard_limit when session is too old', () => {
+    // Make a session that's older than the hard limit.
+    const user = { id: 1, role: 'Owner', mfa_required: false, mfa_verified: true };
+    const oldDate = new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(); // 1 day ago
+    const session = { created_at: oldDate, mfa_factor: null };
+    assert.throws(
+      () => enforceSessionPolicy(user, session),
+      (err) => err.code === 'session_hard_limit' && err.statusCode === 401,
+    );
+  });
+
+  test('enforceSessionPolicy: returns undefined when everything is fine', () => {
+    const user = { id: 1, role: 'Owner', mfa_required: false, mfa_verified: true };
+    const session = { created_at: new Date().toISOString(), mfa_factor: null };
+    assert.equal(enforceSessionPolicy(user, session), undefined);
+  });
+
+  test('impersonation_widens_rights: deny when impersonator lacks the perm', () => {
+    // The pure requirePerm in guards.js also handles the
+    // impersonation_widens_rights path. Setup: an impersonated user
+    // (with the perm) but the impersonator lacks it.
+    const impersonated = { id: 2, role: 'Owner', permission_set_ids: [] };
+    const impersonator = { id: 1, role: 'SalesRep', permission_set_ids: [] };
+    const ctx = { user: impersonated, impersonator };
+    // requirePerm returns false and stamps the outcome.
+    const allowed = requirePerm('finance.invoice.create', ctx);
+    assert.equal(allowed, false);
+    assert.equal(ctx.outcome.allowed, false);
+    assert.equal(ctx.outcome.reason, 'impersonation_widens_rights');
+  });
+
+  test('FLS_RULES catalog: exposes the field policy map', () => {
+    // FLS_RULES is a frozen object keyed by field path. Each value has
+    // minPermission + label. Spot-check a known field.
+    assert.equal(typeof FLS_RULES, 'object');
+    const rule = FLS_RULES['hr.employee.ssn'];
+    assert.ok(rule, 'hr.employee.ssn should be in FLS_RULES');
+    assert.equal(typeof rule.minPermission, 'string');
+    assert.equal(typeof rule.label, 'string');
+  });
+
+  test('RLS_RULES catalog: exposes the record-rule array', () => {
+    // RLS_RULES is a frozen array of { resource, defaultScope, ... }.
+    assert.ok(Array.isArray(RLS_RULES));
+    assert.ok(RLS_RULES.length > 0, 'at least one RLS rule');
+    const lead = RLS_RULES.find((r) => r.resource === 'crm.lead');
+    if (lead) {
+      assert.ok(['own', 'team', 'org', 'custom'].includes(lead.defaultScope));
+    }
+  });
+
+  test('canImpersonate: returns false for unknown actor + target', () => {
+    // canImpersonate has multiple branches — exercise a few.
+    assert.equal(canImpersonate({ id: 9999, role: 'NoSuchRole' }, { id: 1, role: 'NoSuchRole' }), false);
   });
 });
 
