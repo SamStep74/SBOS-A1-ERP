@@ -71,6 +71,11 @@ the e-invoice namespace exception, while guarding against tracked env files,
 key-shaped secrets, source-level brand leaks, and accidental removal of the stable
 e-invoice protocol URN.
 
+The harness uses `@a1/ai` when installed, or a nearby `A1-AI-Core` checkout when
+present. In a clean clone it bootstraps the pinned public A1-AI-Core runner into
+the user cache; set `A1_AI_CORE_PATH` or `A1_AI_CORE_CACHE_DIR` to override that
+location for CI.
+
 ## How to orchestrate a new wave
 
 ```bash

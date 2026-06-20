@@ -52,7 +52,7 @@ function isSourceBoundaryFile(file) {
 
 function isTextFile(file) {
   return (
-    /\.(?:cjs|cts|js|jsx|json|md|mjs|mts|sh|ts|tsx|txt|yml|yaml)$/i.test(file) ||
+    /\.(?:cjs|cts|js|jsx|json|md|mjs|mts|sh|sql|ts|tsx|txt|yml|yaml)$/i.test(file) ||
     !path.extname(file)
   );
 }
@@ -211,7 +211,7 @@ if (
   errors.push('only the stable e-invoice namespace constant may carry the legacy URN');
 }
 
-console.log(`failing_checks=${errors.length ? 1 : 0}`);
+console.log(`failing_checks=${errors.length}`);
 if (errors.length) {
   console.error(`open_core_boundary_error=${errors[0]}`);
 }
