@@ -123,7 +123,7 @@ function lineVat(line = {}) {
   return { net, vat };
 }
 
-function computeVatReturn({ sales = [], purchases = [] } = {}) {
+function computeVatReturn({ sales = [], purchases = [], priorPeriodCarryForward = 0 } = {}) {
   let outputVat = 0;
   let taxableSales = 0;
   for (const s of sales) {
@@ -178,7 +178,7 @@ function computeVatReturn({ sales = [], purchases = [] } = {}) {
     inputVat: domesticInputVat,
     importInputVat,
     adjustments,
-  });
+  }, priorPeriodCarryForward);
 
   return {
     outputVat,
