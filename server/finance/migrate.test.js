@@ -97,7 +97,12 @@ function makePgMock({ failOn = null } = {}) {
 }
 
 /**
- * Build a sqlite-style mock DB. Records every SQL passed to `.exec(sql)`.
+ * Build a sqlite-style mock DB. Records every SQL passed to `.exec(sql)` and
+ * every prepared statement via `.prepare(sql).run(...params)` / `.all()`.
+ *
+ * Matches the better-sqlite3 surface used by the adapter: exec for multi-
+ * statement bodies, prepare+run for parameterized INSERTs, prepare+all for
+ * the SELECT that snapshots history.
  */
 function makeSqliteMock({ failOn = null } = {}) {
   const statements = [];
@@ -111,11 +116,34 @@ function makeSqliteMock({ failOn = null } = {}) {
       if (failOn && sql.includes(failOn)) {
         throw new Error(`SQLITE_ERROR: near "${failOn}": syntax error`);
       }
-      // Tiny model: parse name out of `INSERT INTO finance.migration_history ... VALUES ('name', ...)`
+      // Tiny model: parse name out of `INSERT INTO migration_history ...`
       const trimmed = sql.trim();
-      const m = trimmed.match(/INSERT\s+INTO\s+finance\.migration_history[^']*'([^']+)'/i);
+      const m = trimmed.match(/INSERT\s+INTO\s+(?:finance\.)?migration_history[^']*'([^']+)'/i);
       if (m) history.push({ name: m[1] });
-      // No return value for sqlite-style exec
+      // No return value for sqlite-style exec.
+    },
+    prepare(sql) {
+      statements.push(`-- prepared: ${sql}`);
+      if (failOn && sql.includes(failOn)) {
+        throw new Error(`SQLITE_ERROR: near "${failOn}": syntax error`);
+      }
+      return {
+        run(...params) {
+          // Capture the name from the first positional param (the migration
+          // filename). Matches the adapter's INSERT shape.
+          const trimmed = sql.trim();
+          if (/INSERT\s+INTO\s+(?:finance\.)?migration_history/i.test(trimmed)) {
+            history.push({ name: params[0] });
+          }
+        },
+        all() {
+          const trimmed = sql.trim();
+          if (/SELECT\s+name\s+FROM\s+(?:finance\.)?migration_history/i.test(trimmed)) {
+            return history.map((h) => ({ name: h.name }));
+          }
+          return [];
+        },
+      };
     },
   };
   return db;
@@ -138,11 +166,11 @@ function makeMigrationsDir(files) {
 
 describe('applyMigrations — pg-style mock', () => {
   test('1. empty migrations dir returns { applied: [], skipped: [] }', async () => {
-    const { dir } = makeMigrationsDir({}); // no files
+    const { dir, migDir } = makeMigrationsDir({}); // no files
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock();
-      const result = await applyMigrations(db, { migrationsDir: dir });
+      const result = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(result, { applied: [], skipped: [] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -150,13 +178,13 @@ describe('applyMigrations — pg-style mock', () => {
   });
 
   test('2. single new migration: applies it and records in history', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock();
-      const result = await applyMigrations(db, { migrationsDir: dir });
+      const result = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(result.applied, ['0001_init.sql']);
       assert.deepEqual(result.skipped, []);
       // The CREATE TABLE for the migration_history table itself should have run.
@@ -178,14 +206,14 @@ describe('applyMigrations — pg-style mock', () => {
   });
 
   test('3. running twice is a no-op the second time (idempotent)', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock();
-      const first = await applyMigrations(db, { migrationsDir: dir });
-      const second = await applyMigrations(db, { migrationsDir: dir });
+      const first = await applyMigrations(db, { migrationsDir: migDir });
+      const second = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(first.applied, ['0001_init.sql']);
       assert.deepEqual(first.skipped, []);
       assert.deepEqual(second.applied, []);
@@ -198,14 +226,14 @@ describe('applyMigrations — pg-style mock', () => {
   });
 
   test('4. two new migrations: both applied in lex order', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0002_invoices.sql': 'CREATE TABLE finance.invoices (id BIGSERIAL PRIMARY KEY);',
       '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock();
-      const result = await applyMigrations(db, { migrationsDir: dir });
+      const result = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(result.applied, ['0001_init.sql', '0002_invoices.sql']);
       assert.deepEqual(result.skipped, []);
       assert.equal(db.history.length, 2);
@@ -220,11 +248,11 @@ describe('applyMigrations — pg-style mock', () => {
     // Start with an EMPTY statements array (no history table yet). The runner
     // must issue a CREATE TABLE for finance.migration_history before reading
     // from it.
-    const { dir } = makeMigrationsDir({});
+    const { dir, migDir } = makeMigrationsDir({});
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock();
-      await applyMigrations(db, { migrationsDir: dir });
+      await applyMigrations(db, { migrationsDir: migDir });
       const sawHistoryCreate = db.statements.some((s) =>
         /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?finance\.migration_history/i.test(s),
       );
@@ -235,7 +263,7 @@ describe('applyMigrations — pg-style mock', () => {
   });
 
   test('6. failing migration: error rethrown, NOT recorded, subsequent NOT applied', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id BIGSERIAL PRIMARY KEY);',
       // 'this_is_broken' triggers the mock's failOn check.
       '0002_broken.sql': "SELECT this_is_broken FROM finance.migration_history;",
@@ -245,7 +273,7 @@ describe('applyMigrations — pg-style mock', () => {
       const { applyMigrations } = await import('./migrate.js');
       const db = makePgMock({ failOn: 'this_is_broken' });
       await assert.rejects(
-        () => applyMigrations(db, { migrationsDir: dir }),
+        () => applyMigrations(db, { migrationsDir: migDir }),
         /this_is_broken/,
         'expected the runner to rethrow the underlying SQL error',
       );
@@ -272,13 +300,13 @@ describe('applyMigrations — pg-style mock', () => {
 
 describe('applyMigrations — sqlite-style mock', () => {
   test('7. duck-type dispatch: sqlite DB (no .query) routes through db.exec', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makeSqliteMock();
-      const result = await applyMigrations(db, { migrationsDir: dir });
+      const result = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(result.applied, ['0001_init.sql']);
       assert.deepEqual(result.skipped, []);
       // The sqlite branch must have used db.exec, not db.query.
@@ -289,14 +317,14 @@ describe('applyMigrations — sqlite-style mock', () => {
   });
 
   test('8. sqlite branch: idempotent on second run', async () => {
-    const { dir } = makeMigrationsDir({
+    const { dir, migDir } = makeMigrationsDir({
       '0001_init.sql': 'CREATE TABLE finance.customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);',
     });
     try {
       const { applyMigrations } = await import('./migrate.js');
       const db = makeSqliteMock();
-      const first = await applyMigrations(db, { migrationsDir: dir });
-      const second = await applyMigrations(db, { migrationsDir: dir });
+      const first = await applyMigrations(db, { migrationsDir: migDir });
+      const second = await applyMigrations(db, { migrationsDir: migDir });
       assert.deepEqual(first.applied, ['0001_init.sql']);
       assert.deepEqual(second.applied, []);
       assert.deepEqual(second.skipped, ['0001_init.sql']);
