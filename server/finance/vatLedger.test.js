@@ -290,4 +290,50 @@ describe('finance — VAT carry-forward ledger (real DB)', () => {
     assert.equal(r3.vatToPay, 0);
     assert.equal(r3.carryForward, 5000);
   });
+
+  test('15. computeAndCloseVatPeriod accepts unwrapped sales/purchases arrays (not just { sales: [...] })', async () => {
+    // Back-compat: callers may pass either an array directly or the
+    // wrapped object form { sales: [...], purchases: [...] }. The
+    // function should handle both.
+    const freshSqlite = makeRealDb();
+    const freshDb = makePgAdapter(freshSqlite);
+    const r = await computeAndCloseVatPeriod(
+      freshDb,
+      '2026-05',
+      [{ netAmount: 100000, vatRate: 20 }], // unwrapped array, not { sales: [...] }
+      [{ netAmount: 20000, vatRate: 20, source: 'domestic' }],
+    );
+    // net = 20000 - 4000 = 16000 → vatToPay 16000, no carry-forward
+    assert.equal(r.vatToPay, 16000);
+    assert.equal(r.carryForward, 0);
+  });
+
+  test('16. computeAndCloseVatPeriod handles empty inputs without throwing', async () => {
+    // All-empty period → vatToPay 0, carryForward 0.
+    const freshSqlite = makeRealDb();
+    const freshDb = makePgAdapter(freshSqlite);
+    const r = await computeAndCloseVatPeriod(freshDb, '2026-06', [], []);
+    assert.equal(r.vatToPay, 0);
+    assert.equal(r.carryForward, 0);
+  });
+
+  test('17. getCurrentCarryForward normalizes null/empty as_of_period to null', async () => {
+    // The read path is robust to NULL as_of_period: the JS `||`
+    // fallback at `rows[0].as_of_period || null` converts NULL / empty
+    // string / undefined to null. We exercise this by inserting a row
+    // via the public API with an empty string (which the API would
+    // normally reject, but we go through raw sqlite.exec to simulate
+    // a legacy or hand-edited row).
+    const freshSqlite = makeRealDb();
+    const freshDb = makePgAdapter(freshSqlite);
+    // Bypass the public API: insert a row with as_of_period = ''
+    // directly via sqlite.exec.
+    freshSqlite.exec(
+      `INSERT INTO finance.vat_carry_forward (id, balance_amd, as_of_period, created_at, updated_at)
+       VALUES (1, 1000, '', datetime('now'), datetime('now'))`,
+    );
+    const r = await getCurrentCarryForward(freshDb);
+    assert.equal(r.balance_amd, 1000);
+    assert.equal(r.as_of_period, null, 'empty string normalizes to null');
+  });
 });

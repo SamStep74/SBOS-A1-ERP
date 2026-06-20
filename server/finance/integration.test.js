@@ -402,6 +402,39 @@ describe('bootFinance — wiring + invoice/payment integration', () => {
     }
   });
 
+  test('3. bootFinance: structured-log via opts.logger (branches the logger.info path)', async () => {
+    const { dir, migDir } = makeTempMigrationsDir();
+    try {
+      const { bootFinance } = await import('./boot.js');
+      const db = makeDualMock();
+
+      // Capture logger calls so we can assert on the structured log line.
+      const calls = [];
+      const logger = { info: (msg) => calls.push(msg) };
+
+      const r = await bootFinance(db, { migrationsDir: migDir, logger });
+      assert.equal(r.applied.length, 1, '0001 applied');
+      assert.equal(calls.length, 1, 'logger.info called exactly once');
+      assert.ok(/finance\.boot: applied=1/.test(calls[0]), 'log line includes applied count');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('4. bootFinance: opts.logger without an info function is treated as no logger', async () => {
+    const { dir, migDir } = makeTempMigrationsDir();
+    try {
+      const { bootFinance } = await import('./boot.js');
+      const db = makeDualMock();
+      // Logger stub that does NOT have info — must not throw.
+      const stub = { warn: () => {} };
+      const r = await bootFinance(db, { migrationsDir: migDir, logger: stub });
+      assert.equal(r.applied.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('4. overpayment: 1500 on 1000 invoice → paid, balance -500', async () => {
     const { dir, migDir } = makeTempMigrationsDir();
     try {
