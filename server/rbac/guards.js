@@ -192,8 +192,12 @@ function redactFields(user, obj, fieldPaths) {
   if (Array.isArray(out)) return out;
   for (const path of fieldPaths) {
     const rule = FLS_RULES[path];
-    if (!rule) continue;
-    if (hasPermission(user, rule.minPermission)) continue;
+    // FLS_RULES gates the strip: if the rule exists and the user holds
+    // the min permission to see the field, keep it. Otherwise strip —
+    // either because the user lacks the FLS permission, or because the
+    // caller passed an explicit non-FLS path (e.g. a tenant-defined
+    // sensitive field) that should always be redacted.
+    if (rule && hasPermission(user, rule.minPermission)) continue;
     // Try the path as a nested traversal first: e.g. crm.account.tax_id →
     // out.crm.account.tax_id. If that doesn't find anything, fall back to
     // the leaf segment as a top-level key, which is the common case when

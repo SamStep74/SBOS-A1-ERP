@@ -89,6 +89,7 @@ function requireRole(roleName) {
       return res.status(401).json({
         error: 'unauthenticated',
         message: 'Authentication required',
+        requiredRole: roleName,
       });
     }
     return res.status(403).json({
