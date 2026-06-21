@@ -76,6 +76,16 @@ jobs:
       - name: l10n-am audit (CLI)
         run: node server/l10n-am/audit-cli.js --quiet
 
+      - name: Deploy smoke (fresh-install boot + endpoint checks)
+        # Boots the production CLI on a fresh .sbos.db, runs the full
+        # 13-endpoint smoke + DB schema + graceful-shutdown + restart
+        # gate. The unit test suite uses a pre-seeded in-memory DB, so
+        # it can't catch fresh-install wiring bugs (missing seedRBAC,
+        # composite-PK drift, missing admin user role link, etc.) —
+        # this is the only gate that does. See scripts/deploy-smoke.sh
+        # for the contract and the per-step stop conditions.
+        run: npm run smoke:deploy
+
       # ─── All-in-one gate (matches `make check` / `npm run check`) ───
       # Runs the same scripts chained in the canonical order:
       #   lint && typecheck && test && boundary-check

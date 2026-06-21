@@ -34,6 +34,7 @@ import express from 'express';
 import { registerRbacRoutes } from './rbac/routes.js';
 import { registerFinanceRoutes } from './finance/routes.js';
 import { renderDashboard } from './finance/dashboard.js';
+import { makeAuthMiddleware } from './auth.js';
 
 // Version reported by /api/health. Pulled from package.json lazily so
 // the value tracks the actual installed version without a hardcode.
@@ -229,69 +230,21 @@ function makeFastifyFacade(expressApp, { db }) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// In-memory auth middleware.
+// Auth middleware. Replaces the legacy "stub Admin for any token"
+// behavior with real session-token auth (see server/auth.js).
 //
-// For the bootable entry point we don't have a real auth subsystem yet
-// (that's task 2: tenant resolution + JWT/session). We expose a
-// minimal Bearer-token middleware that:
-//   - reads `Authorization: Bearer <token>` (token === numeric user id)
-//   - looks up `users` table by id
-//   - sets `req.user = { id, role, tenant_id, org_id, mfa_verified }`
-//   - falls back to a stubbed Admin user (id=1) when no token is sent
+// /api/health stays exempt so the orchestrator can probe it without
+// a token. The rest of the API requires a Bearer session token
+// minted by the rbac seed on first boot (printed to stdout by
+// bin/sbos-server.mjs).
 //
-// This keeps the RBAC routes happy (they need `request.user.role`) and
-// makes /api/health reachable from the browser without auth wiring.
+// For the unit-test suite: set SBOS_AUTH_MODE=stub to restore the
+// legacy "any request → stub Admin" behavior. The 893-test suite
+// uses this so we don't have to seed a session per test.
 // ────────────────────────────────────────────────────────────────────────
 
-function makeAuthMiddleware({ db }) {
-  return function authMiddleware(req, res, next) {
-    // Health check must work without a token (orchestrator probes it).
-    if (req.path === '/api/health' || req.path === '/api/health/') {
-      req.user = { id: 0, role: 'Admin', tenant_id: 0, mfa_verified: true };
-      return next();
-    }
-
-    const auth = req.headers.authorization || '';
-    const match = /^Bearer\s+(.+)$/i.exec(auth);
-    if (!match) {
-      // No token: stub Admin (id=1) — matches the rbac routes' seed user.
-      req.user = { id: 1, role: 'Admin', tenant_id: 0, org_id: null, mfa_verified: true };
-      return next();
-    }
-    const token = match[1].trim();
-    const userId = Number(token);
-    if (!Number.isInteger(userId) || userId <= 0) {
-      req.user = { id: 1, role: 'Admin', tenant_id: 0, org_id: null, mfa_verified: true };
-      return next();
-    }
-    try {
-      const row = db
-        .prepare(
-          'SELECT id, username, email, role, tenant_id, org_id, mfa_required, mfa_verified FROM users WHERE id = ?',
-        )
-        .get(userId);
-      if (!row) {
-        req.user = { id: 1, role: 'Admin', tenant_id: 0, org_id: null, mfa_verified: true };
-        return next();
-      }
-      req.user = {
-        id: Number(row.id),
-        username: row.username,
-        email: row.email,
-        role: row.role,
-        tenant_id: Number(row.tenant_id || 0),
-        org_id: row.org_id == null ? null : Number(row.org_id),
-        mfa_required: !!row.mfa_required,
-        mfa_verified: !!row.mfa_verified,
-      };
-      return next();
-    } catch (_err) {
-      // users table missing or other DB error — fall back to stub Admin
-      // so the server still boots. Real auth wiring replaces this.
-      req.user = { id: 1, role: 'Admin', tenant_id: 0, org_id: null, mfa_verified: true };
-      return next();
-    }
-  };
+function makeAuthMiddlewareForApp({ db }) {
+  return makeAuthMiddleware({ db });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -311,7 +264,7 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
   app.use(express.json({ limit: '1mb' }));
 
   // Auth middleware (must run before any /api/rbac routes).
-  app.use(makeAuthMiddleware({ db }));
+  app.use(makeAuthMiddlewareForApp({ db }));
 
   // The facade exposes a Fastify-compatible API so registerRbacRoutes
   // can register its Fastify-style routes without us rewriting the

@@ -15,6 +15,10 @@
 //
 // TDD: this file is the RED commit. server/index.js, server/server.js,
 // and server/finance/routes.js are added in the GREEN commit.
+//
+// Auth mode: the test suite sets SBOS_AUTH_MODE=stub so the legacy
+// "any request → stub Admin" middleware is in effect. The real-auth
+// path is exercised by scripts/deploy-smoke.sh against a fresh DB.
 
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +29,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+
+// Force the stub auth mode for the duration of this test file.
+process.env.SBOS_AUTH_MODE = 'stub';
 
 // ────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -470,6 +477,183 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     });
     assert.equal(status, 400);
     assert.equal(body.error, 'bad_request');
+  });
+
+  test('24. PATCH /api/finance/invoices/:id updates status (draft → sent)', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'InvUpd' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-UPD-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 50000 }],
+    });
+    const { status, body } = await patchJson(server, `/api/finance/invoices/${inv.body.id}`, {
+      status: 'sent',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.status, 'sent');
+  });
+
+  test('25. POST /api/finance/invoices/:id/payments records a payment', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'PayCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-PAY-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 100000 }],
+    });
+    // Move to 'sent' first (draft doesn't accept payments).
+    await patchJson(server, `/api/finance/invoices/${inv.body.id}`, { status: 'sent' });
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/payments`,
+      { amount_amd: 100000, method: 'bank_transfer' },
+    );
+    assert.equal(status, 201);
+    assert.equal(body.amount_amd, 100000);
+    assert.equal(body.invoice_id, inv.body.id);
+  });
+
+  test('26. POST /api/finance/invoices/:id/payments against draft returns 400', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'DraftCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-DRAFT-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 50000 }],
+    });
+    // Invoice is still in 'draft' status — payments should be rejected.
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/payments`,
+      { amount_amd: 50000, method: 'cash' },
+    );
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_request');
+    assert.ok(/draft/i.test(body.message), `expected draft mention, got: ${body.message}`);
+  });
+
+  test('27. POST /api/finance/invoices/:id/void voids an invoice (returns updated row)', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'VoidCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-VOID-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 50000 }],
+    });
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/void`,
+      { reason: 'duplicate issuance' },
+    );
+    assert.equal(status, 200);
+    assert.equal(body.status, 'void');
+  });
+
+  test('28. POST /api/finance/invoices/:id/reconcile recomputes status from payments', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'ReconcCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-RECONC-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 80000 }],
+    });
+    await patchJson(server, `/api/finance/invoices/${inv.body.id}`, { status: 'sent' });
+    await postJson(server, `/api/finance/invoices/${inv.body.id}/payments`, {
+      amount_amd: 80000,
+      method: 'cash',
+    });
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/reconcile`,
+      {},
+    );
+    assert.equal(status, 200);
+    assert.equal(body.status, 'paid');
+    assert.equal(body.balance_amd, 0);
+  });
+
+  test('29. Cross-tenant write to invoice: PATCH with X-Tenant-Id:7 on tenant-0 invoice → 404', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'IsoCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-ISO-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 10000 }],
+    });
+    const { status, body } = await patchJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}`,
+      { status: 'sent' },
+      { 'X-Tenant-Id': '7' },
+    );
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
+  test('30. POST /api/finance/invoices without X-Tenant-Id — stub auth provides tenant_id=0, succeeds (201)', async () => {
+    // In stub auth mode, req.user.tenant_id=0 is always set, so
+    // requireTenant reads the user's tenant and the request succeeds.
+    // (In real auth mode, the same code would 400 because the admin
+    // session has no tenant_id fallback — verified in smoke:deploy.)
+    const c = await postJson(server, '/api/finance/customers', { name: 'NoHeaderCust' });
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/invoices`;
+    const res = await globalThis.fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: c.body.id,
+        invoice_number: 'INV-NH-1',
+        issue_date: '2026-06-21',
+        due_date: '2026-07-21',
+        lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 5000 }],
+      }),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 201);
+    assert.equal(body.tenant_id, 0);
+  });
+
+  test('31. POST /api/finance/customers without X-Tenant-Id succeeds in stub mode (201)', async () => {
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/customers`;
+    const res = await globalThis.fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'NoHeaderCust2' }),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 201);
+    assert.equal(body.tenant_id, 0);
+  });
+
+  test('32. POST /api/finance/invoices with bad X-Tenant-Id — falls back to user.tenant_id, succeeds', async () => {
+    // Bad header value is ignored (requireTenant's parseTenantId returns
+    // null for non-integers); the user's tenant_id=0 takes over.
+    const c = await postJson(server, '/api/finance/customers', { name: 'BadHeaderCust' });
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/invoices`;
+    const res = await globalThis.fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-tenant-id': 'not-a-number' },
+      body: JSON.stringify({
+        customer_id: c.body.id,
+        invoice_number: 'INV-BH-1',
+        issue_date: '2026-06-21',
+        due_date: '2026-07-21',
+        lines: [{ description: 'Svc', quantity: 1, unit_price_amd: 5000 }],
+      }),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 201);
+    assert.equal(body.tenant_id, 0);
   });
 });
 

@@ -59,10 +59,24 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
 done
 echo
 
+# Capture the admin session token the server printed to stdout. The
+# real-auth path (default since the wave-13 follow-up) requires a
+# Bearer session token; the legacy "Bearer dev" stub is gone.
+ADMIN_TOKEN=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG" | head -1 | awk '{print $NF}')
+if [ -z "$ADMIN_TOKEN" ]; then
+  echo "FAIL: server did not print an admin session token"
+  cat "$LOG"
+  kill $SERVER_PID 2>/dev/null
+  exit 1
+fi
+echo "admin session token: $ADMIN_TOKEN"
+echo
+
 echo "=== STEP 3: Endpoint smoke (production) ==="
-node -e "
+ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
 const http = require('node:http');
 const PORT = $PORT;
+const TOKEN = process.env.ADMIN_TOKEN;
 const checks = [
   { path: '/api/health', expect: 200, name: 'health' },
   { path: '/api/rbac/permissions', expect: 200, name: 'rbac/permissions' },
@@ -81,7 +95,7 @@ const checks = [
 let done = 0, pass = 0, fail = 0;
 checks.forEach((c) => {
   const opts = { host: '127.0.0.1', port: PORT, path: c.path, method: 'GET' };
-  opts.headers = Object.assign({ Authorization: 'Bearer dev' }, c.headers || {});
+  opts.headers = Object.assign({ Authorization: 'Bearer ' + TOKEN }, c.headers || {});
   const req = http.request(opts, (res) => {
     let body = '';
     res.on('data', d => body += d);

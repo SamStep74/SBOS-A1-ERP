@@ -8,6 +8,10 @@
 //   GET    /api/finance/invoices
 //   GET    /api/finance/invoices/:id
 //   POST   /api/finance/invoices
+//   PATCH  /api/finance/invoices/:id
+//   POST   /api/finance/invoices/:id/payments
+//   POST   /api/finance/invoices/:id/void
+//   POST   /api/finance/invoices/:id/reconcile
 //   GET    /api/finance/customers
 //   POST   /api/finance/customers
 //   PATCH  /api/finance/customers/:id
@@ -23,10 +27,18 @@
 //
 // No `eval`, no string-concat SQL, no `new Function`. The SQL the
 // pure functions emit is fixed-string; we just translate param style.
-import { listInvoices, getInvoice, createInvoice } from './invoice.js';
+import {
+  listInvoices,
+  getInvoice,
+  createInvoice,
+  updateInvoice,
+  voidInvoice,
+} from './invoice.js';
+import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
+import { requireTenant } from './tenant.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Validation helpers
@@ -158,14 +170,104 @@ export function registerFinanceRoutes(app, opts = {}) {
 
   // Create invoice — tenant-scoped. The body must include customer_id,
   // invoice_number, issue_date, due_date, lines[]; vat_amd/notes optional.
-  app.post('/api/finance/invoices', async (req, res, next) => {
+  app.post('/api/finance/invoices', requireTenant, async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await createInvoice(pgAdapter, body, tenantId);
       res.status(201).json(out);
     } catch (err) {
       if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // Update invoice — tenant-scoped. Patch body: any of { status, due_date, notes }.
+  // Cross-tenant id → 404 (same as customers; no existence-oracle leak).
+  app.patch('/api/finance/invoices/:id', requireTenant, async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await updateInvoice(pgAdapter, id, req.body || {}, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        if (/invoice \d+ not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // Record a payment against an invoice — tenant-scoped.
+  // Body: { amount_amd, method?, reference?, paid_at? }.
+  app.post('/api/finance/invoices/:id/payments', requireTenant, async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const body = req.body || {};
+      const out = await recordPayment(pgAdapter, { ...body, invoice_id: id }, tenantId);
+      res.status(201).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        if (/invoice \d+ not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // Void an invoice — tenant-scoped. Body: { reason }.
+  app.post('/api/finance/invoices/:id/void', requireTenant, async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const reason = String((req.body && req.body.reason) || '').trim();
+      const out = await voidInvoice(pgAdapter, id, reason, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        if (/not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // Reconcile an invoice — recompute its status from the payments sum.
+  // Useful for a manual operator action after a payment lands outside
+  // the system. Tenant-scoped.
+  app.post('/api/finance/invoices/:id/reconcile', requireTenant, async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await reconcileInvoice(pgAdapter, id, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        if (/not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
         return res.status(400).json({ error: 'bad_request', message: err.message });
       }
       next(err);
@@ -184,9 +286,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
-  app.post('/api/finance/customers', async (req, res, next) => {
+  app.post('/api/finance/customers', requireTenant, async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const out = await createCustomer(pgAdapter, req.body || {}, tenantId);
       res.status(201).json(out);
     } catch (err) {
@@ -198,13 +300,13 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // Update customer — tenant-scoped. Patch body: any of { name, hvhh, address, email }.
-  app.patch('/api/finance/customers/:id', async (req, res, next) => {
+  app.patch('/api/finance/customers/:id', requireTenant, async (req, res, next) => {
     try {
       const id = parseCustomerId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const out = await updateCustomer(pgAdapter, id, req.body || {}, tenantId);
       res.status(200).json(out);
     } catch (err) {

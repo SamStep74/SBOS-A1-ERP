@@ -20,6 +20,7 @@ import { start } from '../server/server.js';
 import { makePgAdapter } from '../server/db/realDb.js';
 import { applyMigrations } from '../server/finance/migrate.js';
 import { seedRBAC } from '../server/rbac/seed.js';
+import { seedSessionForAdmin } from '../server/auth.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Resolve DB path + apply schemas.
@@ -120,6 +121,21 @@ async function applySchemas(sqliteDb) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Session token — for the real-auth path. The middleware in
+// server/auth.js reads `sbos_rbac_sessions` and resolves a Bearer
+// token to a user. On a fresh boot we seed one token for the admin
+// user (id=1, role=Admin) and print it to stdout so the operator
+// can copy-paste it into curl commands.
+// ────────────────────────────────────────────────────────────────────────
+
+function seedAdminSession(sqliteDb) {
+  // Always seed (or return existing) — never silently skip, so the
+  // operator always knows what token to use.
+  const token = seedSessionForAdmin(sqliteDb);
+  return token;
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Boot
 // ────────────────────────────────────────────────────────────────────────
 
@@ -132,6 +148,13 @@ async function main() {
   console.warn(`[sbos-server] opening DB at ${dbPath}`);
   const sqliteDb = new DatabaseSync(dbPath);
   await applySchemas(sqliteDb);
+
+  // Seed + print the admin session token (real-auth path). The
+  // legacy "Bearer dev" stub is gone — every request needs a real
+  // token minted from the rbac seed.
+  const adminToken = seedAdminSession(sqliteDb);
+  console.warn(`[sbos-server] admin session token: ${adminToken}`);
+  console.warn(`[sbos-server] use: curl -H "Authorization: Bearer ${adminToken}" http://${host}:${port}/api/health`);
 
   const pgAdapter = makePgAdapter(sqliteDb);
   console.warn(`[sbos-server] listening on http://${host}:${port}`);
