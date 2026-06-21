@@ -24,21 +24,11 @@
 // computed strings are the chart-of-accounts account_code and
 // the per-line amounts (whole drams, no floats).
 // ────────────────────────────────────────────────────────────────────────
-// PG-style adapter helpers (shared with inventory.js / purchase.js /
-// audit.js — duplicated here to keep the module self-contained; the
-// production migration runner strips the `finance.` prefix on sqlite
-// so the same SQL works on both backends).
+// PG-style adapter helpers (shared across the finance module — see
+// _pgStyle.js for the canonical implementation).
 // ────────────────────────────────────────────────────────────────────────
 
-function stripFinancePrefix(sql) {
-  return sql.replace(/finance\./g, '');
-}
-
-async function runQuery(db, sql, params = []) {
-  const translated = stripFinancePrefix(sql);
-  const res = await db.query(translated, params);
-  return { rows: (res && res.rows) || [] };
-}
+import { runQuery, numberedParams } from './_pgStyle.js';
 
 export class ValueError extends Error {
   constructor(message) {
@@ -328,30 +318,27 @@ export async function listJournalEntries(db, tenantId = 0, opts = {}) {
  */
 export async function getAccountBalance(db, accountCode, tenantId = 0, opts = {}) {
   assertAccountCode(accountCode, 'account_code');
-  const params = [tenantId, accountCode];
-  let asOfFilter = '';
-  if (opts.asOfDate) {
-    assertIsoDate(opts.asOfDate, 'asOfDate');
-    // Use a JOIN so the asOfDate filter doesn't need a correlated
-    // subquery (sqlite handles the JOIN much more cleanly).
-    // The $N placeholders are unique (no $1 reuse) because the
-    // pg-style → sqlite translation drops the placeholder identity
-    // and binds positionally. Reusing $1 for both the inner and
-    // outer tenant_id would silently bind the wrong values after
-    // the translation.
-    asOfFilter = 'AND je.tenant_id = $3 AND je.entry_date <= $4';
-    params.push(tenantId, opts.asOfDate);
-  }
-  const res = await runQuery(
-    db,
+  // The numberedParams helper assigns unique $N placeholders for
+  // every #{...} occurrence. This is the bug fix for the
+  // "$1 placeholder reuse under the pg → sqlite translation"
+  // pattern that hit three times in three waves — the
+  // placeholders are unique even when the same value is reused
+  // in both the outer WHERE and the JOIN's ON clause.
+  let template =
     `SELECT
         COALESCE(SUM(jel.debit), 0) AS total_debit,
         COALESCE(SUM(jel.credit), 0) AS total_credit
        FROM finance.journal_entry_lines jel
        JOIN finance.journal_entries je ON je.id = jel.entry_id
-      WHERE jel.tenant_id = $1 AND jel.account_code = $2 ${asOfFilter}`,
-    params,
-  );
+      WHERE jel.tenant_id = #{tenantId} AND jel.account_code = #{accountCode}`;
+  let values = [tenantId, accountCode];
+  if (opts.asOfDate) {
+    assertIsoDate(opts.asOfDate, 'asOfDate');
+    template += ' AND je.tenant_id = #{tenantId} AND je.entry_date <= #{asOfDate}';
+    values = [tenantId, accountCode, tenantId, opts.asOfDate];
+  }
+  const { sql, params } = numberedParams(template, ...values);
+  const res = await runQuery(db, sql, params);
   const totalDebit = Number((res.rows || [])[0]?.total_debit || 0);
   const totalCredit = Number((res.rows || [])[0]?.total_credit || 0);
   // net_debit and net_credit are mutually exclusive (you can't be net
@@ -376,27 +363,23 @@ export async function getAccountBalance(db, accountCode, tenantId = 0, opts = {}
 // ────────────────────────────────────────────────────────────────────────
 
 export async function listAccountBalances(db, tenantId = 0, opts = {}) {
-  const params = [tenantId];
-  let asOfFilter = '';
-  if (opts.asOfDate) {
-    assertIsoDate(opts.asOfDate, 'asOfDate');
-    // See getAccountBalance for why $N placeholders are unique
-    // (the pg → sqlite translation drops placeholder identity).
-    asOfFilter = 'AND je.tenant_id = $2 AND je.entry_date <= $3';
-    params.push(tenantId, opts.asOfDate);
-  }
-  const res = await runQuery(
-    db,
+  // See getAccountBalance for the numberedParams rationale.
+  let template =
     `SELECT jel.account_code,
             COALESCE(SUM(jel.debit), 0) AS total_debit,
             COALESCE(SUM(jel.credit), 0) AS total_credit
        FROM finance.journal_entry_lines jel
        JOIN finance.journal_entries je ON je.id = jel.entry_id
-      WHERE jel.tenant_id = $1 ${asOfFilter}
-      GROUP BY jel.account_code
-      ORDER BY jel.account_code`,
-    params,
-  );
+      WHERE jel.tenant_id = #{tenantId}`;
+  let values = [tenantId];
+  if (opts.asOfDate) {
+    assertIsoDate(opts.asOfDate, 'asOfDate');
+    template += ' AND je.tenant_id = #{tenantId} AND je.entry_date <= #{asOfDate}';
+    values = [tenantId, tenantId, opts.asOfDate];
+  }
+  template += ' GROUP BY jel.account_code ORDER BY jel.account_code';
+  const { sql, params } = numberedParams(template, ...values);
+  const res = await runQuery(db, sql, params);
   return (res.rows || []).map((r) => {
     const debit = Number(r.total_debit);
     const credit = Number(r.total_credit);

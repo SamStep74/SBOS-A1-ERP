@@ -34,23 +34,11 @@ import {
 } from './stockPosting.js';
 
 // ────────────────────────────────────────────────────────────────────────
-// Internal: stripFinancePrefix + runQuery (same pattern as journal.js
-// and the rest of the finance module — duplicated here to keep the
-// module self-contained).
+// PG-style adapter helpers (shared with journal.js / inventory.js /
+// purchase.js / audit.js — see _pgStyle.js for the canonical impl).
 // ────────────────────────────────────────────────────────────────────────
 
-function stripFinancePrefix(sql) {
-  return String(sql).replace(
-    /(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g,
-    '$1',
-  );
-}
-
-async function runQuery(db, sql, params = []) {
-  const result = await db.query(stripFinancePrefix(sql), params || []);
-  if (result && Array.isArray(result.rows)) return result;
-  return { rows: [] };
-}
+import { runQuery, numberedParams } from './_pgStyle.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // findUnpostedMoves — discover the gap between moves and journal
@@ -68,53 +56,56 @@ async function runQuery(db, sql, params = []) {
  * (those never post a journal entry by design, see stockPosting.js).
  */
 export async function findUnpostedMoves(db, tenantId = 0) {
-  // Each NOT EXISTS subquery uses unique $N placeholders because the
-  // production code path goes through pg (which keeps the
-  // placeholder identity) but the test harness does a $N → ?
-  // translation that collapses all $1 to positional ?. Reusing $1 for
-  // both the outer and inner tenant_id would silently bind the wrong
-  // value in the subquery under the test path. See the journal.js
-  // journal-account-balance filter for the same fix pattern.
-  // Each subquery is passed the tenantId twice (once for the outer
-  // WHERE, once for the inner tenant_id filter) — that's 8 placeholders
-  // for 4 subqueries, plus the 4 outer WHERE = 8 placeholders, with 8
-  // tenantId params in the array.
-  const res = await runQuery(
-    db,
+  // The numberedParams helper assigns unique $N placeholders for
+  // every #{...} occurrence. This is the bug fix for the
+  // "$1 placeholder reuse under the pg → sqlite translation"
+  // pattern that hit three times in three waves — even though
+  // tenantId is reused 4 times (once per subquery), each
+  // occurrence gets a unique $N placeholder, so the test harness's
+  // $N → ? translation works correctly.
+  const { sql, params } = numberedParams(
     `SELECT id, 'stock.receive' AS source FROM finance.stock_moves
-      WHERE tenant_id = $1 AND move_type = 'RECEIPT'
+      WHERE tenant_id = #{tenantId} AND move_type = 'RECEIPT'
         AND quantity > 0 AND unit_cost > 0
         AND NOT EXISTS (
           SELECT 1 FROM finance.journal_entries
-          WHERE tenant_id = $2 AND source = 'stock.receive' AND source_id = finance.stock_moves.id
+          WHERE tenant_id = #{tenantId} AND source = 'stock.receive' AND source_id = finance.stock_moves.id
         )
      UNION ALL
      SELECT id, 'stock.deliver' AS source FROM finance.stock_moves
-      WHERE tenant_id = $3 AND move_type = 'DELIVERY'
+      WHERE tenant_id = #{tenantId} AND move_type = 'DELIVERY'
         AND quantity > 0 AND unit_cost > 0
         AND NOT EXISTS (
           SELECT 1 FROM finance.journal_entries
-          WHERE tenant_id = $4 AND source = 'stock.deliver' AND source_id = finance.stock_moves.id
+          WHERE tenant_id = #{tenantId} AND source = 'stock.deliver' AND source_id = finance.stock_moves.id
         )
      UNION ALL
      SELECT id, 'stock.adjust' AS source FROM finance.stock_moves
-      WHERE tenant_id = $5 AND move_type = 'ADJUSTMENT'
+      WHERE tenant_id = #{tenantId} AND move_type = 'ADJUSTMENT'
         AND quantity > 0 AND unit_cost > 0
         AND delta != 0
         AND NOT EXISTS (
           SELECT 1 FROM finance.journal_entries
-          WHERE tenant_id = $6 AND source = 'stock.adjust' AND source_id = finance.stock_moves.id
+          WHERE tenant_id = #{tenantId} AND source = 'stock.adjust' AND source_id = finance.stock_moves.id
         )
      UNION ALL
      SELECT id, 'vendor_bill.post' AS source FROM finance.vendor_bills
-      WHERE tenant_id = $7 AND status = 'posted' AND total > 0
+      WHERE tenant_id = #{tenantId} AND status = 'posted' AND total > 0
         AND NOT EXISTS (
           SELECT 1 FROM finance.journal_entries
-          WHERE tenant_id = $8 AND source = 'vendor_bill.post' AND source_id = finance.vendor_bills.id
+          WHERE tenant_id = #{tenantId} AND source = 'vendor_bill.post' AND source_id = finance.vendor_bills.id
         )
      ORDER BY source, id`,
-    [tenantId, tenantId, tenantId, tenantId, tenantId, tenantId, tenantId, tenantId],
+    tenantId,
+    tenantId,
+    tenantId,
+    tenantId,
+    tenantId,
+    tenantId,
+    tenantId,
+    tenantId,
   );
+  const res = await runQuery(db, sql, params);
   return (res.rows || []).map((r) => ({
     source: r.source,
     move_id: Number(r.id),
