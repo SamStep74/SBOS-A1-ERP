@@ -509,6 +509,12 @@ const PERMISSIONS = Object.freeze({
     label: 'Edit customer',
     description: 'Edit a customer record (name, HVVH, address, email).',
   },
+  'finance.customer.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'View customers',
+    description: 'List / read finance customer records.',
+  },
   'finance.product.read': {
     category: 'finance',
     sensitivity: 'low',
@@ -526,6 +532,63 @@ const PERMISSIONS = Object.freeze({
     sensitivity: 'medium',
     label: 'Update catalog item',
     description: 'Edit an existing product (name, price, cost, UoM, etc.).',
+  },
+  // ─────────── Catalog v2 (Phase 2 W76/W77) ───────────
+  // Categories: hierarchical (parent_id chain) for the
+  // product catalog. Variants: per-item size/color
+  // attribute dimensions.
+  'finance.category.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog category',
+    description: 'View catalog categories (hierarchical) and breadcrumb paths.',
+  },
+  'finance.category.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog category',
+    description: 'Add a new catalog category (with optional parent).',
+  },
+  'finance.variant.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog variant',
+    description: 'View catalog variants (per-item size/color attributes).',
+  },
+  'finance.variant.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog variant',
+    description: 'Add a new variant (SKU + name + attributes) under a catalog item.',
+  },
+  // ─────────── Catalog v2 (Phase 2 W78/W79) — bundles ───────────
+  // Bundles: compound catalog items (header + N child
+  // rows referencing catalog_items). The 4 new perm
+  // keys are 2 read + 2 create, split between the
+  // bundle header and the bundle-item children.
+  'finance.bundle.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog bundle',
+    description: 'View catalog bundles (compound items with a fixed price + recipe).',
+  },
+  'finance.bundle.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog bundle',
+    description: 'Add a new catalog bundle (header row).',
+  },
+  'finance.bundle_item.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog bundle item',
+    description: 'View bundle items (the recipe rows that reference catalog items).',
+  },
+  'finance.bundle_item.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog bundle item',
+    description: 'Add a new bundle item (a child row referencing a catalog item + quantity).',
   },
   'finance.warehouse.read': {
     category: 'finance',
@@ -1625,6 +1688,12 @@ const PERMISSIONS = Object.freeze({
     sensitivity: 'low',
     label: 'Reply to case',
     description: 'Reply to a service case.',
+  },
+  'desk.reply.read': {
+    category: 'desk',
+    sensitivity: 'low',
+    label: 'View case replies',
+    description: 'List / read service case replies.',
   },
   'desk.knowledge.read': {
     category: 'desk',

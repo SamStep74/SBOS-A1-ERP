@@ -95,6 +95,18 @@ export async function listAudit(db, filters = {}) {
     where.push(`resource LIKE $${i++}`);
     params.push(String(filters.resource_prefix) + '%');
   }
+  if (filters.resource_id != null) {
+    // Match by the numeric id portion of the resource string. The
+    // resource column is shaped like 'invoice:42' or 'invoice:42:void'
+    // (Wave 29). The query matches `:<id>` anywhere in the string,
+    // with the LIKE wildcard on both sides so 'invoice:42' AND
+    // 'invoice:42:void' both match. The trailing `:` (no more
+    // colons) variant is the create case (id in the response body,
+    // not in the URL — not yet wired in Wave 29, see routes.js
+    // wrapFinanceRoute comment).
+    where.push(`resource LIKE $${i++}`);
+    params.push('%:' + String(filters.resource_id) + '%');
+  }
   if (filters.since) {
     where.push(`created_at >= $${i++}`);
     params.push(String(filters.since));

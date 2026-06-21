@@ -60,6 +60,26 @@
 //   POST   /api/finance/desk/cases
 //   GET    /api/finance/desk/cases/:id/replies
 //   POST   /api/finance/desk/cases/:id/replies
+//   GET    /api/finance/projects?status=
+//   GET    /api/finance/projects/:id
+//   POST   /api/finance/projects
+//   GET    /api/finance/projects/:id/tasks?status=
+//   POST   /api/finance/projects/:id/tasks
+//   GET    /api/finance/projects/:id/tasks/:taskId
+//   GET    /api/finance/projects/:id/tasks/:taskId/time-entries
+//   POST   /api/finance/projects/:id/tasks/:taskId/time-entries
+//   GET    /api/finance/catalog/categories?parent_id=
+//   POST   /api/finance/catalog/categories
+//   GET    /api/finance/catalog/categories/:id
+//   GET    /api/finance/catalog/categories/:id/path
+//   GET    /api/finance/catalog/items/:itemId/variants
+//   POST   /api/finance/catalog/items/:itemId/variants
+//   GET    /api/finance/catalog/variants/:id
+//   GET    /api/finance/catalog/bundles?archived=
+//   POST   /api/finance/catalog/bundles
+//   GET    /api/finance/catalog/bundles/:id
+//   GET    /api/finance/catalog/bundles/:id/items
+//   POST   /api/finance/catalog/bundles/:id/items
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -82,6 +102,8 @@ import {
 } from './invoice.js';
 import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
+import { getCustomer360 } from './customer360.js';
+import { getDashboard360 } from './dashboard360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
@@ -127,6 +149,30 @@ import {
   createReply,
   listReplies,
 } from './desk.js';
+import {
+  createProject,
+  listProjects,
+  getProject,
+  createTask,
+  listTasks,
+  getTask,
+  createTimeEntry,
+  listTimeEntries,
+} from './projects.js';
+import {
+  createCategory,
+  listCategories,
+  getCategory,
+  getCategoryPath,
+  createVariant,
+  listVariants,
+  getVariant,
+  createBundle,
+  listBundles,
+  getBundle,
+  addBundleItem,
+  listBundleItems,
+} from './catalog.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -176,21 +222,6 @@ function parseCustomerId(segment) {
   return n;
 }
 
-// readTenant — extracts the tenant scope from the request. Falls back
-// to X-Tenant-Id header, then req.user.tenant_id, then 0. The auth
-// stub in server/index.js sets req.user = { id, role, tenant_id: 0 }
-// so the default is "tenant 0" (the bootstrap tenant).
-function readTenant(req) {
-  if (req && req.tenantId !== undefined && req.tenantId !== null) return Number(req.tenantId);
-  const headerVal = req && req.headers && req.headers['x-tenant-id'];
-  if (headerVal !== undefined && headerVal !== '') {
-    const n = Number(headerVal);
-    if (Number.isInteger(n) && n >= 0) return n;
-  }
-  if (req && req.user && req.user.tenant_id !== undefined) return Number(req.user.tenant_id);
-  return 0;
-}
-
 // ────────────────────────────────────────────────────────────────────────
 // Supplier stub — Task 2 replaces this with real per-tenant config.
 // ────────────────────────────────────────────────────────────────────────
@@ -223,6 +254,28 @@ function defaultSupplier() {
 // ────────────────────────────────────────────────────────────────────────
 
 function wrapFinanceRoute(action, resource, handler) {
+  // Resolve the resource string for a given request. The route
+  // table passes either:
+  //   - a static string like 'invoice:new' or 'journal:reconcile'
+  //     (the resource is constant per route), OR
+  //   - a function (req) => 'invoice:' + req.params.id
+  //     (the resource includes the URL parameter — Wave 29
+  //     change so the audit row records the actual entity id),
+  //     OR
+  //   - a function (req, res) => 'invoice:' + res.locals.createdId
+  //     (the resource includes the new entity id from the
+  //     create response — Wave 30 change so creates also
+  //     record the actual id, not the literal ':new').
+  //
+  // The function form lets every id-based write route
+  // (PATCH /invoices/:id, POST /invoices/:id/void, etc.)
+  // record 'invoice:42' instead of the literal 'invoice:id',
+  // and every create route (POST /invoices, POST /customers,
+  // POST /desk/cases/:id/replies, etc.) record
+  // 'invoice:<newId>' instead of 'invoice:new'.
+  const resolveResource = typeof resource === 'function'
+    ? resource
+    : () => resource;
   return async function w(req, res, next) {
     try {
       await handler(req, res, next);
@@ -252,7 +305,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource,
+          resource: resolveResource(req, res),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: status,
@@ -272,7 +325,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource,
+          resource: resolveResource(req, res),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: res.statusCode,
@@ -294,12 +347,17 @@ export function registerFinanceRoutes(app, opts = {}) {
   }
   const locale = opts.locale || 'en';
 
-  // Dashboard HTML (server-rendered via renderDashboard).
-  app.get('/api/finance/dashboard', async (req, res, next) => {
+  // Dashboard HTML (server-rendered via renderDashboard). Tenant-
+  // scoped: the dashboard renders the calling tenant's data, not
+  // the bootstrap tenant's. (renderDashboard already accepts
+  // opts.tenantId and defaults to 0 if absent; Wave 28 wires it
+  // through from the request so non-bootstrap tenants get the
+  // right numbers.)
+  app.get('/api/finance/dashboard', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
     try {
       const asOfDate = String(req.query.asOfDate || '').trim();
       const { renderDashboard } = await import('./dashboard.js');
-      const html = await renderDashboard(pgAdapter, asOfDate, { locale });
+      const html = await renderDashboard(pgAdapter, asOfDate, { locale, tenantId: req.tenantId });
       res.status(200).type('text/html; charset=utf-8').send(html);
     } catch (err) {
       if (err && err.name === 'ValueError') {
@@ -309,12 +367,53 @@ export function registerFinanceRoutes(app, opts = {}) {
     }
   });
 
+  // CFO dashboard JSON — AR + AP totals + top customers + top
+  // vendors. Single round-trip, the whole collections + AP picture.
+  // Wave 34/35. Companion to the existing /api/finance/dashboard
+  // HTML view (above): same data, JSON shape, designed for an
+  // external dashboard client (e.g. a CFO-facing webapp).
+  //
+  // Perm gate: reports.dashboard.read (the same perm the HTML
+  // dashboard uses). Tenant scope: requireTenant middleware.
+  //
+  // Optional ?today=YYYY-MM-DD override (defaults to current
+  // date inside the pure function). Same back-dated-aging pattern
+  // as the customer/vendor 360 endpoints.
+  app.get(
+    '/api/finance/360',
+    requireTenant,
+    requirePerm('reports.dashboard.read'),
+    async (req, res, next) => {
+      try {
+        const today = typeof req.query.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.today)
+          ? req.query.today
+          : undefined;
+        const limit = req.query.limit != null && /^\d+$/.test(String(req.query.limit))
+          ? Number(req.query.limit)
+          : undefined;
+        const opts = {};
+        if (today) opts.today = today;
+        if (limit != null) opts.limit = limit;
+        const out = await getDashboard360(pgAdapter, req.tenantId, opts);
+        res.status(200).json(out);
+      } catch (err) {
+        // The pure function throws ValueError on bad inputs (bad
+        // tenantId, bad today format). Map to 400; everything else
+        // is a real 500.
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
   // List invoices — tenant-scoped. The listInvoices pure function already
   // threads tenantId; the route picks it up from req (X-Tenant-Id or
   // req.user.tenant_id) and passes it through.
-  app.get('/api/finance/invoices', async (req, res, next) => {
+  app.get('/api/finance/invoices', requireTenant, requirePerm('finance.invoice.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listInvoices(pgAdapter, {}, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -323,13 +422,13 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // Get one invoice (with lines) — tenant-scoped.
-  app.get('/api/finance/invoices/:id', async (req, res, next) => {
+  app.get('/api/finance/invoices/:id', requireTenant, requirePerm('finance.invoice.read'), async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const invoice = await getInvoice(pgAdapter, id, tenantId);
       if (!invoice) {
         return res.status(404).json({ error: 'not_found' });
@@ -346,10 +445,11 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices',
     requireTenant,
     requirePerm('finance.invoice.create'),
-    wrapFinanceRoute('invoice.create', 'invoice:new', async (req, res) => {
+    wrapFinanceRoute('invoice.create', (req, res) => res.locals.createdId ? `invoice:${res.locals.createdId}` : 'invoice:new', async (req, res) => {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await createInvoice(pgAdapter, body, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -360,7 +460,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.update', 'invoice:id', async (req, res) => {
+    wrapFinanceRoute('invoice.update', (req) => `invoice:${req.params.id}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -377,7 +477,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/payments',
     requireTenant,
     requirePerm('finance.payment.create'),
-    wrapFinanceRoute('payment.create', 'invoice:payment', async (req, res) => {
+    wrapFinanceRoute('payment.create', (req, res) => `invoice:${req.params.id}:payment:${res.locals.createdId}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -385,6 +485,7 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await recordPayment(pgAdapter, { ...body, invoice_id: id }, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -394,7 +495,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/void',
     requireTenant,
     requirePerm('finance.invoice.void'),
-    wrapFinanceRoute('invoice.void', 'invoice:void', async (req, res) => {
+    wrapFinanceRoute('invoice.void', (req) => `invoice:${req.params.id}:void`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -414,7 +515,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/reconcile',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.reconcile', 'invoice:reconcile', async (req, res) => {
+    wrapFinanceRoute('invoice.reconcile', (req) => `invoice:${req.params.id}:reconcile`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -426,9 +527,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   );
 
   // List customers — tenant-scoped.
-  app.get('/api/finance/customers', async (req, res, next) => {
+  app.get('/api/finance/customers', requireTenant, requirePerm('finance.customer.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listCustomersPure(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -436,14 +537,63 @@ export function registerFinanceRoutes(app, opts = {}) {
     }
   });
 
+  // Customer 360 — CFO-facing full view: customer info + every
+  // open invoice (with balance) + recent payments + totals + aging
+  // buckets. Wave 31/32. Single round-trip, all the data a
+  // collections reviewer needs to triage a customer.
+  //
+  // Perm gate: finance.customer.read (the same perm the customer
+  // list / get uses; the 360 view is read-only, no extra perms).
+  // Tenant scope: requireTenant (the standard Wave 28 middleware
+  // pair — req.tenantId is stamped by the middleware).
+  // Audit: this is a GET, so the audit log is NOT written by
+  // wrapFinanceRoute (which is for writes only). The audit row
+  // for the 360 read itself is unnecessary; the underlying
+  // invoices / payments / customer are already auditable through
+  // the existing write paths. Operators who want to see "who
+  // pulled customer 42's 360 today" can find them via the
+  // ?path=/api/finance/customers/42/360 audit filter if needed.
+  app.get(
+    '/api/finance/customers/:id/360',
+    requireTenant,
+    requirePerm('finance.customer.read'),
+    async (req, res, next) => {
+      try {
+        const id = parseCustomerId(req.params.id);
+        if (id === null) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const tenantId = req.tenantId;
+        // Optional ?today=YYYY-MM-DD override (defaults to current
+        // date inside the pure function). Useful for back-dated
+        // aging reports and reproducible tests.
+        const today = typeof req.query.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.today)
+          ? req.query.today
+          : undefined;
+        const out = await getCustomer360(pgAdapter, id, tenantId, today ? { today } : {});
+        res.status(200).json(out);
+      } catch (err) {
+        // The pure function throws ValueError on missing or
+        // cross-tenant customer; map both to 404 (no
+        // existence-oracle leak between tenants — same pattern
+        // as getProject / getTask / getInvoice).
+        if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
   // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
   app.post(
     '/api/finance/customers',
     requireTenant,
     requirePerm('finance.customer.create'),
-    wrapFinanceRoute('customer.create', 'customer:new', async (req, res) => {
+    wrapFinanceRoute('customer.create', (req, res) => res.locals.createdId ? `customer:${res.locals.createdId}` : 'customer:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCustomer(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -453,7 +603,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/customers/:id',
     requireTenant,
     requirePerm('finance.customer.update'),
-    wrapFinanceRoute('customer.update', 'customer:id', async (req, res) => {
+    wrapFinanceRoute('customer.update', (req) => `customer:${req.params.id}`, async (req, res) => {
       const id = parseCustomerId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -472,7 +622,7 @@ export function registerFinanceRoutes(app, opts = {}) {
   );
 
   // VAT return for a given YYYY-MM.
-  app.get('/api/finance/vat/return', async (req, res, next) => {
+  app.get('/api/finance/vat/return', requireTenant, requirePerm('finance.tax.read'), async (req, res, next) => {
     try {
       const yearMonth = String(req.query.yearMonth || '').trim();
       assertYearMonth(yearMonth);
@@ -489,7 +639,7 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // e-invoice export for a single invoice.
-  app.get('/api/finance/einvoice/export/:invoiceId', async (req, res, next) => {
+  app.get('/api/finance/einvoice/export/:invoiceId', requireTenant, requirePerm('finance.einvoice.read'), async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.invoiceId);
       if (id === null) {
@@ -515,7 +665,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/lines',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.update', 'invoice:lines', async (req, res) => {
+    wrapFinanceRoute('invoice.update', (req) => `invoice:${req.params.id}:lines`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -530,26 +680,37 @@ export function registerFinanceRoutes(app, opts = {}) {
   // user_id, action, resource prefix, since/until, and limit.
   // Uses the raw sqlite handle (not the pg adapter) because the
   // audit table is application infrastructure, not a domain table.
-  app.get('/api/finance/audit', async (req, res, next) => {
-    try {
-      const tenantId = readTenant(req);
+  //
+  // Perm gate: `security.audit.read` (bound to the AuditReader
+  // perm set, which Owner / Admin / Auditor all hold). Without
+  // the perm, the response is 403. The audit log is compliance
+  // data — only readers with the audit permission can see it.
+  app.get(
+    '/api/finance/audit',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+      const tenantId = req.tenantId;
       const filters = {
         tenant_id: tenantId,
         user_id: req.query.user_id,
         action: req.query.action,
         resource_prefix: req.query.resource,
+        resource_id: req.query.resource_id,
         since: req.query.since,
         until: req.query.until,
         limit: req.query.limit,
         offset: req.query.offset,
       };
-      const rawDb = req.app && req.app.locals && req.app.locals.db;
-      const items = await listAudit(rawDb, filters);
-      res.status(200).json({ items });
-    } catch (err) {
-      next(err);
-    }
-  });
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        const items = await listAudit(rawDb, filters);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ─── Phase 1 ERP: Inventory module ───
   //
@@ -558,9 +719,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   // memory harness) plus a tenantId. All routes are tenant-scoped.
 
   // Catalog (product) endpoints.
-  app.get('/api/finance/catalog/items', async (req, res, next) => {
+  app.get('/api/finance/catalog/items', requireTenant, requirePerm('finance.product.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listCatalogItems(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -571,17 +732,18 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/catalog/items',
     requireTenant,
     requirePerm('finance.product.create'),
-    wrapFinanceRoute('product.create', 'product:new', async (req, res) => {
+    wrapFinanceRoute('product.create', (req, res) => res.locals.createdId ? `product:${res.locals.createdId}` : 'product:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCatalogItem(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
 
   // Warehouse endpoints.
-  app.get('/api/finance/warehouses', async (req, res, next) => {
+  app.get('/api/finance/warehouses', requireTenant, requirePerm('finance.warehouse.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listWarehouses(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -592,17 +754,18 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/warehouses',
     requireTenant,
     requirePerm('finance.warehouse.create'),
-    wrapFinanceRoute('warehouse.create', 'warehouse:new', async (req, res) => {
+    wrapFinanceRoute('warehouse.create', (req, res) => res.locals.createdId ? `warehouse:${res.locals.createdId}` : 'warehouse:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createWarehouse(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
 
   // Stock location endpoints.
-  app.get('/api/finance/stock/locations', async (req, res, next) => {
+  app.get('/api/finance/stock/locations', requireTenant, requirePerm('finance.warehouse.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : undefined;
       const items = await listLocations(pgAdapter, tenantId, warehouseId);
       res.status(200).json({ items });
@@ -614,17 +777,18 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/locations',
     requireTenant,
     requirePerm('finance.warehouse.create'),
-    wrapFinanceRoute('location.create', 'location:new', async (req, res) => {
+    wrapFinanceRoute('location.create', (req, res) => res.locals.createdId ? `location:${res.locals.createdId}` : 'location:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createLocation(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
 
   // Stock balance + move endpoints (read-only).
-  app.get('/api/finance/stock/balances', async (req, res, next) => {
+  app.get('/api/finance/stock/balances', requireTenant, requirePerm('finance.stock.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {};
       if (req.query.item_id) opts.itemId = Number(req.query.item_id);
       if (req.query.location_id) opts.locationId = Number(req.query.location_id);
@@ -634,9 +798,9 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
-  app.get('/api/finance/stock/moves', async (req, res, next) => {
+  app.get('/api/finance/stock/moves', requireTenant, requirePerm('finance.stock.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {};
       if (req.query.item_id) opts.itemId = Number(req.query.item_id);
       if (req.query.move_type) opts.moveType = String(req.query.move_type);
@@ -653,9 +817,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/receive',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.receive', 'stock:move:receive', async (req, res) => {
+    wrapFinanceRoute('stock.receive', (req, res) => `stock_move:${res.locals.createdId}:receive`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await receiveStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -663,9 +828,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/deliver',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.deliver', 'stock:move:deliver', async (req, res) => {
+    wrapFinanceRoute('stock.deliver', (req, res) => `stock_move:${res.locals.createdId}:deliver`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await deliverStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -673,9 +839,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/transfer',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.transfer', 'stock:move:transfer', async (req, res) => {
+    wrapFinanceRoute('stock.transfer', (req, res) => `stock_move:${res.locals.createdId}:transfer`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await transferStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -683,9 +850,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/adjust',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.adjust', 'stock:move:adjust', async (req, res) => {
+    wrapFinanceRoute('stock.adjust', (req, res) => `stock_move:${res.locals.createdId}:adjust`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await adjustStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -693,9 +861,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   // ─── Phase 1 ERP: Purchase module ───
   //
   // Vendors — basic CRUD for supplier master.
-  app.get('/api/finance/vendors', async (req, res, next) => {
+  app.get('/api/finance/vendors', requireTenant, requirePerm('finance.vendor.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listVendors(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -706,17 +874,18 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendors',
     requireTenant,
     requirePerm('finance.vendor.create'),
-    wrapFinanceRoute('vendor.create', 'vendor:new', async (req, res) => {
+    wrapFinanceRoute('vendor.create', (req, res) => res.locals.createdId ? `vendor:${res.locals.createdId}` : 'vendor:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createVendor(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
 
   // Purchase orders.
-  app.get('/api/finance/purchase-orders', async (req, res, next) => {
+  app.get('/api/finance/purchase-orders', requireTenant, requirePerm('finance.purchase.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {};
       if (req.query.vendor_id) opts.vendorId = Number(req.query.vendor_id);
       if (req.query.status) opts.status = String(req.query.status);
@@ -730,9 +899,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders',
     requireTenant,
     requirePerm('finance.purchase.create'),
-    wrapFinanceRoute('po.create', 'po:new', async (req, res) => {
+    wrapFinanceRoute('po.create', (req, res) => res.locals.createdId ? `purchase_order:${res.locals.createdId}` : 'po:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createPurchaseOrder(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -740,7 +910,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/confirm',
     requireTenant,
     requirePerm('finance.purchase.confirm'),
-    wrapFinanceRoute('po.confirm', 'po:confirm', async (req, res) => {
+    wrapFinanceRoute('po.confirm', (req) => `purchase_order:${req.params.id}:confirm`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -754,7 +924,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/cancel',
     requireTenant,
     requirePerm('finance.purchase.cancel'),
-    wrapFinanceRoute('po.cancel', 'po:cancel', async (req, res) => {
+    wrapFinanceRoute('po.cancel', (req) => `purchase_order:${req.params.id}:cancel`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -769,21 +939,22 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/receive',
     requireTenant,
     requirePerm('finance.purchase.receive'),
-    wrapFinanceRoute('po.receive', 'po:receive', async (req, res) => {
+    wrapFinanceRoute('po.receive', (req, res) => `purchase_order:${req.params.id}:receive:${res.locals.createdId}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
       const tenantId = req.tenantId;
       const out = await receivePurchaseOrder(pgAdapter, id, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
 
   // Vendor bills.
-  app.get('/api/finance/vendor-bills', async (req, res, next) => {
+  app.get('/api/finance/vendor-bills', requireTenant, requirePerm('finance.bill.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {};
       if (req.query.vendor_id) opts.vendorId = Number(req.query.vendor_id);
       if (req.query.status) opts.status = String(req.query.status);
@@ -798,7 +969,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills',
     requireTenant,
     requirePerm('finance.bill.create'),
-    wrapFinanceRoute('bill.create', 'bill:new', async (req, res) => {
+    wrapFinanceRoute('bill.create', (req, res) => res.locals.createdId ? `vendor_bill:${res.locals.createdId}` : 'bill:new', async (req, res) => {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const orderId = Number(body.purchase_order_id);
@@ -806,6 +977,7 @@ export function registerFinanceRoutes(app, opts = {}) {
         return res.status(400).json({ error: 'bad_request', message: 'purchase_order_id must be a positive integer' });
       }
       const out = await createVendorBillFromReceipt(pgAdapter, orderId, body, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -813,7 +985,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/confirm',
     requireTenant,
     requirePerm('finance.bill.update'),
-    wrapFinanceRoute('bill.confirm', 'bill:confirm', async (req, res) => {
+    wrapFinanceRoute('bill.confirm', (req) => `vendor_bill:${req.params.id}:confirm`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -827,7 +999,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/post',
     requireTenant,
     requirePerm('finance.bill.approve'),
-    wrapFinanceRoute('bill.post', 'bill:post', async (req, res) => {
+    wrapFinanceRoute('bill.post', (req) => `vendor_bill:${req.params.id}:post`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -841,7 +1013,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/pay',
     requireTenant,
     requirePerm('finance.bill.pay'),
-    wrapFinanceRoute('bill.pay', 'bill:pay', async (req, res) => {
+    wrapFinanceRoute('bill.pay', (req) => `vendor_bill:${req.params.id}:pay`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -855,7 +1027,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/void',
     requireTenant,
     requirePerm('finance.bill.void'),
-    wrapFinanceRoute('bill.void', 'bill:void', async (req, res) => {
+    wrapFinanceRoute('bill.void', (req) => `vendor_bill:${req.params.id}:void`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -877,13 +1049,13 @@ export function registerFinanceRoutes(app, opts = {}) {
   // The hydration is done by getPurchaseOrder (joins item names +
   // vendor fields). The rendering is done by renderPurchaseOrder
   // (poTemplate.js). Both are pure, both are tenant-scoped.
-  app.get('/api/finance/purchase-orders/:id/print', async (req, res, next) => {
+  app.get('/api/finance/purchase-orders/:id/print', requireTenant, requirePerm('finance.purchase.read'), async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const po = await getPurchaseOrder(pgAdapter, id, tenantId);
       if (!po) {
         return res.status(404).json({ error: 'not_found' });
@@ -903,13 +1075,13 @@ export function registerFinanceRoutes(app, opts = {}) {
 
   // GET /api/finance/receipts/:id/print?locale=hy&format=html|text
   //   Same pattern as the PO print route, but for delivery notes.
-  app.get('/api/finance/receipts/:id/print', async (req, res, next) => {
+  app.get('/api/finance/receipts/:id/print', requireTenant, requirePerm('finance.purchase.read'), async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const receipt = await getReceipt(pgAdapter, id, tenantId);
       if (!receipt) {
         return res.status(404).json({ error: 'not_found' });
@@ -937,9 +1109,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   The report uses finance.stock.read for the perm gate; the
   //   tenant scope is read from the X-Tenant-Id header or
   //   req.user.tenant_id (via readTenant).
-  app.get('/api/finance/replenishment-report', async (req, res, next) => {
+  app.get('/api/finance/replenishment-report', requireTenant, requirePerm('finance.stock.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {};
       if (req.query.warehouse_id) opts.warehouseId = Number(req.query.warehouse_id);
       const items = await getReplenishmentReport(pgAdapter, tenantId, opts);
@@ -957,9 +1129,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   The route is read-only and tenant-scoped; no perm gate (the
   //   journal is part of the finance module and inherits the same
   //   implicit tenant scope as the other finance routes).
-  app.get('/api/finance/journal-entries', async (req, res, next) => {
+  app.get('/api/finance/journal-entries', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {
         since: req.query.since,
         until: req.query.until,
@@ -976,13 +1148,13 @@ export function registerFinanceRoutes(app, opts = {}) {
 
   // GET /api/finance/journal-entries/:id
   //   Fetch one journal entry (header + lines) by id.
-  app.get('/api/finance/journal-entries/:id', async (req, res, next) => {
+  app.get('/api/finance/journal-entries/:id', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const entry = await getJournalEntry(pgAdapter, id, tenantId);
       if (!entry) {
         return res.status(404).json({ error: 'not_found' });
@@ -998,9 +1170,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   (every account that has any activity, with its debit / credit
   //   / net totals). Optional ?asOfDate= scopes to a financial date.
   //   The returned list is the basis for the trial balance report.
-  app.get('/api/finance/account-balances', async (req, res, next) => {
+  app.get('/api/finance/account-balances', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = { asOfDate: req.query.asOfDate };
       const items = await listAccountBalances(pgAdapter, tenantId, opts);
       res.status(200).json({ items });
@@ -1013,13 +1185,13 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   Fetch one account's balance (debit / credit / net) for the
   //   caller's tenant. The :accountCode is a 3-digit chart code
   //   (e.g. 216, 711, 521). Optional ?asOfDate= scopes to a date.
-  app.get('/api/finance/account-balances/:accountCode', async (req, res, next) => {
+  app.get('/api/finance/account-balances/:accountCode', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
       const code = String(req.params.accountCode || '').trim();
       if (!/^\d{3}$/.test(code)) {
         return res.status(400).json({ error: 'bad_request', message: 'accountCode must be 3 digits' });
       }
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = { asOfDate: req.query.asOfDate };
       const balance = await getAccountBalance(pgAdapter, code, tenantId, opts);
       res.status(200).json(balance);
@@ -1037,9 +1209,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   dryRun=false to actually post (but the POST route below is
   //   the destructive operation that's typically called from a
   //   scheduled job or operator action).
-  app.get('/api/finance/journal/reconcile', async (req, res, next) => {
+  app.get('/api/finance/journal/reconcile', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const dryRun = req.query.dryRun !== 'false';
       if (dryRun) {
         const unposted = await findUnpostedMoves(pgAdapter, tenantId);
@@ -1099,9 +1271,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   The report format is JSON by default; pass format=text
   //   to get a server-rendered text report (useful for the
   //   Armenian print workflow).
-  app.get('/api/finance/trial-balance', async (req, res, next) => {
+  app.get('/api/finance/trial-balance', requireTenant, requirePerm('finance.journal.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const opts = {
         asOfDate: req.query.asOfDate,
         locale: String(req.query.locale || 'en'),
@@ -1126,9 +1298,9 @@ export function registerFinanceRoutes(app, opts = {}) {
 
   // GET /api/finance/crm/contacts
   //   List active CRM contacts for the caller's tenant.
-  app.get('/api/finance/crm/contacts', async (req, res, next) => {
+  app.get('/api/finance/crm/contacts', requireTenant, requirePerm('crm.contact.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const items = await listContacts(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
@@ -1146,9 +1318,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/crm/contacts',
     requireTenant,
     requirePerm('crm.contact.create'),
-    wrapFinanceRoute('crm.contact.create', 'crm_contact:new', async (req, res) => {
+    wrapFinanceRoute('crm.contact.create', (req, res) => res.locals.createdId ? `crm_contact:${res.locals.createdId}` : 'crm_contact:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createContact(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1157,9 +1330,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   List CRM leads for the caller's tenant. Optional ?status=
   //   filter (new / qualified / proposal / won / lost). Ordered by
   //   id DESC (most recent first).
-  app.get('/api/finance/crm/leads', async (req, res, next) => {
+  app.get('/api/finance/crm/leads', requireTenant, requirePerm('crm.lead.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const status = req.query.status ?? null;
       const items = await listLeads(pgAdapter, tenantId, status);
       res.status(200).json({ items });
@@ -1178,9 +1351,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/crm/leads',
     requireTenant,
     requirePerm('crm.lead.create'),
-    wrapFinanceRoute('crm.lead.create', 'crm_lead:new', async (req, res) => {
+    wrapFinanceRoute('crm.lead.create', (req, res) => res.locals.createdId ? `crm_lead:${res.locals.createdId}` : 'crm_lead:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createLead(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1212,9 +1386,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   List helpdesk cases for the caller's tenant. Optional
   //   ?status= filter (open / pending / resolved / closed). Ordered
   //   by id DESC (most recent first).
-  app.get('/api/finance/desk/cases', async (req, res, next) => {
+  app.get('/api/finance/desk/cases', requireTenant, requirePerm('desk.case.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const status = req.query.status ?? null;
       const items = await listCases(pgAdapter, tenantId, status);
       res.status(200).json({ items });
@@ -1229,9 +1403,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   "not found in tenant"; the route handler converts to 404
   //   inline, since the global error handler returns 500 for
   //   everything else).
-  app.get('/api/finance/desk/cases/:id', async (req, res, next) => {
+  app.get('/api/finance/desk/cases/:id', requireTenant, requirePerm('desk.case.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const caseId = Number(req.params.id);
       const item = await getCase(pgAdapter, caseId, tenantId);
       res.status(200).json(item);
@@ -1253,9 +1427,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/desk/cases',
     requireTenant,
     requirePerm('desk.case.create'),
-    wrapFinanceRoute('desk.case.create', 'desk_case:new', async (req, res) => {
+    wrapFinanceRoute('desk.case.create', (req, res) => res.locals.createdId ? `desk_case:${res.locals.createdId}` : 'desk_case:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCase(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1268,9 +1443,9 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   the case's existence first via getCase (which throws
   //   ValueError on "not found in tenant") and converts that to
   //   404 inline.
-  app.get('/api/finance/desk/cases/:id/replies', async (req, res, next) => {
+  app.get('/api/finance/desk/cases/:id/replies', requireTenant, requirePerm('desk.reply.read'), async (req, res, next) => {
     try {
-      const tenantId = readTenant(req);
+      const tenantId = req.tenantId;
       const caseId = Number(req.params.id);
       // Existence check: a request to list replies on a missing
       // case is 404 (consistent with the single-entity GET
@@ -1297,7 +1472,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('desk.reply.create'),
     wrapFinanceRoute(
       'desk.reply.create',
-      'desk_reply:new',
+      (req, res) => `desk_reply:${res.locals.createdId}`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const caseId = Number(req.params.id);
@@ -1305,5 +1480,490 @@ export function registerFinanceRoutes(app, opts = {}) {
         res.status(201).json(out);
       },
     ),
+  );
+
+  // ─────────── Projects (project management) — Phase 2 wave 2 (W75) ───────────
+  //
+  // The projects module is a 3-table hierarchical structure:
+  //   projects (id, tenant_id, code, name, description, customer_id,
+  //     status, start_date, end_date, owner_id, ...)
+  //   project_tasks (id, tenant_id, project_id, name, description,
+  //     status, priority, assignee_id, due_date, ...)
+  //   project_time_entries (id, tenant_id, task_id, user_id, work_date,
+  //     hours, billable, description, ...)
+  //
+  // Project statuses: active / on_hold / completed / cancelled.
+  // Task statuses: todo / in_progress / done / blocked.
+  // Task priorities: low / normal / high / urgent.
+  //
+  // Wave 2 wires 8 HTTP endpoints (matches the W70->W71 cadence for
+  // CRM and the W72->W73 cadence for desk): 2 reads on projects
+  // (list + get), 1 write on projects (create), 2 reads on tasks
+  // (list + get), 1 write on tasks (create), 1 read on time entries
+  // (list), 1 write on time entries (create). The 8 endpoints map
+  // to 6 perm keys:
+  //   projects.project.read    — list + get project
+  //   projects.project.create  — create project
+  //   projects.task.read       — list + get task
+  //   projects.task.create     — create task
+  //   projects.time.read       — list time entries
+  //   projects.time.create     — create time entry
+  // The ProjectsOperator perm set in server/rbac/matrix.js
+  // already includes all 6 keys (no perm changes needed for W75-1).
+
+  // GET /api/finance/projects
+  //   List projects for the caller's tenant. Optional ?status=
+  //   filter (active / on_hold / completed / cancelled). Ordered
+  //   by id DESC (most recent first).
+  app.get('/api/finance/projects', requireTenant, requirePerm('projects.project.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const status = req.query.status ?? null;
+      const items = await listProjects(pgAdapter, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/projects
+  //   Create a new project. Body: { name, code?, description?,
+  //   customer_id?, status?, start_date?, end_date?, owner_id? }.
+  //   name is required. status defaults to 'active'.
+  app.post(
+    '/api/finance/projects',
+    requireTenant,
+    requirePerm('projects.project.create'),
+    wrapFinanceRoute('projects.project.create', (req, res) => res.locals.createdId ? `project:${res.locals.createdId}` : 'project:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createProject(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/projects/:id
+  //   Get a single project. Returns 404 if the project is missing
+  //   or cross-tenant (the pure function throws ValueError on
+  //   "not found in tenant"; the route handler converts to 404
+  //   inline, consistent with the desk /cases/:id pattern).
+  app.get('/api/finance/projects/:id', requireTenant, requirePerm('projects.project.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const projectId = Number(req.params.id);
+      const item = await getProject(pgAdapter, projectId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/projects/:id/tasks
+  //   List tasks for a project. Optional ?status= filter
+  //   (todo / in_progress / done / blocked). Ordered by id ASC
+  //   (chronological; tasks are added in order). Returns 404
+  //   if the project is missing or cross-tenant.
+  app.get('/api/finance/projects/:id/tasks', requireTenant, requirePerm('projects.task.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const projectId = Number(req.params.id);
+      const status = req.query.status ?? null;
+      // The pure listTasks function does the project existence
+      // check; the inline ValueError → 404 conversion is the
+      // same pattern as /cases/:id/replies in the desk module.
+      const items = await listTasks(pgAdapter, projectId, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/projects/:id/tasks
+  //   Create a new task under a project. Body: { name,
+  //   description?, status?, priority?, assignee_id?, due_date? }.
+  //   name is required. The project_id is injected from the URL
+  //   (the body may also include it; the URL value wins).
+  app.post(
+    '/api/finance/projects/:id/tasks',
+    requireTenant,
+    requirePerm('projects.task.create'),
+    wrapFinanceRoute('projects.task.create', (req, res) => `project_task:${res.locals.createdId}`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const projectId = Number(req.params.id);
+      // Inject the project_id from the URL into the input
+      // (the pure function validates it via its project
+      // existence check, so a wrong project_id returns 404
+      // not 500).
+      const input = { ...(req.body || {}), project_id: projectId };
+      const out = await createTask(pgAdapter, input, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/projects/:id/tasks/:taskId
+  //   Get a single task. Returns 404 if the task is missing or
+  //   cross-tenant. The project_id in the URL is for URL
+  //   consistency only; the pure getTask function does the
+  //   existence check on the task, not the project.
+  app.get('/api/finance/projects/:id/tasks/:taskId', requireTenant, requirePerm('projects.task.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const taskId = Number(req.params.taskId);
+      const item = await getTask(pgAdapter, taskId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/projects/:id/tasks/:taskId/time-entries
+  //   List time entries for a task (chronological by work_date).
+  //   Returns 404 if the task is missing or cross-tenant (the
+  //   pure listTimeEntries function does the existence check).
+  app.get(
+    '/api/finance/projects/:id/tasks/:taskId/time-entries',
+    requireTenant,
+    requirePerm('projects.time.read'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const taskId = Number(req.params.taskId);
+        const items = await listTimeEntries(pgAdapter, taskId, tenantId);
+        res.status(200).json({ items });
+      } catch (err) {
+        if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/projects/:id/tasks/:taskId/time-entries
+  //   Add a time entry to a task. Body: { user_id, work_date,
+  //   hours, billable?, description? }. user_id, work_date, and
+  //   hours are required. The task_id is injected from the URL.
+  app.post(
+    '/api/finance/projects/:id/tasks/:taskId/time-entries',
+    requireTenant,
+    requirePerm('projects.time.create'),
+    wrapFinanceRoute(
+      'projects.time.create',
+      (req, res) => `project_time_entry:${res.locals.createdId}`,
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const taskId = Number(req.params.taskId);
+        // Inject the task_id from the URL into the input
+        // (the pure function validates it via its task
+        // existence check).
+        const input = { ...(req.body || {}), task_id: taskId };
+         const out = await createTimeEntry(pgAdapter, input, tenantId);
+         res.status(201).json(out);
+       },
+     ),
+   );
+
+  // ─────────── Catalog v2 (categories + variants) — Phase 2 wave 2 (W77) ───────────
+  //
+  // The catalog v2 module extends the existing flat
+  // catalog (Wave 7: catalog_items + catalog_variants
+  // + catalog_categories tables) with:
+  //   - Categories (hierarchical via parent_id) with
+  //     slug + description
+  //   - Variants (per-item SKU + name + attributes_json
+  //     + unit_price_amd + unit_cost_amd)
+  //
+  // Wave 2 wires 7 HTTP endpoints (consistent with the
+  // W70->W71 / W72->W73 / W74->W75 cadence): 2 reads +
+  // 1 path on categories, 1 write on categories, 1 read +
+  // 1 write on variants, 1 single-entity GET on variant.
+  // The 7 endpoints map to 4 perm keys (all NEW in
+  // W77-1; added to server/rbac/permissions.js):
+  //   finance.category.read  — list + get + path
+  //   finance.category.create — create
+  //   finance.variant.read   — list + get
+  //   finance.variant.create — create
+  // The new CatalogOperator perm set in
+  // server/rbac/matrix.js bundles all 4 keys (no existing
+  // perm set covered categories or variants).
+
+  // GET /api/finance/catalog/categories
+  //   List categories for the caller's tenant.
+  //   Optional ?parent_id= filter (returns only direct
+  //   children of category N). parent_id=null returns
+  //   ALL categories (flat list, ordered by id ASC).
+  //   The caller can filter to roots by checking
+  //   parent_id IS NULL in the response.
+  app.get('/api/finance/catalog/categories', requireTenant, requirePerm('finance.category.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const parentIdRaw = req.query.parent_id;
+      // Empty string or absent = null (flat list).
+      // Numeric string = parentId (filtered list).
+      const parentId = parentIdRaw === undefined || parentIdRaw === ''
+        ? null
+        : Number(parentIdRaw);
+      const items = await listCategories(pgAdapter, tenantId, parentId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/categories
+  //   Create a new category. Body: { name, slug?,
+  //   description?, parent_id? }. name is required.
+  //   slug is optional (when present, must be unique
+  //   per tenant). parent_id is optional (null for
+  //   root).
+  app.post(
+    '/api/finance/catalog/categories',
+    requireTenant,
+    requirePerm('finance.category.create'),
+    wrapFinanceRoute(
+      'finance.category.create',
+      (req, res) => res.locals.createdId ? `catalog_category:${res.locals.createdId}` : 'catalog_category:new',
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const out = await createCategory(pgAdapter, req.body || {}, tenantId);
+        res.status(201).json(out);
+      },
+    ),
+  );
+
+  // GET /api/finance/catalog/categories/:id
+  //   Get a single category. Returns 404 if the category
+  //   is missing or cross-tenant. The pure getCategory
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline (the W73-1 pattern).
+  app.get('/api/finance/catalog/categories/:id', requireTenant, requirePerm('finance.category.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const categoryId = Number(req.params.id);
+      const item = await getCategory(pgAdapter, categoryId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/catalog/categories/:id/path
+  //   Get the full breadcrumb path for a category
+  //   (root-to-leaf). Returns an array of {id, name}
+  //   objects. Empty array for a missing category
+  //   (the pure getCategoryPath function returns []
+  //   when the SQL recursive CTE finds no rows; this
+  //   is the consistent behavior — a missing category
+  //   is a 200 with [], NOT a 404, because the
+  //   "path" of a non-existent category is the empty
+  //   path). UIs can check items.length === 0 to
+  //   detect a missing category.
+  app.get(
+    '/api/finance/catalog/categories/:id/path',
+    requireTenant,
+    requirePerm('finance.category.read'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const categoryId = Number(req.params.id);
+        const items = await getCategoryPath(pgAdapter, categoryId, tenantId);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/catalog/items/:itemId/variants
+  //   List variants for a catalog item. Returns an
+  //   empty array when the item has no variants (or
+  //   when the item is missing — the SQL returns no
+  //   rows for a missing item; the empty array is
+  //   the consistent behavior, similar to
+  //   /desk/cases/:id/replies).
+  app.get(
+    '/api/finance/catalog/items/:itemId/variants',
+    requireTenant,
+    requirePerm('finance.variant.read'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const itemId = Number(req.params.itemId);
+        const items = await listVariants(pgAdapter, tenantId, itemId);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/catalog/items/:itemId/variants
+  //   Create a new variant under a catalog item.
+  //   Body: { sku, name, attributes_json?,
+  //   unit_price_amd?, unit_cost_amd? }. sku + name
+  //   are required. The catalog_item_id is injected
+  //   from the URL (consistent with the W75-1
+  //   projects pattern).
+  app.post(
+    '/api/finance/catalog/items/:itemId/variants',
+    requireTenant,
+    requirePerm('finance.variant.create'),
+    wrapFinanceRoute(
+      'finance.variant.create',
+      (req, res) => `catalog_variant:${res.locals.createdId}`,
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const itemId = Number(req.params.itemId);
+        const input = { ...(req.body || {}), catalog_item_id: itemId };
+        const out = await createVariant(pgAdapter, input, tenantId);
+        res.status(201).json(out);
+      },
+    ),
+  );
+
+  // GET /api/finance/catalog/variants/:id
+  //   Get a single variant. Returns 404 if the variant
+  //   is missing or cross-tenant. The pure getVariant
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline (the W73-1 pattern).
+  app.get('/api/finance/catalog/variants/:id', requireTenant, requirePerm('finance.variant.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const variantId = Number(req.params.id);
+      const item = await getVariant(pgAdapter, variantId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ─────────── Catalog v2 wave 3b (bundles) — Phase 2 (W79) ───────────
+  //
+  // The bundles module extends the catalog with
+  // compound items: a bundle has a header row
+  // (sku + name + bundle_price_amd) + N child rows
+  // referencing catalog_items. Wave 3b wires 5 HTTP
+  // endpoints (consistent with the W70->W71 / W72->W73
+  // / W74->W75 / W76->W77 cadence): 2 reads on bundles
+  // (list + get), 1 write on bundles (create), 1 read
+  // on bundle items (list), 1 write on bundle items
+  // (add). The 5 endpoints map to 4 perm keys (all
+  // NEW in W79-1; added to server/rbac/permissions.js):
+  //   finance.bundle.read        — list + get bundle
+  //   finance.bundle.create      — create bundle
+  //   finance.bundle_item.read   — list bundle items
+  //   finance.bundle_item.create — add bundle item
+  // The new CatalogOperator perm set bundles all 4
+  // keys (now 8 total catalog v2 keys; W76+W77+W78).
+
+  // GET /api/finance/catalog/bundles
+  //   List bundles for the caller's tenant. Default
+  //   (archived=false) returns only non-archived
+  //   bundles. ?archived=true returns all bundles
+  //   (including archived) — useful for cleanup views.
+  app.get('/api/finance/catalog/bundles', requireTenant, requirePerm('finance.bundle.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const archived = req.query.archived === 'true';
+      const items = await listBundles(pgAdapter, tenantId, { archived });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/bundles
+  //   Create a new bundle. Body: { sku, name,
+  //   description?, bundle_price_amd? }. sku + name
+  //   are required. bundle_price_amd is optional
+  //   (null when the bundle's price is computed
+  //   dynamically — future work).
+  app.post(
+    '/api/finance/catalog/bundles',
+    requireTenant,
+    requirePerm('finance.bundle.create'),
+    wrapFinanceRoute('finance.bundle.create', (req, res) => res.locals.createdId ? `catalog_bundle:${res.locals.createdId}` : 'catalog_bundle:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createBundle(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/catalog/bundles/:id
+  //   Get a single bundle. Returns 404 if the bundle
+  //   is missing or cross-tenant (the pure getBundle
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline — the W73-1 pattern).
+  app.get('/api/finance/catalog/bundles/:id', requireTenant, requirePerm('finance.bundle.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const item = await getBundle(pgAdapter, bundleId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/catalog/bundles/:id/items
+  //   List the recipe rows (catalog items +
+  //   quantities) for a bundle. Returns 404 if the
+  //   bundle is missing or cross-tenant (the pure
+  //   listBundleItems function does the existence
+  //   check).
+  app.get('/api/finance/catalog/bundles/:id/items', requireTenant, requirePerm('finance.bundle_item.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const items = await listBundleItems(pgAdapter, bundleId, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/bundles/:id/items
+  //   Add a new recipe row to a bundle. Body: {
+  //   catalog_item_id, quantity }. The bundle_id
+  //   is injected from the URL (the body may also
+  //   include it; the URL value wins — consistent
+  //   with the W75-1 projects pattern).
+  app.post(
+    '/api/finance/catalog/bundles/:id/items',
+    requireTenant,
+    requirePerm('finance.bundle_item.create'),
+    wrapFinanceRoute('finance.bundle_item.create', (req, res) => res.locals.createdId ? `catalog_bundle_item:${res.locals.createdId}` : 'catalog_bundle_item:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const out = await addBundleItem(pgAdapter, bundleId, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
   );
 }

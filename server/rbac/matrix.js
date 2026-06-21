@@ -234,6 +234,18 @@ const PERMISSION_SETS = Object.freeze({
       'finance.warehouse.update',
       'finance.stock.read',
       'finance.stock.move',
+      // Phase 2 catalog v2 (W77) — categories +
+      // variants. The admin user (who has the
+      // FinanceOperator set) gets these keys too.
+      'finance.category.read',
+      'finance.category.create',
+      'finance.variant.read',
+      'finance.variant.create',
+      // Phase 2 catalog v2 wave 3b (W79) — bundles
+      'finance.bundle.read',
+      'finance.bundle.create',
+      'finance.bundle_item.read',
+      'finance.bundle_item.create',
       'finance.vendor.read',
       'finance.vendor.create',
       'finance.vendor.update',
@@ -297,6 +309,7 @@ const PERMISSION_SETS = Object.freeze({
       'crm.deal.delete',
       'finance.customer.create',
       'finance.customer.update',
+      'finance.customer.read',
       'crm.deal.assign',
       'crm.deal.export',
       'crm.quote.read',
@@ -348,6 +361,33 @@ const PERMISSION_SETS = Object.freeze({
     description: 'Manage warehouses and run valuation.',
     isSystem: true,
     permissions: Object.freeze(['inv.product.delete', 'inv.warehouse.update', 'inv.valuation.run']),
+  },
+
+  // ─────────── Catalog v2 sets (Phase 2 W76/W77/W78/W79) ───────────
+  // Catalog v2 adds hierarchical categories + per-item
+  // variants + compound bundles on top of the existing
+  // flat catalog (Wave 7). The 8 new perm keys
+  // (finance.category.read/create + finance.variant.read/create
+  // + finance.bundle.read/create + finance.bundle_item.read/create)
+  // are bundled here. The existing InventoryOperator set
+  // keeps the flat catalog (finance.product.*) and
+  // inventory (inv.*) keys.
+  CatalogOperator: {
+    id: 'CatalogOperator',
+    label: 'Catalog Operator',
+    description: 'Categories (hierarchical), variants (per-item attributes), bundles (compound items).',
+    isSystem: true,
+    permissions: Object.freeze([
+      'finance.category.read',
+      'finance.category.create',
+      'finance.variant.read',
+      'finance.variant.create',
+      // Phase 2 catalog v2 wave 3b (W79-1) — bundles
+      'finance.bundle.read',
+      'finance.bundle.create',
+      'finance.bundle_item.read',
+      'finance.bundle_item.create',
+    ]),
   },
 
   // ─────────── Purchase sets ───────────
@@ -500,6 +540,7 @@ const PERMISSION_SETS = Object.freeze({
       'desk.case.resolve',
       'desk.case.close',
       'desk.reply.create',
+      'desk.reply.read',
       'desk.knowledge.read',
       'desk.sla.read',
       'desk.field_service.read',

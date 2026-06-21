@@ -12,6 +12,8 @@
 //
 // No `eval`, no string-concat SQL, no `new Function`. The SQL is fixed.
 
+import { validateHvhh as _a1ValidateHvhh } from './hvhh-validator.js';
+
 export class ValueError extends Error {
   constructor(message) {
     super(message);
@@ -48,8 +50,11 @@ function assertOptionalString(value, name, { max = 255 } = {}) {
 }
 
 function assertOptionalHvhh(value) {
-  if (value === null || value === undefined) return;
+  if (value === null || value === undefined || value === '') return;
   // Armenian HVVH (tax ID) is 8 digits. Pad/strip whitespace.
+  // Note: the deeper A1-Validator pass (assertValidHvhhAsync below)
+  // is the primary check; this sync version is a cheap pre-flight
+  // for the most common case (wrong type, obviously bad format).
   if (typeof value !== 'string') {
     throw new ValueError('hvhh must be a string of 8 digits or null');
   }
@@ -57,6 +62,21 @@ function assertOptionalHvhh(value) {
   if (!/^\d{8}$/.test(trimmed)) {
     throw new ValueError('hvhh must be exactly 8 digits');
   }
+}
+
+/**
+ * Async HVVH validation — uses the A1-Validator HTTP service with local
+ * regex fallback. Returns the normalized form (whitespace stripped).
+ *
+ * Throws ValueError with the validator's `error` message on invalid input.
+ * For optional hvhh (null/undefined/empty), returns null without throwing.
+ */
+export async function assertValidHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'hvhh is invalid');
 }
 
 function validateCreateInput(input) {
@@ -87,6 +107,10 @@ function validateUpdateInput(input) {
 
 export async function createCustomer(db, input, tenantId = 0) {
   validateCreateInput(input);
+  // A1-Validator pass — calls the A1-Validator HTTP service if
+  // A1_VALIDATOR_URL is set, otherwise falls back to the local regex.
+  // Throws ValueError on invalid input (caught by the route handler as 400).
+  await assertValidHvhhAsync(input);
   const { name, hvhh = null, address = null, email = null } = input;
 
   // HVVH uniqueness within the tenant (so two tenants can both have a

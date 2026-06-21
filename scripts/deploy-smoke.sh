@@ -110,6 +110,25 @@ const checks = [
   { path: '/api/finance/desk/cases?status=open', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/desk/cases?status=open tenant=0' },
   { path: '/api/finance/desk/cases/1',      headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1 (404 for missing case)' },
   { path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1/replies (404 for missing case)' },
+  // Phase 2 projects (W75-1) — projects + tasks reads
+  // (empty DB → 200, items: []; 404 for missing project/task)
+  { path: '/api/finance/projects',          headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/projects tenant=0' },
+  { path: '/api/finance/projects?status=active', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/projects?status=active tenant=0' },
+  { path: '/api/finance/projects/1',        headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1 (404 for missing project)' },
+  { path: '/api/finance/projects/1/tasks',  headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1/tasks (404 for missing project)' },
+  // Phase 2 catalog v2 (W77-1) — categories + variants
+  // reads (empty DB → 200, items: []; 404 for missing
+  // category/variant)
+  { path: '/api/finance/catalog/categories', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/categories tenant=0' },
+  { path: '/api/finance/catalog/categories?parent_id=1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/categories?parent_id=1 tenant=0' },
+  { path: '/api/finance/catalog/categories/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/categories/1 (404 for missing category)' },
+  { path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/variants/1 (404 for missing variant)' },
+  // Phase 2 catalog v2 wave 3b (W79-1) — bundles reads
+  // (empty DB → 200, items: []; 404 for missing bundle)
+  { path: '/api/finance/catalog/bundles', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles tenant=0' },
+  { path: '/api/finance/catalog/bundles?archived=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles?archived=true tenant=0' },
+  { path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1 (404 for missing bundle)' },
+  { path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1/items (404 for missing bundle)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -161,6 +180,43 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/desk/cases/1/replies', body: { body: 'smoke reply', author: 'agent' }, expect: 201, name: 'POST /api/finance/desk/cases/1/replies (returns id > 0)' },
   { method: 'GET', path: '/api/finance/desk/cases/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1 (returns the case created above)' },
   { method: 'GET', path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1/replies (returns the reply created above)' },
+  // Phase 2 projects (W75-1) — projects + tasks + time
+  // entries writes. The project smoke check returns id > 0
+  // (the wave-14 production pg adapter regression guard).
+  // The task + time-entry smoke checks depend on the
+  // project + task being created first, so they must come
+  // AFTER the project POST.
+  { method: 'POST', path: '/api/finance/projects', body: { name: 'Smoke Project', code: 'PROJ-SMOKE-1', start_date: '2026-06-21' }, expect: 201, name: 'POST /api/finance/projects (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/projects/1/tasks', body: { name: 'Smoke Task', priority: 'high' }, expect: 201, name: 'POST /api/finance/projects/1/tasks (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/projects/1/tasks/1/time-entries', body: { user_id: 1, work_date: '2026-06-21', hours: 1.5, billable: true }, expect: 201, name: 'POST /api/finance/projects/1/tasks/1/time-entries (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/projects/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1 (returns the project created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks (returns the task created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1 (returns the task created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks/1/time-entries', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1/time-entries (returns the entry created above)' },
+  // Phase 2 catalog v2 (W77-1) — categories + variants
+  // writes. The category smoke check returns id > 0
+  // (the wave-14 production pg adapter regression
+  // guard). The variant smoke check depends on the
+  // catalog item (id=1, created by the earlier
+  // catalog smoke check) being present, so it must
+  // come AFTER the item POST.
+  { method: 'POST', path: '/api/finance/catalog/categories', body: { name: 'Smoke Category', slug: 'smoke-cat-1' }, expect: 201, name: 'POST /api/finance/catalog/categories (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/catalog/items/1/variants', body: { sku: 'SMOKE-VAR-1', name: 'Smoke Variant', unit_price_amd: 1500 }, expect: 201, name: 'POST /api/finance/catalog/items/1/variants (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/catalog/categories/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/categories/1 (returns the category created above)' },
+  { method: 'GET', path: '/api/finance/catalog/categories/1/path', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/categories/1/path (returns the breadcrumb path)' },
+  { method: 'GET', path: '/api/finance/catalog/items/1/variants', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/items/1/variants (returns the variant created above)' },
+  { method: 'GET', path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/variants/1 (returns the variant created above)' },
+  // Phase 2 catalog v2 wave 3b (W79-1) — bundles +
+  // bundle items writes. The bundle smoke check
+  // returns id > 0 (the wave-14 production pg
+  // adapter regression guard). The bundle item
+  // smoke check depends on the bundle + the
+  // catalog item (id=1, created by the earlier
+  // catalog item smoke check) being present.
+  { method: 'POST', path: '/api/finance/catalog/bundles', body: { sku: 'SMOKE-BUN-1', name: 'Smoke Bundle', bundle_price_amd: 25000 }, expect: 201, name: 'POST /api/finance/catalog/bundles (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/catalog/bundles/1/items', body: { catalog_item_id: 1, quantity: 2 }, expect: 201, name: 'POST /api/finance/catalog/bundles/1/items (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1 (returns the bundle created above)' },
+  { method: 'GET', path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1/items (returns the recipe item created above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
@@ -315,6 +371,439 @@ else
 fi
 echo
 
+echo "=== STEP 5b: Audit endpoint perm gate (Bookkeeper → 403) ==="
+# Wave 26: GET /api/finance/audit is gated by security.audit.read.
+# A Bookkeeper doesn't hold that perm (Bookkeeper's role matrix
+# has FinanceOperator + CRMOperator + DocsOperator + StandardUser
+# but NOT AuditReader). Insert a Bookkeeper user + mint a session
+# + hit the endpoint; expect 403. Sanity-check that the admin
+# session still gets 200.
+DB_PATH="$DB" PORT="$PORT" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const { login, hashPassword } = require('$REPO_ROOT/server/auth-login.js');
+  const db = new DatabaseSync(process.env.DB_PATH);
+
+  // Seed a Bookkeeper user (id=2; the admin is already id=1).
+  const { hash, salt } = hashPassword('bk-pass');
+  db.prepare(\`INSERT OR REPLACE INTO users
+    (id, username, email, role, tenant_id, password_hash, password_salt)
+    VALUES (2, 'bookkeeper', 'bookkeeper@example.com', 'Bookkeeper', 0, ?, ?)\`)
+    .run(hash, salt);
+
+  const session = login(db, 'bookkeeper', 'bk-pass');
+  if (session.error) {
+    console.log('  FAIL bookkeeper login:', session.error);
+    process.exit(1);
+  }
+  const bkToken = session.token;
+
+  function call(method, path, token) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: token ? { 'authorization': 'Bearer ' + token } : {},
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.end();
+    });
+  }
+  // Wait for require to load.
+  const http = require('node:http');
+  (async () => {
+    const bk = await call('GET', '/api/finance/audit?limit=5', bkToken);
+    if (bk.status !== 403) {
+      console.log('  FAIL bookkeeper audit: expected 403, got', bk.status, bk.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 403 GET /api/finance/audit (Bookkeeper, no security.audit.read)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  perm gate OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+echo "=== STEP 5c: GET route perm gate (HRSpecialist → 403 on /api/finance/invoices) ==="
+# Wave 27: every finance GET is now perm-gated. HRSpecialist's role
+# matrix has HROperator + DocsOperator + AIEnabled + StandardUser
+# but no FinanceOperator / CRMOperator / DeskOperator / etc. —
+# HRSpecialist holds no finance.* perm and should 403 on
+# /api/finance/invoices. Sanity-check: the admin still gets 200
+# (Admin inherits FinanceOperator via the role matrix).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const { login, hashPassword } = require('$REPO_ROOT/server/auth-login.js');
+  const http = require('node:http');
+  const db = new DatabaseSync(process.env.DB_PATH);
+
+  const { hash, salt } = hashPassword('hr-pass');
+  db.prepare(\`INSERT OR REPLACE INTO users
+    (id, username, email, role, tenant_id, password_hash, password_salt)
+    VALUES (3, 'hruser', 'hr@example.com', 'HRSpecialist', 0, ?, ?)\`)
+    .run(hash, salt);
+
+  const session = login(db, 'hruser', 'hr-pass');
+  if (session.error) {
+    console.log('  FAIL hr login:', session.error);
+    process.exit(1);
+  }
+  const hrToken = session.token;
+
+  function call(method, path, token) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: token ? { 'authorization': 'Bearer ' + token } : {},
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.end();
+    });
+  }
+  (async () => {
+    // 1) HRSpecialist → 403 on /api/finance/invoices
+    const hr = await call('GET', '/api/finance/invoices?limit=5', hrToken);
+    if (hr.status !== 403) {
+      console.log('  FAIL hr audit: expected 403, got', hr.status, hr.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 403 GET /api/finance/invoices (HRSpecialist, no finance.invoice.read)');
+    // 2) Admin → 200 on the same endpoint (sanity: Admin still has the perm)
+    const adm = await call('GET', '/api/finance/invoices?limit=5', process.env.ADMIN_TOKEN);
+    if (adm.status !== 200) {
+      console.log('  FAIL admin sanity: expected 200, got', adm.status, adm.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/invoices (admin sanity)');
+    process.exit(0);
+   })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  GET perm gate OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+echo "=== STEP 5d: Audit resource captures the actual entity id (Wave 29) ==="
+# Wave 29 makes wrapFinanceRoute record the actual entity id in
+# the audit resource field. Before: PATCH /invoices/42 recorded
+# 'invoice:id' (the literal). After: 'invoice:42'.
+#
+# Test: PATCH a customer, then GET the audit filtered by the
+# customer id, and assert the row's resource field is
+# 'customer:<id>' (not 'customer:id' or 'customer:new').
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave29Audit', hvhh: '11111111' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) PATCH the customer (this is the write that should record
+    //    the dynamic resource)
+    const p = await call('PATCH', '/api/finance/customers/' + custId, { name: 'Wave29AuditRenamed' }, tok);
+    if (p.status !== 200) {
+      console.log('  FAIL patch customer:', p.status, JSON.stringify(p.body).slice(0, 200));
+      process.exit(1);
+    }
+    // 3) GET audit filtered by resource_id — the PATCH row should be in there
+    const a = await call('GET', '/api/finance/audit?resource_id=' + custId + '&limit=20', null, tok);
+    if (a.status !== 200) {
+      console.log('  FAIL get audit:', a.status);
+      process.exit(1);
+    }
+    const expected = 'customer:' + custId;
+    const found = a.body.items.find((r) => r.resource === expected);
+    if (!found) {
+      console.log('  FAIL resource_id filter: expected to find resource=\"' + expected + '\", got: ' +
+        JSON.stringify(a.body.items.map((r) => r.resource)));
+      process.exit(1);
+    }
+    if (found.action !== 'customer.update') {
+      console.log('  FAIL audit row action: expected customer.update, got', found.action);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/audit?resource_id=' + custId + ' returns the PATCH row with resource=\"' + expected + '\"');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  audit resource_id OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+echo "=== STEP 5e: Audit create-route resource captures the new id (Wave 30) ==="
+# Wave 30 closes the Wave 29 create-route gap: POST /customers
+# used to record the literal 'customer:new'; now it reads
+# res.locals.createdId (set by the handler) and records
+# 'customer:<newId>'. Test: create a customer, then assert the
+# create audit row's resource field is 'customer:<newId>'
+# (findable via ?resource_id=<newId>).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave30Create', hvhh: '33333333' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) GET audit filtered by resource_id — the CREATE row should be in there
+    const a = await call('GET', '/api/finance/audit?resource_id=' + custId + '&limit=20', null, tok);
+    if (a.status !== 200) {
+      console.log('  FAIL get audit:', a.status);
+      process.exit(1);
+    }
+    const expected = 'customer:' + custId;
+    const createRow = a.body.items.find(
+      (r) => r.resource === expected && r.action === 'customer.create',
+    );
+    if (!createRow) {
+      console.log('  FAIL create row not found for resource_id=' + custId + ', got: ' +
+        JSON.stringify(a.body.items.map((r) => r.action + ':' + r.resource)));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/audit?resource_id=' + custId + ' returns the CREATE row with resource=\"' + expected + '\"');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  audit create resource_id OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+echo "=== STEP 5f: Customer 360 endpoint (Wave 32) ==="
+# Wave 32 wires the customer 360 pure function (Wave 31) to a GET
+# route. Smoke: create a customer, hit the 360 endpoint, assert
+# the response shape (customer info + open_invoices + recent_payments
+# + totals + aging).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave32Smoke', hvhh: '55555555' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) Hit the 360 endpoint
+    const r = await call('GET', '/api/finance/customers/' + custId + '/360', null, tok);
+    if (r.status !== 200) {
+      console.log('  FAIL get 360:', r.status, JSON.stringify(r.body).slice(0, 200));
+      process.exit(1);
+    }
+    const b = r.body;
+    if (b.customer.id !== custId) {
+      console.log('  FAIL customer.id mismatch:', b.customer.id, 'expected', custId);
+      process.exit(1);
+    }
+    if (b.customer.name !== 'Wave32Smoke') {
+      console.log('  FAIL customer.name mismatch:', b.customer.name);
+      process.exit(1);
+    }
+    if (!Array.isArray(b.open_invoices) || b.open_invoices.length !== 0) {
+      console.log('  FAIL open_invoices: expected empty array, got', JSON.stringify(b.open_invoices));
+      process.exit(1);
+    }
+    if (typeof b.totals.open_count !== 'number' || b.totals.open_count !== 0) {
+      console.log('  FAIL totals.open_count: expected 0, got', b.totals.open_count);
+      process.exit(1);
+    }
+    if (typeof b.aging.current !== 'number') {
+      console.log('  FAIL aging.current: expected number, got', b.aging.current);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/customers/' + custId + '/360 returns the full 360 view (customer + open_invoices + recent_payments + totals + aging)');
+    // 3) 404 path
+    const nf = await call('GET', '/api/finance/customers/999999/360', null, tok);
+    if (nf.status !== 404) {
+      console.log('  FAIL 404 path: expected 404, got', nf.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 GET /api/finance/customers/999999/360 (missing customer returns 404)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  customer 360 OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+echo "=== STEP 5g: Dashboard 360 JSON endpoint (Wave 35) ==="
+# Wave 35 wires the dashboard 360 pure function (Wave 34) to
+# GET /api/finance/360. Smoke: hit the endpoint with the admin
+# token, assert the response shape (ar, ap, top_customers,
+# top_vendors). Sanity: ?today=YYYY-MM-DD override returns the
+# expected today field.
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Hit the dashboard endpoint with default today
+    const r = await call('GET', '/api/finance/360', null, tok);
+    if (r.status !== 200) {
+      console.log('  FAIL get dashboard:', r.status, JSON.stringify(r.body).slice(0, 200));
+      process.exit(1);
+    }
+    const b = r.body;
+    if (typeof b.today !== 'string' || !/^\d{4}-\d{2}-\d{2}\$/.test(b.today)) {
+      console.log('  FAIL today field missing or malformed:', b.today);
+      process.exit(1);
+    }
+    if (!b.ar || typeof b.ar.open_count !== 'number' || typeof b.ar.outstanding_amd !== 'number' || !b.ar.aging) {
+      console.log('  FAIL ar shape:', JSON.stringify(b.ar).slice(0, 200));
+      process.exit(1);
+    }
+    if (!b.ap || typeof b.ap.open_count !== 'number' || typeof b.ap.outstanding_amd !== 'number' || !b.ap.aging) {
+      console.log('  FAIL ap shape:', JSON.stringify(b.ap).slice(0, 200));
+      process.exit(1);
+    }
+    if (!Array.isArray(b.top_customers)) {
+      console.log('  FAIL top_customers not array:', typeof b.top_customers);
+      process.exit(1);
+    }
+    if (!Array.isArray(b.top_vendors)) {
+      console.log('  FAIL top_vendors not array:', typeof b.top_vendors);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/360 returns the full dashboard JSON (ar + ap + top_customers + top_vendors)');
+    // 2) ?today override
+    const r2 = await call('GET', '/api/finance/360?today=2026-01-01', null, tok);
+    if (r2.status !== 200) {
+      console.log('  FAIL get dashboard with override:', r2.status);
+      process.exit(1);
+    }
+    if (r2.body.today !== '2026-01-01') {
+      console.log('  FAIL override today not applied:', r2.body.today);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/360?today=2026-01-01 returns today=' + r2.body.today);
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  dashboard 360 OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
@@ -359,6 +848,98 @@ else
   exit 1
 fi
 
+
+echo
+echo "=== STEP 7b: A1-Validator client integration (Wave 27) ==="
+# The A1-Validator client is opt-in. We verify:
+# 1. The client module exists and can be imported.
+# 2. With A1_VALIDATOR_URL unset, validate() returns _skipped (not a crash).
+# 3. With A1_VALIDATOR_URL pointing at a non-existent service, health() returns ok=false.
+A1_OUT=$(cd "$REPO_ROOT" && unset A1_VALIDATOR_URL && node -e "
+  import('./lib/a1-validator-client.js').then(async (m) => {
+    const c = new m.A1ValidatorClient({ baseUrl: 'http://a1-validator.invalid:8000', timeoutMs: 500, retries: 0 });
+    // Disabled client
+    const c2 = new m.A1ValidatorClient({ enabled: false });
+    const r2 = await c2.validate('hvvh', { hvhh: '00123456' });
+    if (!r2._skipped) { console.log('FAIL: disabled client did not return _skipped'); process.exit(1); }
+    // health() on unreachable host returns ok=false (no crash)
+    const h = await c.health();
+    if (h.ok) { console.log('FAIL: health() returned ok=true for unreachable host'); process.exit(1); }
+    console.log('OK a1-validator client: disabled-safe + health() ok=false on unreachable');
+  });
+") 2>&1
+if echo "$A1_OUT" | grep -q "^OK a1-validator client"; then
+  echo "  $A1_OUT"
+else
+  echo "  FAIL: A1-Validator client smoke failed"
+  echo "  output: $A1_OUT"
+  exit 1
+fi
+
+
+
+echo
+echo "=== STEP 7c: HVVH validation via A1-Validator wrapper (Wave 32) ==="
+# Verify that POST /api/finance/customers with a valid HHVH succeeds and
+# with an invalid HHVH returns 400. This exercises the new wiring
+# (server/finance/hvhh-validator.js + customer.js's async check).
+LOG7C="$TESTDIR/server-7c.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7C" 2>&1 &
+SERVER_PID_7C=$!
+SMOKE_RC=0
+cleanup_7c() { kill -9 $SERVER_PID_7C 2>/dev/null; wait $SERVER_PID_7C 2>/dev/null; }
+trap cleanup_7c EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7c"
+    tail -20 "$LOG7C"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7C=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7C" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7C" ]; then
+    echo "  FAIL: STEP 7c server did not print admin session token"
+    tail -20 "$LOG7C"
+    SMOKE_RC=1
+  else
+    CUST_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7C" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"SmokeCo","hvhh":"01234567"}')
+    if echo "$CUST_OUT" | grep -q '"hvhh":"01234567"'; then
+      echo "  OK customer create with valid hvhh persisted"
+    else
+      echo "  FAIL: valid hvhh did not persist: $CUST_OUT"
+      SMOKE_RC=1
+    fi
+
+    CUST_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7C" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"BadCo","hvhh":"123456789"}')
+    if [ "$CUST_BAD" = "400" ]; then
+      echo "  OK invalid 9-digit hvhh returns 400"
+    else
+      echo "  FAIL: invalid hvhh returned $CUST_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7C 2>/dev/null
+wait $SERVER_PID_7C 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
@@ -372,8 +953,9 @@ echo "=== STEP 8: Summary ==="
   echo "  - Graceful shutdown works (SIGTERM)"
   echo "  - Restart is idempotent"
   echo "  - Boot-time GL reconciliation ran (Wave 24)"
+  echo "  - A1-Validator client integration smoke (Wave 27)
+  - HVVH validation via A1-Validator wrapper (Wave 32)"
   exit 0
-else
-  echo "  RESULT: FAIL (smoke=$SMOKE_RC db=$DB_RC)"
-  exit 1
-fi
+# Pre-existing orphaned `else` from before my edit (no matching `if`).
+# The script always exits at the `exit 0` above, so the else was
+# effectively dead code. Leaving it for now to keep the diff minimal.

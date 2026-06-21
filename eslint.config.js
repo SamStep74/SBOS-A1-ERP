@@ -54,6 +54,8 @@ export default [
         URLSearchParams: 'readonly',
         // Node 18+ provides fetch as a global (engines >= 20 in package.json).
         fetch: 'readonly',
+        // AbortSignal is a global in Node 18+ (used by fetch with AbortSignal.timeout).
+        AbortSignal: 'readonly',
       },
     },
     rules: {

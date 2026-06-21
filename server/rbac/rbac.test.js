@@ -818,6 +818,104 @@ describe('requirePerm (pure function)', () => {
     assert.equal(ctx.outcome.reason, 'no_permission');
   });
 
+  test('returns false for a Bookkeeper on security.audit.read (Wave 26 audit endpoint hardening)', () => {
+    // Bookkeeper's role matrix includes FinanceOperator + CRMOperator +
+    // DocsOperator + StandardUser, but NOT AuditReader (which holds
+    // security.audit.read). The GET /api/finance/audit endpoint is
+    // gated by security.audit.read — a Bookkeeper should get 403.
+    // This is the unit-level guard test that backs the Wave 26
+    // perm gate; the route-layer integration is covered by the
+    // deploy smoke (bookkeeper session token + 403 response).
+    const u = {
+      id: 4,
+      role: 'Bookkeeper',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('security.audit.read', ctx), false);
+    assert.equal(ctx.outcome.reason, 'no_permission');
+    assert.equal(ctx.outcome.permissionKey, 'security.audit.read');
+  });
+
+  test('returns true for an Admin on security.audit.read (AuditReader perm set is bound to Admin via the role matrix)', () => {
+    // Admin inherits AuditReader (and AuditExportWriter) through its
+    // role matrix. The Admin user is the bootstrap case for the
+    // deploy smoke — the seeded admin should always be able to
+    // read the audit log.
+    const u = {
+      id: 1,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('security.audit.read', ctx), true);
+    assert.equal(ctx.outcome.allowed, true);
+  });
+
+  test('returns false for a PayrollClerk on finance.customer.read (Wave 27 GET-route hardening)', () => {
+    // PayrollClerk's role matrix has FinanceOperator (which gives
+    // finance.invoice.read / finance.journal.read / etc.) but NOT
+    // CRMOperator (which holds finance.customer.read after this
+    // wave). A PayrollClerk should 403 on /api/finance/customers.
+    const u = {
+      id: 5,
+      role: 'PayrollClerk',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('finance.customer.read', ctx), false);
+    assert.equal(ctx.outcome.reason, 'no_permission');
+    assert.equal(ctx.outcome.permissionKey, 'finance.customer.read');
+  });
+
+  test('returns true for an Admin on finance.customer.read (Admin inherits via CRMOperator)', () => {
+    const u = {
+      id: 1,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('finance.customer.read', ctx), true);
+    assert.equal(ctx.outcome.allowed, true);
+  });
+
+  test('returns false for a SalesRep on desk.reply.read (Wave 27 GET-route hardening)', () => {
+    // desk.reply.read is bound to the DeskOperator perm set, which
+    // only Desk / Service roles hold. SalesRep doesn't.
+    const u = {
+      id: 6,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('desk.reply.read', ctx), false);
+    assert.equal(ctx.outcome.reason, 'no_permission');
+    assert.equal(ctx.outcome.permissionKey, 'desk.reply.read');
+  });
+
+  test('returns true for an Admin on desk.reply.read (Admin inherits via DeskOperator)', () => {
+    const u = {
+      id: 1,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('desk.reply.read', ctx), true);
+    assert.equal(ctx.outcome.allowed, true);
+  });
+
   test('returns false + mfa_required when perm requires MFA but session unverified', () => {
     const u = {
       id: 3,

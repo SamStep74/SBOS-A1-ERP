@@ -103,6 +103,30 @@ test('listAudit: resource prefix filter', async () => {
   assert.equal(rows[0].resource, 'invoice:1');
 });
 
+test('listAudit: resource_id filter (Wave 29 — matches numeric id anywhere in the resource string)', async () => {
+  // Wave 29 makes wrapFinanceRoute record the actual entity id
+  // (e.g. 'invoice:42:void' for a POST /invoices/42/void). The
+  // resource_id filter matches the numeric id anywhere in the
+  // resource string — useful for "what happened to invoice 42?"
+  // queries that should include the void, the update, the lines
+  // replacement, the payment, etc.
+  const db = makeAuditDb();
+  recordAudit(db, { tenant_id: 0, action: 'invoice.create', resource: 'invoice:new', method: 'POST', path: '/x', status_code: 201 });
+  recordAudit(db, { tenant_id: 0, action: 'invoice.update', resource: 'invoice:42', method: 'PATCH', path: '/x', status_code: 200 });
+  recordAudit(db, { tenant_id: 0, action: 'invoice.void', resource: 'invoice:42:void', method: 'POST', path: '/x', status_code: 200 });
+  recordAudit(db, { tenant_id: 0, action: 'invoice.update', resource: 'invoice:43', method: 'PATCH', path: '/x', status_code: 200 });
+  recordAudit(db, { tenant_id: 0, action: 'customer.update', resource: 'customer:42', method: 'PATCH', path: '/x', status_code: 200 });
+  // Filter by id=42 matches invoice:42 (update) + invoice:42:void
+  // (void) — NOT invoice:new (no id) and NOT invoice:43 (different
+  // id) and NOT customer:42 (different table — the query is
+  // substring-based so it matches "customer:42" too; callers
+  // should combine with action or resource_prefix for precision).
+  const rows = await listAudit(db, { tenant_id: 0, resource_id: 42 });
+  assert.equal(rows.length, 3, `expected 3 rows, got ${rows.length}: ${JSON.stringify(rows.map(r => r.resource))}`);
+  const resources = rows.map((r) => r.resource).sort();
+  assert.deepEqual(resources, ['customer:42', 'invoice:42', 'invoice:42:void']);
+});
+
 test('listAudit: limit + offset (most-recent first)', async () => {
   const db = makeAuditDb();
   for (let i = 0; i < 5; i++) {

@@ -969,6 +969,133 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     }
   });
 
+  // ─── Wave 29: audit resource captures the actual entity id ───
+
+  test('36a. PATCH /api/finance/customers/:id records audit with resource=customer:<id> (not the literal customer:id)', async () => {
+    // Wave 29 wraps the customer.update resource as a function so
+    // the actual entity id is captured. Before this wave the audit
+    // row recorded 'customer:id' (the literal string). After the
+    // wave it records 'customer:1' for PATCH /api/finance/customers/1.
+    // Create a customer first, then PATCH it, then check the audit.
+    const c = await postJson(server, '/api/finance/customers', { name: 'AuditWave29' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    const p = await patchJson(server, `/api/finance/customers/${custId}`, { name: 'AuditWave29-renamed' });
+    assert.equal(p.status, 200);
+    // The audit row should have resource = 'customer:<id>'.
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const expected = `customer:${custId}`;
+    const found = body.items.find((r) => r.resource === expected);
+    assert.ok(found, `expected to find audit row with resource="${expected}", got: ${JSON.stringify(body.items.map((r) => r.resource))}`);
+    assert.equal(found.action, 'customer.update');
+  });
+
+  test('36b. GET /api/finance/audit?resource_id=<id> returns all rows for that id (update + create)', async () => {
+    // The previous test PATCHed customer 1 (well, the latest one).
+    // The create row records 'customer:new' (no id yet) so it
+    // wouldn't match. But the update records 'customer:<id>'
+    // which DOES match. This test asserts the filter finds
+    // the update row.
+    const c = await postJson(server, '/api/finance/customers', { name: 'AuditWave29b' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    await patchJson(server, `/api/finance/customers/${custId}`, { name: 'AuditWave29b-rename' });
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const updateRow = body.items.find((r) => r.resource === `customer:${custId}`);
+    assert.ok(updateRow, 'expected to find the PATCH audit row by resource_id');
+  });
+
+  // ─── Wave 30: create routes also record the new entity id ───
+
+  test('36c. POST /api/finance/customers records audit with resource=customer:<newId> (Wave 30 — closes the Wave 29 create-route gap)', async () => {
+    // Wave 29 only fixed the id-based write routes (PATCH /:id,
+    // POST /:id/void, etc.). The create routes (POST /invoices,
+    // POST /customers) still recorded the literal 'customer:new'.
+    // Wave 30 reads res.locals.createdId (set by the handler
+    // right before res.json) so the create row records the
+    // ACTUAL new id. After this wave, ?resource_id=<newId>
+    // finds BOTH the create row and any subsequent update /
+    // patch / void / payment rows for the same entity.
+    const c = await postJson(server, '/api/finance/customers', { name: 'Wave30Create', hvhh: '22222222' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    // The create row should be findable by resource_id.
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const createRow = body.items.find(
+      (r) => r.resource === `customer:${custId}` && r.action === 'customer.create',
+    );
+    assert.ok(createRow, `expected create row with resource="customer:${custId}", got: ${JSON.stringify(body.items.map((r) => `${r.action}:${r.resource}`))}`);
+  });
+
+  // ─── Wave 32: customer 360 route ───
+
+  test('36d. GET /api/finance/customers/:id/360 returns the full 360 view (Wave 32)', async () => {
+    // Create a customer, then assert the 360 endpoint returns
+    // the expected shape: customer info, open_invoices=[] (no
+    // invoices yet), totals all zero, aging all zero.
+    const c = await postJson(server, '/api/finance/customers', { name: 'Wave32Cust', hvhh: '44444444' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    const { status, body } = await get(server, `/api/finance/customers/${custId}/360`);
+    assert.equal(status, 200);
+    assert.equal(body.customer.id, custId);
+    assert.equal(body.customer.name, 'Wave32Cust');
+    assert.equal(body.customer.hvhh, '44444444');
+    assert.ok(Array.isArray(body.open_invoices));
+    assert.equal(body.open_invoices.length, 0);
+    assert.ok(Array.isArray(body.recent_payments));
+    assert.equal(body.totals.open_count, 0);
+    assert.equal(body.totals.outstanding_amd, 0);
+    assert.equal(body.aging.current, 0);
+  });
+
+  test('36e. GET /api/finance/customers/:id/360 returns 404 for missing customer (no existence-oracle leak)', async () => {
+    const { status, body } = await get(server, '/api/finance/customers/999999/360');
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
+  // ─── Wave 35: dashboard 360 route ───
+
+  test('36f. GET /api/finance/360 returns the full dashboard JSON (Wave 35)', async () => {
+    // The dashboard endpoint returns the AR + AP totals + top
+    // customers + top vendors in one round-trip. The seed data
+    // from earlier tests (the customer 1 we created in test 22)
+    // means there's at least some data — we assert the shape +
+    // the fields exist. The specific counts depend on the seed;
+    // the structural assertions are the load-bearing ones.
+    const { status, body } = await get(server, '/api/finance/360');
+    assert.equal(status, 200);
+    assert.equal(typeof body.today, 'string');
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(body.today));
+    assert.ok(body.ar, 'response should include ar');
+    assert.ok(body.ap, 'response should include ap');
+    assert.ok(typeof body.ar.open_count === 'number');
+    assert.ok(typeof body.ar.outstanding_amd === 'number');
+    assert.ok(body.ar.aging, 'ar.aging should exist');
+    assert.ok(typeof body.ar.aging.current === 'number');
+    assert.ok(typeof body.ar.aging.days_1_30 === 'number');
+    assert.ok(typeof body.ar.aging.days_31_60 === 'number');
+    assert.ok(typeof body.ar.aging.days_61_90 === 'number');
+    assert.ok(typeof body.ar.aging.days_90_plus === 'number');
+    assert.ok(typeof body.ap.open_count === 'number');
+    assert.ok(typeof body.ap.outstanding_amd === 'number');
+    assert.ok(body.ap.aging, 'ap.aging should exist');
+    assert.ok(Array.isArray(body.top_customers));
+    assert.ok(Array.isArray(body.top_vendors));
+  });
+
+  test('36g. GET /api/finance/360?today=YYYY-MM-DD uses the override (back-dated aging)', async () => {
+    // The ?today query param lets the operator pull a back-dated
+    // dashboard. The response.today should reflect the override.
+    const { status, body } = await get(server, '/api/finance/360?today=2026-01-01');
+    assert.equal(status, 200);
+    assert.equal(body.today, '2026-01-01');
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {

@@ -169,9 +169,426 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     on every fresh install. Catches accidental removal of
     the hook.
   - 1130/1130 tests pass. Deploy smoke at 57 endpoints.
+- **Wave 25 (Phase 2 Projects — route wiring)** — DONE.
+  - Wires the projects + tasks + time-entries entities (from
+    W74-1's schema + pure functions + 29 tests) into the HTTP
+    layer with perm gates.
+  - 8 new routes in server/finance/routes.js (list/create/get
+    for projects, list/create for tasks under a project, and
+    list/create for time-entries under a task). All gated by
+    `projects.project.{read,create}` / `projects.task.{read,
+    create,update}` (the 17 project perms were seeded in W74-1).
+  - The two nested POSTs (`/projects/:id/tasks` and
+    `/tasks/:id/time-entries`) inject the URL param into the
+    body as `project_id` / `task_id` before calling the pure
+    function — same pattern as the CRM and desk nested
+    resources.
+  - The single-entity GETs (`getProject`, `getTask`) catch the
+    pure function's `ValueError("X N not found in tenant T")`
+    and map it to 404 — same pattern as customer / inventory /
+    purchase / desk / crm.
+  - 5 new deploy smoke checks (list + status filter + 404 on
+    missing project + 404 on missing tasks list + 404 on the
+    nested projects/:id/tasks). Smoke at 68 endpoints
+    (was 57; +5 for projects, +6 for desk that landed just
+    before this wave).
+  - 1159/1159 tests pass (was 1130; +29 from W74-1's
+    pre-existing project tests). `npm run check` clean, boundary 0.
+- **Wave 26 (Audit endpoint — perm gate + 403 smoke)** — DONE.
+  - The `GET /api/finance/audit` endpoint (shipped in `7cda79b`
+    "the 4 deferred items") had no perm gate. For a compliance
+    endpoint that's a real hole: any authenticated user could
+    read the full audit log. Closed by:
+    1. Adding `requireTenant` + `requirePerm('security.audit.read')`
+       middleware. The perm key exists in the catalog and is
+       bound to the `AuditReader` perm set, which `Owner / Admin /
+       Auditor` all hold via the role matrix.
+    2. Switching the route from `readTenant(req)` (silent fallback
+       to 0) to `req.tenantId` (set by the `requireTenant`
+       middleware, 400 on missing).
+  - 2 new unit tests in `server/rbac/rbac.test.js`:
+    - `requirePerm('security.audit.read')` returns false for a
+      Bookkeeper (no AuditReader perm set) with `outcome.reason =
+      'no_permission'`.
+    - `requirePerm('security.audit.read')` returns true for an
+      Admin (AuditReader inherited via role matrix).
+  - 1 new deploy smoke step (STEP 5b): seeds a Bookkeeper
+    user in the running DB, mints a session via
+    `server/auth-login.js#login`, hits `/api/finance/audit`
+    with the Bookkeeper token, asserts 403. This is the only
+    test path that exercises the real-auth + perm-gate wire
+    end-to-end (the unit tests in server.test.js run in
+    `SBOS_AUTH_MODE=stub` which bypasses real auth and binds
+    every request to a stub Admin).
+  - 1161/1161 tests pass (was 1159; +2). Smoke 68 endpoints
+    + 1 new 403 check. `npm run check` clean, boundary 0.
+- **Wave 27 (Finance GETs — systematic perm audit)** — DONE.
+  - A pre-wave grep audit found that **33 of 34 finance GET
+    routes** had no perm gate. Every POST + PATCH was gated;
+    the GETs were all perm-less. For a multi-tenant finance
+    system that's a real security gap (any authenticated user
+    could read all invoices, all customers, all journal
+    entries, the full trial balance, etc.).
+  - Fix:
+    1. Added `requirePerm('<perm>.read')` middleware to all
+       33 GETs in `server/finance/routes.js`. Most map to an
+       existing perm (`finance.invoice.read`,
+       `finance.journal.read`, `crm.lead.read`,
+       `desk.case.read`, `projects.project.read`, etc.).
+    2. Added 2 missing read perms to the catalog:
+       `finance.customer.read` (bound to CRMOperator, which
+       already had `finance.customer.{create,update}`) and
+       `desk.reply.read` (bound to DeskOperator, which already
+       had `desk.reply.create`).
+    3. The dashboard endpoint uses `reports.dashboard.read`,
+       which is already in the catalog and bound to multiple
+       perm sets.
+  - The routes still use `readTenant(req)` (silent fallback
+    to 0) — switching to `requireTenant` middleware is a
+    related but separate concern. The 33 perm gates are the
+    primary hardening; the tenant middleware is a follow-up
+    (a few hundred lines of route refactor, ~1 wave).
+  - 4 new unit tests in `server/rbac/rbac.test.js`:
+    - PayrollClerk (has FinanceOperator, no CRMOperator) gets
+      `no_permission` for `finance.customer.read`.
+    - Admin gets `allowed` for `finance.customer.read`.
+    - SalesRep (no DeskOperator) gets `no_permission` for
+      `desk.reply.read`.
+    - Admin gets `allowed` for `desk.reply.read`.
+  - 1 new deploy smoke step (STEP 5c): seeds an HRSpecialist
+    user (no FinanceOperator, no CRMOperator, no DeskOperator
+    — pure HR role), mints a session, hits
+    `/api/finance/invoices`, asserts 403. Sanity: admin hits
+    the same endpoint, asserts 200. HRSpecialist is a good
+    test role because it has `HROperator + DocsOperator +
+    AIEnabled + StandardUser` but zero finance / customer /
+    desk / project perms.
+  - RBAC catalog grew from 435 to 437 perms (the 2 new
+    `*.read` keys).
+  - 1190/1190 tests pass (was 1161; +4 rbac + the +25 from
+    the catalog v2 wave 1 commit that landed on origin in
+    parallel). Smoke 68 endpoints + 2 new 403 checks (5b
+    audit + 5c GET). `npm run check` clean, boundary 0.
+- **Wave 28 (Finance GETs — tenant middleware swap)** — DONE.
+  - Closes the Wave 27 deferral: the 38 perm-gated GETs now
+    also run the `requireTenant` middleware. Previously they
+    used `readTenant(req)` (silent fallback to tenant 0); now
+    they 400 when no X-Tenant-Id header AND no
+    `req.user.tenant_id` (the same middleware the audit
+    endpoint + all writes use). This brings the GETs to
+    defense-in-depth parity with the writes.
+  - 3 things happened in this wave:
+    1. Added `requireTenant` middleware to all 38 perm-gated
+       GETs (the audit endpoint already had it from Wave 26).
+       The middleware runs before `requirePerm`, so a missing
+       tenant 400s before the perm check.
+    2. Swapped `readTenant(req)` for `req.tenantId` in all
+       38 GET handler bodies. `req.tenantId` is stamped by
+       the `requireTenant` middleware and is always defined
+       when the handler runs.
+    3. The dashboard GET now passes
+       `tenantId: req.tenantId` to `renderDashboard` (it
+       already accepted the option; the route just wasn't
+       wiring it through). Non-bootstrap tenants now get
+       their own numbers on the dashboard.
+  - Also closed a Wave 27 gap that the audit missed: the 5
+    catalog v2 GETs from commit `ac41aff` (categories list /
+    get / breadcrumb path, variants list / get) were perm-less
+    because they were multi-line `app.get(\n  '/path',\n  ...)`
+    that the Wave 27 grep audit didn't catch. Gated them with
+    `finance.category.read` / `finance.variant.read` (the
+    perms already existed in the catalog and were bound to
+    perm sets).
+  - Removed the now-unused `readTenant(req)` helper from
+    `server/finance/routes.js`. The 35 callers are all on
+    `req.tenantId` now; the helper was dead code.
+  - No new tests added: the existing 78 endpoint smoke
+    checks (admin token WITHOUT an X-Tenant-Id header, all
+    expect 200) are the regression test. If the middleware
+    swap is wrong, the smoke fails. The existing
+    `tenant.test.js` already covers the `requireTenant`
+    middleware (400 on missing, header-vs-user fallback, etc.)
+    — no new test surface needed.
+  - 1190/1190 tests pass. Smoke 78 endpoints + STEP 5b + 5c
+    all pass. `npm run check` clean, boundary 0.
+- **Wave 29 (Audit resource_id — capture the actual entity id)** — DONE.
+  - The audit GET (Wave 26, perm-gated) and the audit
+    record-on-write (in `wrapFinanceRoute`) were both working
+    — every write was recorded, every read was perm-gated.
+    But the audit `resource` field was a hardcoded string
+    per route: `wrapFinanceRoute('invoice.update',
+    'invoice:id', handler)` recorded the literal `invoice:id`,
+    not the actual `invoice:42`. The 19 id-based write routes
+    (PATCH/POST with `:id` in the path) all suffered from this.
+    Consequence: "what happened to invoice 42?" couldn't be
+    answered with a simple filter — you had to use a string
+    match on `resource LIKE 'invoice:%'` and then eyeball
+    which ones were the actual invoice 42.
+  - Fix:
+    1. Made `wrapFinanceRoute`'s `resource` arg accept
+       either a string (backward compatible) or a function
+       `(req) => 'invoice:' + req.params.id`. The wrapper
+       resolves the function at audit-record time so the
+       actual id is captured.
+    2. Updated 19 id-based write routes to use the function
+       form. Includes: PATCH /invoices/:id, PATCH
+       /customers/:id, PATCH /catalog/categories/:id, PATCH
+       /catalog/variants/:id, POST /invoices/:id/{payments,
+       void, reconcile, lines}, POST /purchase-orders/:id/
+       {confirm, cancel, receive}, POST /vendor-bills/:id/
+       {confirm, post, pay, void}, POST /desk/cases/:id/
+       replies, POST /projects/:id/tasks, POST
+       /projects/:id/tasks/:taskId/time-entries, POST
+       /catalog/items/:itemId/variants.
+    3. Added a new `?resource_id=N` query param to
+       `GET /api/finance/audit`. The filter is a substring
+       match (`resource LIKE '%:<N>%'`) so it matches
+       `invoice:42` AND `invoice:42:void` AND
+       `invoice:42:reconcile` etc. — the "what happened
+       to invoice 42" use case. Combine with
+       `?action=` or `?resource=` for precision.
+  - **Limitation documented**: the create routes still
+    record `'customer:new'` instead of `'customer:<newId>'`.
+    The new id lives in the response body, not in
+    `req.params.id`, so the function form needs a way to
+    read the response. Closing this needs a small
+    `res.locals.createdId = out.id` change in each create
+    handler + a `(req, res) => string` resource function.
+    Defer to a follow-up wave if needed.
+  - 3 new tests:
+    - `audit.test.js` — listAudit with `?resource_id=42`
+      matches `'invoice:42'` AND `'invoice:42:void'`
+      (substring match) but not `'invoice:new'` (no id)
+      or `'invoice:43'` (different id).
+    - `server.test.js` 36a — PATCH /customers/:id records
+      audit with `resource='customer:<id>'` (the actual
+      behavior, not the literal).
+    - `server.test.js` 36b — `GET /api/finance/audit?resource_id=<id>`
+      finds the PATCH row.
+  - 1 new deploy smoke step (STEP 5d): creates a customer
+    via the admin token, PATCHes it, then GETs
+    `/api/finance/audit?resource_id=<custId>` and asserts
+    the response includes a row with
+    `resource = 'customer:<custId>'` AND `action = 'customer.update'`.
+  - 1216/1216 tests pass (was 1213; +3 new). Smoke 78
+    endpoints + STEP 5b + 5c + 5d all pass. `npm run check`
+    clean, boundary 0.
+- **Wave 30 (Audit create-route resource_id — close the Wave 29
+  create-route gap)** — DONE.
+  - The Wave 29 fix made id-based write routes record the actual
+    entity id (`invoice:42` instead of `invoice:id`). It left
+    the create routes (POST /invoices, POST /customers, etc.)
+    recording the literal `'customer:new'` because the new id
+    lives in the response body, not in `req.params.id`. Wave 30
+    closes that gap.
+  - 2 mechanical changes per create handler:
+    1. Each create handler now does
+       `res.locals.createdId = out.id;` right before
+       `res.status(201).json(out);`. The wrap helper reads
+       `res.locals.createdId` when building the audit resource
+       string. On the error path (handler never reached the
+       assignment), the resource falls back to the literal
+       `'X:new'`.
+    2. Each create's resource arg is now a function
+       `(req, res) => res.locals.createdId ? \`X:\${res.locals.createdId}\` : 'X:new'`
+       instead of the static string `'X:new'`.
+  - Backward-compat API extension: `wrapFinanceRoute`'s
+    `resource` arg was (string | `(req) => string`).
+    Wave 30 extends it to `(req, res) => string`. Existing
+    call sites pass `(req) => 'invoice:' + req.params.id`
+    and still work — JS doesn't enforce arity, the unused
+    `res` arg is just ignored. New call sites use the
+    `(req, res)` form to read `res.locals.createdId`.
+  - 25 create routes touched (the original 19 + 6 that
+    the original audit missed: payment.create, stock.{receive,
+    deliver, transfer, adjust}, po.receive).
+  - 1 new test: `server.test.js` 36c — POST /customers
+    records audit with `resource='customer:<newId>'`
+    (findable via `?resource_id=<newId>`). The test asserts
+    the create row is in the response of
+    `GET /api/finance/audit?resource_id=<id>`.
+  - 1 new deploy smoke step (STEP 5e): creates a customer,
+    then GETs `?resource_id=<custId>` and asserts the
+    response includes a row with
+    `resource='customer:<custId>'` AND `action='customer.create'`.
+  - **End-to-end audit loop closed**: with Waves 26 + 28 + 29
+    + 30, you can now answer "what happened to invoice 42?"
+    with `GET /api/finance/audit?resource_id=42` and see
+    EVERY event in the lifecycle: create (Wave 30), update
+    (Wave 29), void, payment, lines replacement, reconcile,
+    etc. The audit log is the authoritative source for
+    compliance + forensics.
+  - 1217/1217 tests pass (was 1216; +1 new). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e all pass.
+    `npm run check` clean, boundary 0.
+- **Wave 31 (Customer 360 — pure function + tests)** — DONE.
+  - `server/finance/customer360.js` exports
+    `getCustomer360(db, customerId, tenantId, opts)` which
+    returns the full 360 view of a customer in one call:
+    ```json
+    {
+      "customer": { id, name, hvhh, address, email, tenant_id },
+      "open_invoices": [{
+        id, invoice_number, issue_date, due_date, status,
+        total_amd, paid_amd, balance_amd, days_overdue
+      }],
+      "recent_payments": [{
+        id, invoice_id, invoice_number, paid_at, amount_amd,
+        method, reference
+      }],
+      "totals": {
+        open_count, open_total_amd, paid_total_amd,
+        outstanding_amd
+      },
+      "aging": {
+        current, days_1_30, days_31_60, days_61_90, days_90_plus
+      }
+    }
+    ```
+  - The aging buckets hold the BALANCE owed (not the original
+    total) so a partially-paid invoice buckets by its
+    `days_overdue` with the remaining amount — what the CFO
+    actually wants to see.
+  - 12 tests cover: missing customer (404), cross-tenant
+    invisibility, empty customer, 3 aging-bucket cases
+    (current / 31-60 / 90+), paid invoice exclusion,
+    partial-payment balance, due_date sort order,
+    recent_payments limit, invalid customerId / tenantId.
+  - Test pattern: real in-memory sqlite with the production
+    finance schema (mirrors `realdb-smoke.test.js`). The
+    adapter strips pg `::bigint` casts and translates
+    `$N` → `?` positional.
+  - 1240/1240 tests pass (was 1228; +12 new). Lint clean.
+    `npm run check` clean, boundary 0.
+- **Wave 32 (Customer 360 — route wiring)** — DONE.
+  - Wires the Wave 31 pure function to
+    `GET /api/finance/customers/:id/360`. Three middlewares:
+    `requireTenant` (Wave 28 defense-in-depth),
+    `requirePerm('finance.customer.read')` (the same perm the
+    customer list / get uses — 360 is read-only, no extra
+    perms), and the handler.
+  - Optional `?today=YYYY-MM-DD` query param for back-dated
+    aging reports + reproducible tests. Defaults to the
+    current date inside the pure function.
+  - 404 on missing or cross-tenant customer (no
+    existence-oracle leak between tenants — same pattern
+    as `getProject` / `getTask` / `getInvoice`).
+  - 2 new integration tests in `server.test.js`:
+    - 36d — `GET /api/finance/customers/:id/360` returns the
+      full 360 shape (customer info, empty open_invoices,
+      zero totals, zero aging).
+    - 36e — `GET /api/finance/customers/999999/360` returns
+      404 with `error: 'not_found'`.
+  - 1 new deploy smoke step (STEP 5f): creates a customer,
+    hits the 360 endpoint, asserts the response shape
+    (customer.id / customer.name / open_invoices=[] /
+    totals.open_count=0 / aging.current=0). Sanity: 404
+    path on a missing customer.
+  - 1242/1242 tests pass (was 1240; +2 new). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e + 5f all pass.
+    `npm run check` clean, boundary 0.
+- **Wave 33 (Vendor 360 — pure function + 13 tests)** — DONE.
+  - `server/finance/vendor360.js` exports
+    `getVendor360(db, vendorId, tenantId, opts)` — the
+    purchase-side mirror of the customer 360. Returns:
+    ```json
+    {
+      "vendor": { id, code, name, hvhh, address, email, phone, contact_name, tenant_id },
+      "open_purchase_orders": [{
+        id, order_number, order_date, expected_date, status,
+        total_amd, outstanding_amd, days_overdue
+      }],
+      "recent_receipts": [{
+        id, purchase_order_id, order_number, receipt_number,
+        received_at, notes
+      }],
+      "totals": { open_count, open_total_amd, outstanding_amd },
+      "aging": { current, days_1_30, days_31_60, days_61_90, days_90_plus }
+    }
+    ```
+  - Aging is keyed on `expected_date` (when we expect to
+    receive the goods). POs that are already received fall
+    into the `current` bucket — the operator has the goods,
+    so there's nothing to age. The bill-level outstanding
+    (after billing) is a follow-up.
+  - Added a small `getVendor(db, id, tenantId)` helper to
+    `purchase.js` (the same shape as `getCustomer`) so the
+    360 view can fetch vendor basic info with the same
+    tenant-scoping pattern.
+  - 13 tests cover: missing vendor (404), cross-tenant
+    invisibility, empty vendor, 3 aging-bucket cases
+    (current / 31-60 / 90+), billed PO exclusion, cancelled
+    PO exclusion, due_date sort order, received-PO
+    exclusion from overdue, recent_receipts order, invalid
+    vendorId / tenantId.
+  - 1255/1255 tests pass (was 1242; +13). Lint clean.
+- **Wave 34 (Dashboard 360 — pure function + 13 tests)** — DONE.
+  - `server/finance/dashboard360.js` exports
+    `getDashboard360(db, tenantId, opts)` — the CFO
+    dashboard JSON. Returns:
+    ```json
+    {
+      "today": "YYYY-MM-DD",
+      "ar": { open_count, outstanding_amd, aging: { ... 5 buckets } },
+      "ap": { open_count, outstanding_amd, aging: { ... 5 buckets } },
+      "top_customers": [{ id, name, hvhh, outstanding_amd, open_invoice_count }],
+      "top_vendors":   [{ id, code, name, hvhh, outstanding_amd, open_po_count }]
+    }
+    ```
+  - 4 SQL aggregates run in parallel (Promise.all): AR
+    totals + aging, AP totals + aging, top customers, top
+    vendors. Each query is a single scan regardless of how
+    many customers / vendors exist — the dashboard scales
+    without the per-entity N+1 cost of the customer/vendor
+    360 views.
+  - Aging on the dashboard uses `julianday($today) -
+    julianday(due_date)` for AR and `julianday($today) -
+    julianday(expected_date)` for AP. The query uses
+    distinct placeholders ($1..$7) so the test adapter's
+    pg → sqlite translation preserves parameter identity
+    (a regression I hit during Wave 34 — sqlite silently
+    fills unfilled `?` with NULL, which made every aging
+    bucket return 0 in tests until I switched to distinct
+    placeholders).
+  - 13 tests cover: empty tenant, AR totals + aging,
+    paid-invoice exclusion, top-customers sort, AP totals +
+    aging, billed/cancelled PO exclusion, top-vendors sort,
+    0-outstanding exclusion, partial-payment reduction,
+    cross-tenant isolation, limit cap, invalid tenantId,
+    invalid today format.
+  - 1268/1268 tests pass (was 1255; +13). Lint clean.
+- **Wave 35 (Dashboard 360 — route wiring)** — DONE.
+  - Wires the Wave 34 pure function to
+    `GET /api/finance/360`. Two middlewares:
+    `requireTenant` (Wave 28 defense-in-depth) and
+    `requirePerm('reports.dashboard.read')` (the same perm
+    the HTML `/api/finance/dashboard` view uses).
+  - Optional `?today=YYYY-MM-DD` and `?limit=N` query
+    params. The pure function defaults today to the current
+    date and limit to 10 (max 50).
+  - 2 new integration tests in `server.test.js`:
+    - 36f — `GET /api/finance/360` returns the full
+      dashboard JSON shape (ar / ap / aging / top_customers /
+      top_vendors, all with the expected field types).
+    - 36g — `GET /api/finance/360?today=2026-01-01` returns
+      `body.today === '2026-01-01'` (back-dated dashboard).
+  - 1 new deploy smoke step (STEP 5g): hits the endpoint
+    with the admin token, asserts the response shape
+    (today regex, ar.open_count/outstanding_amd/aging,
+    ap.open_count/outstanding_amd/aging, top_customers +
+    top_vendors as arrays). Sanity: `?today=2026-01-01`
+    override returns `today=2026-01-01`.
+  - **CFO dashboard story complete end-to-end**:
+    - HTML dashboard: `GET /api/finance/dashboard` (Wave 14)
+    - JSON dashboard: `GET /api/finance/360` (Wave 35)
+    - Per-customer drill-down: `GET /api/finance/customers/:id/360` (Wave 32)
+    - Per-vendor drill-down: `GET /api/finance/vendors/:id/360` (defer — pure function shipped Wave 33, route pending)
+  - 1270/1270 tests pass (was 1268; +2). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e + 5f + 5g all pass.
+    `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
-to GL, customer 360 + vendor 360 panels). See
+to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
 
 ## How to run
@@ -183,6 +600,53 @@ npm test                # node --test
 npm run lint
 npm run format:check
 ```
+
+## A1-Validator integration (optional, Wave 27)
+
+`lib/a1-validator-client.js` is a zero-dep Node.js client for the
+[A1-Validator](https://github.com/Armosphera/A1-Validator) HTTP service
+(37 business-ID validators: HHVH, INN, CNPJ, MX RFC, JP My Number, etc.).
+The integration is **opt-in**: if the service is unreachable, the client
+returns `{ ok: null, _error: ... }` (no crash, no blocking).
+
+```js
+import { A1ValidatorClient } from './lib/a1-validator-client.js';
+
+const a1 = new A1ValidatorClient({
+  baseUrl: process.env.A1_VALIDATOR_URL || 'http://a1-validator:8000',
+  timeoutMs: 2000,
+  retries: 1,
+});
+
+// At boot, log integration state:
+const h = await a1.health();
+if (h.ok) {
+  console.log(`a1-validator ${h.version}: ${h.validators.length} kinds available`);
+} else {
+  console.log(`a1-validator unreachable: ${h.error} (running in local-fallback mode)`);
+}
+
+// Per-request validation (e.g. before creating a customer with a tax id):
+const result = await a1.validate('hvvh', { hvhh: input.hvhh });
+if (result._skipped || result._error) {
+  // Service unavailable — fall back to local regex check
+} else if (!result.ok) {
+  throw new ValueError(`hvhh is invalid: ${result.error}`);
+}
+```
+
+**To deploy the A1-Validator sidecar:**
+
+```bash
+docker run -d --name a1-validator -p 8000:8000 \
+  ghcr.io/armosphera/a1-validator:v0.4.0
+export A1_VALIDATOR_URL=http://localhost:8000
+npm start
+```
+
+**Smoke test:** `scripts/deploy-smoke.sh` STEP 7b verifies the client
+loads, `validate()` returns `_skipped` when disabled, and `health()`
+returns `ok=false` for an unreachable host (no crash).
 
 ## Phase 1 ERP API surface
 
@@ -783,6 +1247,12 @@ SBOS-A1-ERP/
     ├── README.md                   ← plan.json schema reference
     └── sbos-a1-erp-bootstrap.json  ← wave 0 plan
 ```
+
+## Related
+
+- [Armosphera/autoresearch-sboss](https://github.com/Armosphera/autoresearch-sboss) — the eval-loop harness the validators come from
+- [Armosphera/A1-Validator](https://github.com/Armosphera/A1-Validator) — Python lib for the 37 business-ID validators; consumed via `lib/a1-validator-client.js`
+- [Armosphera/A1-Platform](https://github.com/Armosphera/A1-Platform) — the SBOSS product line
 
 ## License
 
