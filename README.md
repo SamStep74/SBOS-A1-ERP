@@ -67,6 +67,33 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     as "no trigger" and never appears.
   - Route: `GET /api/finance/replenishment-report?warehouse_id=`.
   - 1013/1013 tests pass (was 1002; +11). Deploy smoke at 38 endpoints.
+- **Wave 19 (Phase 1 ERP — Stock-valuation handoff to GL)** — DONE.
+  - The journal is the bridge between operational stock + purchase
+    events and the Armenian chart of accounts. Every
+    stock.receive / stock.deliver / stock.adjust / vendor_bill.post
+    writes a balanced journal entry.
+  - Migration 0010_journal.sql: finance.journal_entries +
+    finance.journal_entry_lines. UNIQUE (tenant_id, source,
+    source_id) is the idempotency guard.
+  - server/finance/journal.js: postJournalEntry (balanced, validates
+    debit == credit, ≥2 lines, 3-digit account codes, ISO dates,
+    lowercase-dot source), getJournalEntry, listJournalEntries,
+    getAccountBalance, listAccountBalances. Both net_debit and
+    net_credit are mutually exclusive (always ≤ 0 / ≥ 0).
+  - server/finance/stockPosting.js: postStockReceiveGL
+    (Dr 216/Cr 521), postStockDeliverGL (Dr 711/Cr 216 at avg),
+    postStockAdjustGL (Dr 216/Cr 711 for gain, Dr 711/Cr 216 for
+    loss), postVendorBillPostGL (Dr 226/Cr 521 for the VAT side).
+  - Wiring: receiveStock / deliverStock / adjustStock /
+    postVendorBill call the corresponding post* function as a
+    best-effort side-effect. Failures are swallowed (move is the
+    source of truth; the GL is a projection that can be
+    reconciled).
+  - Routes: `GET /api/finance/journal-entries[?since=&until=&source=&limit=&offset=]`,
+    `GET /api/finance/journal-entries/:id`, `GET /api/finance/account-balances[?asOfDate=]`,
+    `GET /api/finance/account-balances/:accountCode`.
+  - 1054/1054 tests pass (was 1013; +27 journal + +14 stockPosting).
+    Deploy smoke at 41 endpoints.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -180,6 +207,55 @@ curl -s "http://localhost:3000/api/finance/replenishment-report" \
 Set `reorder_point` at item creation time via `POST /api/finance/catalog/items`
 with `{sku, name, reorder_point: 10}`. The next deployment can wire
 this report to an email/Slack alert (out of Phase 1 scope).
+
+### GL journal (stock-valuation handoff)
+
+Every stock-valuation event in the inventory + purchase modules
+posts a balanced journal entry to the RA chart of accounts. The
+journal is the bridge between operational moves and the financial
+books.
+
+| Event                       | Dr                       | Cr                       | Source             |
+| --------------------------- | ------------------------ | ------------------------ | ------------------ |
+| Stock receive               | 216 Inventory            | 521 AP — purchases       | `stock.receive`   |
+| Stock deliver (COGS)        | 711 COGS                 | 216 Inventory            | `stock.deliver`   |
+| Stock adjust (gain)         | 216 Inventory            | 711 COGS                 | `stock.adjust`    |
+| Stock adjust (loss)         | 711 COGS                 | 216 Inventory            | `stock.adjust`    |
+| Vendor bill post (with VAT) | 226 VAT-input            | 521 AP — purchases       | `vendor_bill.post`|
+
+The journal is **balanced** (total debits == total credits on every
+entry) and **idempotent** (a `(source, source_id)` pair can post
+exactly one entry; re-running the posting for the same move is a
+no-op). Failures are best-effort: a failed GL post doesn't roll
+back the move; the next reconciliation picks it up.
+
+| Method | Path                                                  | Query                                | Returns                                          |
+| ------ | ----------------------------------------------------- | ------------------------------------ | ------------------------------------------------ |
+| GET    | `/api/finance/journal-entries`                        | `?since=&until=&source=&limit=&offset=` | `{items: [{id, entry_date, source, source_id, description, currency, status, book_date}]}` |
+| GET    | `/api/finance/journal-entries/:id`                    | —                                    | One entry (header + lines)                       |
+| GET    | `/api/finance/account-balances`                       | `?asOfDate=` (optional)              | `{items: [{account_code, total_debit, total_credit, net_debit, net_credit}]}` |
+| GET    | `/api/finance/account-balances/:accountCode`          | `?asOfDate=` (optional)              | One account: `{account_code, total_debit, total_credit, net_debit, net_credit}` |
+
+Example:
+
+```bash
+# All journal entries for the tenant
+curl -s "http://localhost:3000/api/finance/journal-entries?limit=10" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' | jq
+
+# Trial balance as of 2026-06-30
+curl -s "http://localhost:3000/api/finance/account-balances?asOfDate=2026-06-30" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' | jq
+# -> {
+#      "items": [
+#        { "account_code": "216", "total_debit": 5000, "total_credit": 0,
+#          "net_debit": 5000, "net_credit": 0 },
+#        { "account_code": "521", "total_debit": 0, "total_credit": 6000,
+#          "net_debit": 0, "net_credit": 6000 },
+#        ...
+#      ]
+#    }
+```
 
 ### Typical end-to-end flow
 

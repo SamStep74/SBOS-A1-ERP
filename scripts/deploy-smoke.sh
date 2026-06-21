@@ -128,6 +128,10 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/receipts/1/print?locale=hy&format=text', expect: 200, name: 'GET receipt print (Armenian, text) — body contains Armenian header' },
   // Phase 1 ERP — Replenishment report (Wave 18)
   { method: 'GET', path: '/api/finance/replenishment-report', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/replenishment-report (empty items: array on fresh DB)' },
+  // Phase 1 ERP — GL journal (Wave 19)
+  { method: 'GET', path: '/api/finance/journal-entries', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/journal-entries (Wave 19 — populated by the e2e flow above)' },
+  { method: 'GET', path: '/api/finance/account-balances', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/account-balances (Wave 19 — 216 + 521 populated by the receive above)' },
+  { method: 'GET', path: '/api/finance/account-balances/216', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/account-balances/216 (Wave 19 — single account)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

@@ -47,6 +47,8 @@
 //   GET    /api/finance/purchase-orders/:id/print?locale=hy&format=html|text
 //   GET    /api/finance/receipts/:id/print?locale=hy&format=html|text
 //   GET    /api/finance/replenishment-report?warehouse_id=
+//   GET    /api/finance/journal-entries?since=&until=&source=&limit=&offset=
+//   GET    /api/finance/account-balances?asOfDate=
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -106,6 +108,12 @@ import {
   listVendorBills,
 } from './purchase.js';
 import { renderPurchaseOrder, renderDeliveryNote } from './poTemplate.js';
+import {
+  listJournalEntries,
+  getJournalEntry,
+  listAccountBalances,
+  getAccountBalance,
+} from './journal.js';
 import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -915,6 +923,85 @@ export function registerFinanceRoutes(app, opts = {}) {
       if (req.query.warehouse_id) opts.warehouseId = Number(req.query.warehouse_id);
       const items = await getReplenishmentReport(pgAdapter, tenantId, opts);
       res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ─── Phase 1 ERP: GL journal endpoints (Wave 19) ───
+  //
+  // GET /api/finance/journal-entries?since=&until=&source=&limit=&offset=
+  //   Lists the journal entries for the caller's tenant, sorted by
+  //   entry_date DESC. Filterable by date range + source.
+  //   The route is read-only and tenant-scoped; no perm gate (the
+  //   journal is part of the finance module and inherits the same
+  //   implicit tenant scope as the other finance routes).
+  app.get('/api/finance/journal-entries', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {
+        since: req.query.since,
+        until: req.query.until,
+        source: req.query.source,
+        limit: req.query.limit,
+        offset: req.query.offset,
+      };
+      const items = await listJournalEntries(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/finance/journal-entries/:id
+  //   Fetch one journal entry (header + lines) by id.
+  app.get('/api/finance/journal-entries/:id', async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = readTenant(req);
+      const entry = await getJournalEntry(pgAdapter, id, tenantId);
+      if (!entry) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      res.status(200).json(entry);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/finance/account-balances?asOfDate=
+  //   Returns the chart-of-accounts snapshot for the caller's tenant
+  //   (every account that has any activity, with its debit / credit
+  //   / net totals). Optional ?asOfDate= scopes to a financial date.
+  //   The returned list is the basis for the trial balance report.
+  app.get('/api/finance/account-balances', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = { asOfDate: req.query.asOfDate };
+      const items = await listAccountBalances(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/finance/account-balances/:accountCode
+  //   Fetch one account's balance (debit / credit / net) for the
+  //   caller's tenant. The :accountCode is a 3-digit chart code
+  //   (e.g. 216, 711, 521). Optional ?asOfDate= scopes to a date.
+  app.get('/api/finance/account-balances/:accountCode', async (req, res, next) => {
+    try {
+      const code = String(req.params.accountCode || '').trim();
+      if (!/^\d{3}$/.test(code)) {
+        return res.status(400).json({ error: 'bad_request', message: 'accountCode must be 3 digits' });
+      }
+      const tenantId = readTenant(req);
+      const opts = { asOfDate: req.query.asOfDate };
+      const balance = await getAccountBalance(pgAdapter, code, tenantId, opts);
+      res.status(200).json(balance);
     } catch (err) {
       next(err);
     }
