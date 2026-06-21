@@ -305,6 +305,56 @@ test('listVendors: tenant-scoped', async () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — vendor HVVH (same fail-soft pattern as customer)
+// With A1_VALIDATOR_URL unset, the client is disabled and the local regex
+// enforces 8 digits. The integration tests below verify the disabled path.
+// ────────────────────────────────────────────────────────────────────────
+
+test('createVendor: hvhh is validated via A1-Validator wrapper (disabled, 9 digits rejected)', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createVendor(db, { code: 'VBAD', name: 'BadCo', hvhh: '123456789' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createVendor: hvhh with non-digit char is rejected', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createVendor(db, { code: 'VCHR', name: 'BadCo', hvhh: '1234567A' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createVendor: hvhh=null is allowed (optional field)', async () => {
+  const db = makeMemoryDb();
+  const out = await createVendor(db, { code: 'VNULL', name: 'NoHvhh', hvhh: null }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createVendor: hvhh="" is allowed (empty string = absent)', async () => {
+  const db = makeMemoryDb();
+  const out = await createVendor(db, { code: 'VEMP', name: 'Empty', hvhh: '' }, 0);
+  assert.equal(out.hvhh, '');
+});
+
+test('createVendor: hvhh omitted is allowed', async () => {
+  const db = makeMemoryDb();
+  const out = await createVendor(db, { code: 'VOMIT', name: 'Omitted' }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createVendor: valid 8-digit hvhh persists (matches customer parity)', async () => {
+  const db = makeMemoryDb();
+  const out = await createVendor(
+    db,
+    { code: 'VGOOD', name: 'GoodCo', hvhh: '00123456' },
+    0,
+  );
+  assert.equal(out.hvhh, '00123456');
+});
+
+// ────────────────────────────────────────────────────────────────────────
 // Purchase orders
 // ────────────────────────────────────────────────────────────────────────
 

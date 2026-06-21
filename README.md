@@ -611,6 +611,61 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     + STEP 5b + 5c + 5d + 5e + 5f + 5g + 5h all pass.
     `npm run check` clean, boundary 0.
 
+## v0.6.0 — A1-Validator integration across customer + vendor + invoice
+
+The first release that ties HHVH (Armenian tax ID) validation to the
+[A1-Validator](https://github.com/Armosphera/A1-Validator) HTTP service
+end-to-end. Three create endpoints now share the same fail-soft pattern:
+
+1. **`POST /api/finance/customers`** — validates `hvhh` via the
+   `assertValidHvhhAsync` wrapper. New `server/finance/hvhh-validator.js`
+   (118 lines) wraps `lib/a1-validator-client.js` with a local
+   `^\d{8}$` regex fallback.
+2. **`POST /api/finance/vendors`** — same wrapper, same pattern.
+   Vendor TIN is validated by `assertValidVendorHvhhAsync` (a thin
+   re-export of the customer wrapper, kept as a separate name for
+   clarity in stack traces).
+3. **`POST /api/finance/invoices`** — re-validates the referenced
+   customer's `hvhh` at invoice-create time. Catches drift: a
+   customer's HVVH could have become invalid since the customer was
+   created (e.g. the A1-Validator algorithm was updated, or the
+   customer was imported with the validator disabled). The FK check
+   now reads `SELECT id, hvhh FROM finance.customers` in one query,
+   and the wrapper rejects on invalid HVVH.
+
+**Fail-soft contract** (3-tier):
+- `A1_VALIDATOR_URL` unset → the client is disabled; the local regex
+  (`^\d{8}$`) is the only enforcement. No HTTP calls, no latency.
+- `A1_VALIDATOR_URL` set but service unreachable → falls back to the
+  same local regex. The endpoint stays up.
+- `A1_VALIDATOR_URL` set + service reachable → calls the service.
+  - `ok: true` → proceed.
+  - `ok: false` → 400 with the service's error message.
+
+The local regex is always the last-line-of-defense. The
+A1-Validator service is an enhancement, never a requirement.
+
+**Stats:**
+- 1268/1268 tests pass (was 1242; +26 new across
+  hvhh-validator + customer integration + vendor integration +
+  invoice integration).
+- 88 endpoint smoke checks + STEP 5b/5c/5d/5e/5f/7/7b/7c/7d/7e
+  all pass. STEP 7c/7d/7e are the three new fail-soft
+  validators wired into the smoke.
+- `npm run check` clean, boundary 0.
+- 0 dependencies added. Pure ESM + Node 20.
+
+**New deploy smoke steps:**
+- STEP 7c: customer HVVH (valid 8-digit persists, invalid 9-digit
+  returns 400).
+- STEP 7d: vendor TIN (same shape, mirrors customer).
+- STEP 7e: invoice customer HVVH drift — creates a customer with
+  valid HVVH, creates an invoice (success), then directly UPDATEs
+  the customer's HVVH in sqlite to `NOT_AN_HVVH`, restarts the
+  server, and verifies that the next invoice-create against the
+  now-invalid customer returns 400. End-to-end proof of the
+  drift-detection value of the re-validation pass.
+
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
@@ -629,7 +684,7 @@ npm run format:check
 
 `lib/a1-validator-client.js` is a zero-dep Node.js client for the
 [A1-Validator](https://github.com/Armosphera/A1-Validator) HTTP service
-(37 business-ID validators: HHVH, INN, CNPJ, MX RFC, JP My Number, etc.).
+(41 business-ID validators: HHVH, INN, CNPJ, MX RFC, JP My Number, IN PAN, IL ID, SA TIN, TW UBN, etc.).
 The integration is **opt-in**: if the service is unreachable, the client
 returns `{ ok: null, _error: ... }` (no crash, no blocking).
 

@@ -988,6 +988,166 @@ fi
 
 
 echo
+echo "=== STEP 7d: Vendor TIN validation via A1-Validator wrapper (v0.6.0) ==="
+# Verify that POST /api/finance/vendors with a valid HVVH succeeds and
+# with an invalid HVVH returns 400. Same fail-soft pattern as customer.
+LOG7D="$TESTDIR/server-7d.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7D" 2>&1 &
+SERVER_PID_7D=$!
+SMOKE_RC=0
+cleanup_7d() { kill -9 $SERVER_PID_7D 2>/dev/null; wait $SERVER_PID_7D 2>/dev/null; }
+trap cleanup_7d EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7d"
+    tail -20 "$LOG7D"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7D=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7D" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7D" ]; then
+    echo "  FAIL: STEP 7d server did not print admin session token"
+    tail -20 "$LOG7D"
+    SMOKE_RC=1
+  else
+    VENDOR_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/vendors" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7D" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"code":"VGOOD","name":"VendorCo","hvhh":"01234567"}')
+    if echo "$VENDOR_OUT" | grep -q '"hvhh":"01234567"'; then
+      echo "  OK vendor create with valid hvhh persisted"
+    else
+      echo "  FAIL: valid vendor hvhh did not persist: $VENDOR_OUT"
+      SMOKE_RC=1
+    fi
+
+    VENDOR_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/vendors" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7D" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"code":"VBAD","name":"BadVendor","hvhh":"123456789"}')
+    if [ "$VENDOR_BAD" = "400" ]; then
+      echo "  OK invalid 9-digit vendor hvhh returns 400"
+    else
+      echo "  FAIL: invalid vendor hvhh returned $VENDOR_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7D 2>/dev/null
+wait $SERVER_PID_7D 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+echo
+echo "=== STEP 7e: Invoice customer HVVH re-validation via A1-Validator (v0.6.0) ==="
+# Verify that POST /api/finance/invoices re-validates the referenced
+# customer's HVVH via A1-Validator at create-invoice time. Catches drift:
+# a customer's HVVH could have become invalid since the customer was
+# created (e.g. the A1-Validator algorithm was updated, or the customer
+# was imported with the validator disabled).
+LOG7E="$TESTDIR/server-7e.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7E" 2>&1 &
+SERVER_PID_7E=$!
+SMOKE_RC=0
+cleanup_7e() { kill -9 $SERVER_PID_7E 2>/dev/null; wait $SERVER_PID_7E 2>/dev/null; }
+trap cleanup_7e EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7e"
+    tail -20 "$LOG7E"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7E=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7E" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7E" ]; then
+    echo "  FAIL: STEP 7e server did not print admin session token"
+    tail -20 "$LOG7E"
+    SMOKE_RC=1
+  else
+    # 1. Create a customer with valid HVVH
+    CUST_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7E" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"GoodCo","hvhh":"00123456"}')
+    CUST_ID=$(echo "$CUST_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -z "$CUST_ID" ]; then
+      echo "  FAIL: could not create customer for STEP 7e: $CUST_OUT"
+      SMOKE_RC=1
+    else
+      # 2. Create an invoice referencing the valid customer (happy path)
+      INV_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/invoices" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7E" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"customer_id\": $CUST_ID, \"invoice_number\": \"INV-7E-OK\", \"issue_date\": \"2026-06-21\", \"due_date\": \"2026-07-21\", \"lines\": [{\"description\": \"Consulting\", \"quantity\": 1, \"unit_price_amd\": 100000}]}")
+      if echo "$INV_OUT" | grep -q '"invoice_number":"INV-7E-OK"'; then
+        echo "  OK invoice created referencing customer with valid hvhh"
+      else
+        echo "  FAIL: invoice create failed: $INV_OUT"
+        SMOKE_RC=1
+      fi
+
+      # 3. Directly mutate the customer's HVVH in the DB to simulate drift
+      kill -TERM $SERVER_PID_7E 2>/dev/null
+      wait $SERVER_PID_7E 2>/dev/null
+      trap - EXIT
+      sqlite3 "$DB" "UPDATE customers SET hvhh = 'NOT_AN_HVVH' WHERE id = $CUST_ID" 2>/dev/null
+
+      # 4. Start a fresh server (the original is killed)
+      LOG7E2="$TESTDIR/server-7e2.log"
+      PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7E2" 2>&1 &
+      SERVER_PID_7E=$!
+      cleanup_7e() { kill -9 $SERVER_PID_7E 2>/dev/null; wait $SERVER_PID_7E 2>/dev/null; }
+      trap cleanup_7e EXIT
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+          break
+        fi
+        sleep 1
+      done
+      ADMIN_TOKEN_7E=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7E2" | head -1 | awk '{print $NF}')
+
+      # 5. Try to create another invoice — should fail with 400 because the
+      #    customer's HVVH is now invalid (A1-Validator re-validates).
+      INV_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/invoices" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7E" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"customer_id\": $CUST_ID, \"invoice_number\": \"INV-7E-BAD\", \"issue_date\": \"2026-06-21\", \"due_date\": \"2026-07-21\", \"lines\": [{\"description\": \"Consulting\", \"quantity\": 1, \"unit_price_amd\": 100000}]}")
+      if [ "$INV_BAD" = "400" ]; then
+        echo "  OK invoice create correctly rejects customer with drifted hvhh"
+      else
+        echo "  FAIL: invoice with drifted customer hvhh returned $INV_BAD (expected 400)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7E 2>/dev/null
+wait $SERVER_PID_7E 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"

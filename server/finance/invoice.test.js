@@ -54,7 +54,7 @@ function makeMockDb() {
   // tenant_id field.
   function classify(sql) {
     const s = sql.trim().toUpperCase();
-    if (/SELECT\s+1\s+FROM\s+FINANCE\.CUSTOMERS/.test(s)) return 'customer-exists';
+    if (/SELECT\s+(1|ID|.*?HVHH.*?)\s+FROM\s+FINANCE\.CUSTOMERS/.test(s)) return 'customer-exists';
     if (/INSERT\s+INTO\s+FINANCE\.CUSTOMERS/.test(s)) return 'customer-insert';
     if (/INSERT\s+INTO\s+FINANCE\.INVOICES/.test(s)) return 'invoice-insert';
     if (/INSERT\s+INTO\s+FINANCE\.INVOICE_LINES/.test(s)) return 'invoice-line-insert';
@@ -88,11 +88,15 @@ function makeMockDb() {
       // `WHERE id = $1`. We accept both — tenant id 0 is the bootstrap
       // (default) so a row seeded without tenant_id matches the new
       // WHERE clause transparently.
+      //
+      // Wave-34: production now also fetches `hvhh` so the A1-Validator
+      // pass can re-validate it at invoice-create time. The mock returns
+      // the customer's hvhh alongside the existence marker.
       const tenantId = ps[0] != null && ps.length > 1 ? Number(ps[0]) : 0;
       const id = ps.length > 1 ? Number(ps[1]) : Number(ps[0]);
       for (const c of customers.values()) {
         const cTenant = c.tenant_id ?? 0;
-        if (c.id === id && cTenant === tenantId) return { rows: [{ ok: 1 }] };
+        if (c.id === id && cTenant === tenantId) return { rows: [{ ok: 1, id: c.id, hvhh: c.hvhh ?? null }] };
       }
       return { rows: [] };
     }
@@ -628,5 +632,108 @@ describe('invoice CRUD', () => {
     // invoice 1 is 'sent'; setting status='sent' again should be a no-op.
     const noop = await updateInvoice(db, invoice.id, { status: 'sent' });
     assert.equal(noop.status, 'sent');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — invoice re-validates the customer's HVVH at
+// create-invoice time. With A1_VALIDATOR_URL unset, the client is
+// disabled and the local regex enforces 8 digits (the regex in
+// hvhh-validator.js — same as customer/vendor).
+// ────────────────────────────────────────────────────────────────────────
+
+describe('createInvoice: customer HVVH re-validation (A1-Validator wiring)', () => {
+  let db;
+  let createInvoice;
+
+  async function seedCustomer(name, hvhh, tenantId = 0) {
+    // Use direct INSERT so the mock's customer-insert handler stores hvhh.
+    await db.query(
+      'INSERT INTO finance.customers (name, hvhh, tenant_id) VALUES ($1, $2, $3)',
+      [name, hvhh, tenantId],
+    );
+  }
+
+  before(async () => {
+    db = makeMockDb();
+    const mod = await import('./invoice.js');
+    createInvoice = mod.createInvoice;
+  });
+
+  test('happy path: customer has valid 8-digit HVVH → invoice created', async () => {
+    await seedCustomer('GoodCo', '00123456');
+    const out = await createInvoice(
+      db,
+      {
+        customer_id: 1,
+        invoice_number: 'INV-A1-001',
+        issue_date: '2026-06-21',
+        due_date: '2026-07-21',
+        lines: [
+          { description: 'Consulting', quantity: 1, unit_price_amd: 100000 },
+        ],
+      },
+      0,
+    );
+    assert.ok(Number.isInteger(out.id) && out.id > 0);
+    assert.equal(out.customer_id, 1);
+  });
+
+  test('customer with malformed 9-digit HVVH → ValueError (A1-Validator wrapper)', async () => {
+    await seedCustomer('BadCo', '123456789');
+    await assert.rejects(
+      createInvoice(
+        db,
+        {
+          customer_id: 2,
+          invoice_number: 'INV-A1-002',
+          issue_date: '2026-06-21',
+          due_date: '2026-07-21',
+          lines: [
+            { description: 'x', quantity: 1, unit_price_amd: 1000 },
+          ],
+        },
+        0,
+      ),
+      /hvhh must be exactly 8 digits/,
+    );
+  });
+
+  test('customer with no HVVH (null) → invoice created (optional field)', async () => {
+    await seedCustomer('NoHvhh', null);
+    const out = await createInvoice(
+      db,
+      {
+        customer_id: 3,
+        invoice_number: 'INV-A1-003',
+        issue_date: '2026-06-21',
+        due_date: '2026-07-21',
+        lines: [
+          { description: 'x', quantity: 1, unit_price_amd: 1000 },
+        ],
+      },
+      0,
+    );
+    assert.ok(Number.isInteger(out.id) && out.id > 0);
+  });
+
+  test('customer with non-digit HVVH → ValueError', async () => {
+    await seedCustomer('ChrCo', '1234567A');
+    await assert.rejects(
+      createInvoice(
+        db,
+        {
+          customer_id: 4,
+          invoice_number: 'INV-A1-004',
+          issue_date: '2026-06-21',
+          due_date: '2026-07-21',
+          lines: [
+            { description: 'x', quantity: 1, unit_price_amd: 1000 },
+          ],
+        },
+        0,
+      ),
+      /hvhh must be exactly 8 digits/,
+    );
   });
 });

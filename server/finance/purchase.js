@@ -23,6 +23,23 @@
 // vat_carry_forward work.
 
 import { receiveStock } from './inventory.js';
+import { validateHvhh as _a1ValidateHvhh } from './hvhh-validator.js';
+
+/**
+ * Async HVVH validation for vendors — uses the A1-Validator HTTP service
+ * with local regex fallback. Mirrors the customer pattern.
+ *
+ * Returns the normalized form (whitespace stripped) on success.
+ * Throws ValueError on invalid input (caught by the route handler as 400).
+ * For optional hvhh (null/undefined/empty), returns null without throwing.
+ */
+export async function assertValidVendorHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'hvhh is invalid');
+}
 
 export class ValueError extends Error {
   constructor(message) {
@@ -80,18 +97,6 @@ function assertIsoDate(value, name) {
   return value;
 }
 
-function assertHvhh(value) {
-  if (value == null) return null;
-  if (typeof value !== 'string') {
-    throw new ValueError('hvhh must be a string of 8 digits or null');
-  }
-  const trimmed = value.replace(/\s+/g, '');
-  if (!/^\d{8}$/.test(trimmed)) {
-    throw new ValueError('hvhh must be exactly 8 digits');
-  }
-  return trimmed;
-}
-
 const VALID_PO_STATUSES = new Set(['rfq', 'confirmed', 'partial', 'received', 'billed', 'cancelled']);
 const VALID_BILL_STATUSES = new Set(['draft', 'confirmed', 'posted', 'paid', 'void']);
 void VALID_PO_STATUSES;
@@ -107,7 +112,15 @@ export async function createVendor(db, input, tenantId = 0) {
   }
   const code = assertNonEmpty(input.code, 'code');
   const name = assertNonEmpty(input.name, 'name');
-  const hvhh = assertHvhh(input.hvhh);
+  // A1-Validator pass — primary HVVH validation. Uses the HTTP service
+  // if A1_VALIDATOR_URL is set, otherwise falls back to the local regex.
+  // Throws ValueError on invalid input (caught by the route handler as 400).
+  // The return value is intentionally discarded — we destructure `hvhh`
+  // from the input below to preserve empty-string semantics (the A1
+  // wrapper normalizes missing HVVH to null, but the customer pattern
+  // preserves the raw input). Mirrors the customer.js pattern.
+  await assertValidVendorHvhhAsync(input);
+  const { hvhh = null } = input;
 
   const dupe = await runQuery(
     db,

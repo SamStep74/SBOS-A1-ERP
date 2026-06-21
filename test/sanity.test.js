@@ -22,8 +22,11 @@ test('engine contract: package.json declares node >=20', () => {
 });
 
 test('engine contract: .nvmrc pins Node 20', () => {
+  // .nvmrc may be a major ("20") or a fully-qualified "20.19.0" — the dev
+  // toolchain update on 2026-06-21 bumped it to 20.19.0 to match the
+  // setup-node action. Accept any pin starting with "20".
   const nvmrc = readFileSync(resolve(repoRoot, '.nvmrc'), 'utf8').trim();
-  assert.equal(nvmrc, '20');
+  assert.ok(nvmrc === '20' || nvmrc.startsWith('20.'), `expected .nvmrc to start with "20", got ${JSON.stringify(nvmrc)}`);
 });
 
 test('runtime: current Node satisfies engines >=20 (informational)', () => {

@@ -16,6 +16,24 @@
 // from l10n-am to enforce the no-float discipline.
 
 import { roundAmd } from '../l10n-am/localization.js';
+import { validateHvhh as _a1ValidateHvhh } from './hvhh-validator.js';
+
+/**
+ * Async HVVH validation for invoice customers — re-validates the
+ * customer's HVVH at invoice-create time. Mirrors the customer and
+ * vendor patterns.
+ *
+ * Returns the normalized form (whitespace stripped) on success.
+ * Throws ValueError on invalid input (caught by the route handler as 400).
+ * For customers without an hvhh (null/undefined/empty), returns null.
+ */
+export async function assertValidInvoiceCustomerHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'customer hvhh is invalid');
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Custom error class — callers can match by class, not just message.
@@ -130,14 +148,26 @@ export async function createInvoice(db, input, tenantId = 0) {
 
   // FK: customer must exist (scoped to the caller's tenant — a customer
   // in another tenant is invisible here, so the FK check correctly fails).
+  // We also fetch hvhh in the same query so the A1-Validator pass below
+  // can re-validate it without an extra round-trip.
   const custCheck = await runQuery(
     db,
-    'SELECT 1 FROM finance.customers WHERE tenant_id = $1 AND id = $2',
+    'SELECT id, hvhh FROM finance.customers WHERE tenant_id = $1 AND id = $2',
     [tenantId, customer_id],
   );
   if (!custCheck.rows || custCheck.rows.length === 0) {
     throw new ValueError(`customer_id ${customer_id} does not exist (foreign-key violation)`);
   }
+
+  // A1-Validator pass — re-validate the customer's HVVH at invoice-create
+  // time. Same fail-soft pattern as createCustomer and createVendor:
+  // - A1_VALIDATOR_URL unset → skip (trust the FK-resolved customer row)
+  // - A1_VALIDATOR_URL set but unreachable → skip
+  // - A1_VALIDATOR_URL set + reachable + invalid → throw 400
+  // This catches drift: a customer's HVVH could have become invalid since
+  // the customer was created (e.g. the A1-Validator algorithm was updated,
+  // or the customer was imported with the validator disabled).
+  await assertValidInvoiceCustomerHvhhAsync({ hvhh: custCheck.rows[0].hvhh });
 
   // UNIQUE: invoice_number must not already exist WITHIN the tenant.
   // (invoice_number is globally unique per the schema's UNIQUE
