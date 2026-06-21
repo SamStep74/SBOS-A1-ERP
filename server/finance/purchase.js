@@ -879,6 +879,151 @@ export async function listVendorBills(db, tenantId = 0, { vendorId, status, purc
   }));
 }
 
+/**
+ * Get a single purchase order with its lines + the catalog item
+ * names. Used by the print route (the server-rendered PO template
+ * needs the item names + UoMs to render, not just ids). Returns
+ * null if not found in tenant.
+ */
+export async function getPurchaseOrder(db, orderId, tenantId = 0) {
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    throw new ValueError('orderId must be a positive integer');
+  }
+  const header = await runQuery(
+    db,
+    `SELECT po.id, po.order_number, po.vendor_id, po.vendor_name, po.vendor_hvhh,
+            po.status, po.order_date, po.expected_date, po.received_quantity,
+            po.notes, po.cancelled_at, po.cancelled_reason, po.created_at,
+            v.code AS vendor_code, v.address AS vendor_address,
+            v.phone AS vendor_phone, v.contact_name AS vendor_contact
+       FROM purchase_orders po
+       LEFT JOIN vendors v ON v.tenant_id = po.tenant_id AND v.id = po.vendor_id
+      WHERE po.tenant_id = $1 AND po.id = $2`,
+    [tenantId, orderId],
+  );
+  if (!header.rows || header.rows.length === 0) return null;
+  const h = header.rows[0];
+
+  const linesRes = await runQuery(
+    db,
+    `SELECT pol.id, pol.catalog_item_id, ci.name AS catalog_item_name,
+            ci.uom_code AS unit_of_measure, pol.quantity, pol.unit_cost, pol.description,
+            pol.line_order
+       FROM purchase_order_lines pol
+       LEFT JOIN catalog_items ci ON ci.tenant_id = pol.tenant_id AND ci.id = pol.catalog_item_id
+      WHERE pol.tenant_id = $1 AND pol.order_id = $2
+      ORDER BY pol.line_order, pol.id`,
+    [tenantId, orderId],
+  );
+  const lines = (linesRes.rows || []).map((r) => ({
+    id: Number(r.id),
+    catalog_item_id: Number(r.catalog_item_id),
+    catalog_item_name: r.catalog_item_name,
+    unit_of_measure: r.unit_of_measure,
+    quantity: Number(r.quantity),
+    unit_cost: Number(r.unit_cost),
+    description: r.description,
+    line_subtotal: Number(r.quantity) * Number(r.unit_cost),
+  }));
+  const subtotal = lines.reduce((s, l) => s + l.line_subtotal, 0);
+  const vat = Math.floor(subtotal * 0.2);
+  const total = subtotal + vat;
+
+  return {
+    id: Number(h.id),
+    order_number: h.order_number,
+    vendor_id: Number(h.vendor_id),
+    vendor_name: h.vendor_name,
+    vendor_code: h.vendor_code,
+    vendor_hvhh: h.vendor_hvhh,
+    vendor_address: h.vendor_address,
+    vendor_phone: h.vendor_phone,
+    vendor_contact: h.vendor_contact,
+    status: h.status,
+    order_date: h.order_date,
+    expected_date: h.expected_date,
+    received_quantity: Number(h.received_quantity),
+    notes: h.notes,
+    cancelled_at: h.cancelled_at,
+    cancelled_reason: h.cancelled_reason,
+    created_at: h.created_at,
+    lines,
+    subtotal,
+    vat,
+    total,
+  };
+}
+
+/**
+ * Get a single purchase receipt (delivery note) with its lines +
+ * destination location + the related PO. Returns null if not found
+ * in tenant. Used by the delivery-note print route.
+ */
+export async function getReceipt(db, receiptId, tenantId = 0) {
+  if (!Number.isInteger(receiptId) || receiptId <= 0) {
+    throw new ValueError('receiptId must be a positive integer');
+  }
+  const header = await runQuery(
+    db,
+    `SELECT pr.id, pr.order_id, pr.receipt_number, pr.received_at, pr.notes,
+            pr.created_at,
+            po.order_number, po.vendor_id, po.vendor_name, po.vendor_hvhh
+       FROM purchase_receipts pr
+       LEFT JOIN purchase_orders po
+         ON po.tenant_id = pr.tenant_id AND po.id = pr.order_id
+      WHERE pr.tenant_id = $1 AND pr.id = $2`,
+    [tenantId, receiptId],
+  );
+  if (!header.rows || header.rows.length === 0) return null;
+  const h = header.rows[0];
+
+  const linesRes = await runQuery(
+    db,
+    `SELECT prl.id, prl.order_line_id, prl.catalog_item_id, prl.received_quantity,
+            prl.unit_cost, prl.destination_location_id,
+            ci.name AS catalog_item_name, ci.uom_code AS unit_of_measure,
+            sl.code AS destination_location_code, sl.name AS destination_location_name,
+            w.code AS warehouse_code, w.name AS warehouse_name
+       FROM purchase_receipt_lines prl
+       LEFT JOIN catalog_items ci ON ci.tenant_id = prl.tenant_id AND ci.id = prl.catalog_item_id
+       LEFT JOIN stock_locations sl ON sl.tenant_id = prl.tenant_id AND sl.id = prl.destination_location_id
+       LEFT JOIN warehouses w ON w.tenant_id = sl.tenant_id AND w.id = sl.warehouse_id
+      WHERE prl.tenant_id = $1 AND prl.receipt_id = $2
+      ORDER BY prl.id`,
+    [tenantId, receiptId],
+  );
+  const lines = (linesRes.rows || []).map((r) => ({
+    id: Number(r.id),
+    order_line_id: Number(r.order_line_id),
+    catalog_item_id: Number(r.catalog_item_id),
+    catalog_item_name: r.catalog_item_name,
+    unit_of_measure: r.unit_of_measure,
+    received_quantity: Number(r.received_quantity),
+    unit_cost: Number(r.unit_cost),
+    destination_location_id:
+      r.destination_location_id == null ? null : Number(r.destination_location_id),
+    destination_location_code: r.destination_location_code,
+    destination_location_name: r.destination_location_name,
+    warehouse_code: r.warehouse_code,
+    warehouse_name: r.warehouse_name,
+    line_subtotal: Number(r.received_quantity) * Number(r.unit_cost),
+  }));
+
+  return {
+    id: Number(h.id),
+    order_id: Number(h.order_id),
+    order_number: h.order_number,
+    receipt_number: h.receipt_number,
+    received_at: h.received_at,
+    notes: h.notes,
+    created_at: h.created_at,
+    vendor_id: h.vendor_id == null ? null : Number(h.vendor_id),
+    vendor_name: h.vendor_name,
+    vendor_hvhh: h.vendor_hvhh,
+    lines,
+  };
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Internal helper
 // ────────────────────────────────────────────────────────────────────────
