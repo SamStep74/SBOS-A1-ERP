@@ -195,6 +195,47 @@ async function main() {
   console.warn(`[sbos-server] use: curl -H "Authorization: Bearer ${adminToken}" http://${host}:${port}/api/health`);
 
   const pgAdapter = makePgAdapter(sqliteDb);
+
+  // Boot-time GL reconciliation. The journal is a best-effort
+  // projection of the operational moves (stock.receive /
+  // deliver / adjust / vendor_bill.post). On every boot we run
+  // the reconciliation job for the bootstrap tenant (id=0) to
+  // close any gap left by a previous boot that didn't complete
+  // the journal post (e.g. a crashed boot mid-write). The
+  // reconciliation is idempotent (UNIQUE on source_id) and
+  // best-effort: a failure here is logged but does NOT block
+  // the server from starting. The operator can re-run via
+  // POST /api/finance/journal/reconcile after fixing the
+  // underlying issue. Skipped entirely if the journal tables
+  // don't exist yet (e.g. the migration runner hasn't run the
+  // journal migration — Wave 19 is required for this to be a
+  // no-op on old deploys).
+  try {
+    const tableCheck = sqliteDb
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='journal_entries'")
+      .get();
+    if (!tableCheck) {
+      console.warn('[sbos-server] reconciliation: skipped (journal_entries table not present; Wave 19 migration not applied)');
+    } else {
+      const { reconcileJournal } = await import('../server/finance/reconciliation.js');
+      const result = await reconcileJournal(pgAdapter, 0);
+      console.warn(
+        `[sbos-server] reconciliation: scanned=${result.scanned} reconciled=${result.reconciled} errors=${result.errors.length}`,
+      );
+      if (result.errors.length > 0) {
+        for (const e of result.errors.slice(0, 5)) {
+          console.warn(`[sbos-server] reconciliation: failed ${e.source}#${e.move_id}: ${e.error}`);
+        }
+        if (result.errors.length > 5) {
+          console.warn(`[sbos-server] reconciliation: ...and ${result.errors.length - 5} more errors (use POST /api/finance/journal/reconcile for full report)`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[sbos-server] reconciliation: skipped (${err && err.message ? err.message : err})`,
+    );
+  }
   console.warn(`[sbos-server] listening on http://${host}:${port}`);
   const server = await start({
     db: sqliteDb,

@@ -350,7 +350,17 @@ sleep 2
 kill -9 $SERVER_PID 2>/dev/null
 
 echo
-echo "=== STEP 7: Summary ==="
+echo "=== STEP 7: Boot-time reconciliation (Wave 24) ==="
+if grep -q "reconciliation: scanned" "$LOG"; then
+  RECON_LINE=$(grep -oE "reconciliation: scanned=[0-9]+ reconciled=[0-9]+ errors=[0-9]+" "$LOG" | head -1)
+  echo "  OK boot-time reconciliation ran: $RECON_LINE"
+else
+  echo "  FAIL: server did not print a boot-time reconciliation line (Wave 24 hook missing)"
+  exit 1
+fi
+
+echo
+echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
   echo "  - DB schema correct: 18 expected tables present"
@@ -361,6 +371,7 @@ echo "=== STEP 7: Summary ==="
   echo "  - POST /api/auth/login returns a session token"
   echo "  - Graceful shutdown works (SIGTERM)"
   echo "  - Restart is idempotent"
+  echo "  - Boot-time GL reconciliation ran (Wave 24)"
   exit 0
 else
   echo "  RESULT: FAIL (smoke=$SMOKE_RC db=$DB_RC)"

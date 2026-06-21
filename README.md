@@ -147,6 +147,28 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     English text formatting, malformed input rejection.
   - 1114/1114 tests pass (was 1104; +10). Deploy smoke at 48
     endpoints.
+- **Wave 23 (Phase 2 CRM — ValueError audit)** — DONE.
+  - The W73-1 desk gotcha memory entry flagged that desk had
+    the minimal ValueError form. A grep audit found CRM with
+    the same bug. Fixed (proper constructor with this.name).
+  - Added 2 unit regression tests + 1 smoke check (POST
+    /api/finance/crm/contacts with bad email → 400, was
+    500). The triply-enforced fix catches the next module
+    that copies the minimal form.
+  - 1130/1130 tests pass (was 1114; +16 with the 14 new
+    CRM tests + 2 regression). Deploy smoke at 57 endpoints.
+- **Wave 24 (Phase 1 ERP — boot-time reconciliation)** — DONE.
+  - bin/sbos-server.mjs now runs reconcileJournal on every
+    boot (for tenant 0, the bootstrap tenant). Best-effort:
+    a failure is logged but does NOT block the server from
+    starting. Skipped if the journal tables don't exist
+    (old deploys before Wave 19). Closes the deferred
+    "safe to run at boot" thing from Wave 20.
+  - Smoke check: the boot log MUST contain a
+    `reconciliation: scanned=N reconciled=N errors=N` line
+    on every fresh install. Catches accidental removal of
+    the hook.
+  - 1130/1130 tests pass. Deploy smoke at 57 endpoints.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -343,8 +365,16 @@ curl -sX POST "http://localhost:3000/api/finance/journal/reconcile" \
 ```
 
 The reconciliation is **safe to run at boot** (no destructive
-operation; the only state change is new journal rows). Future work:
-a scheduled job that runs the reconciliation every N minutes as
+operation; the only state change is new journal rows). The
+SBOS-A1-ERP server runs the reconciliation automatically on
+every boot (Wave 24) — see the `[sbos-server] reconciliation: ...`
+line in the boot log. If the reconciliation finds a gap (e.g.
+because a previous boot crashed mid-write), it posts the
+missing entries and logs the result. A failure here is logged
+but does not block the server from starting — the operator
+can re-run via `POST /api/finance/journal/reconcile` after
+fixing the underlying issue. Future work: a scheduled job
+that runs the reconciliation every N minutes as additional
 defense in depth.
 
 #### Trial balance report
