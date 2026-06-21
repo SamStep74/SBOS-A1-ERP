@@ -292,7 +292,7 @@ export async function listSerialsForItem(db, catalogItemId, tenantId = 0, opts =
     if (!VALID_SERIAL_STATUSES.has(opts.status)) {
       throw new ValueError(`opts.status must be one of ${[...VALID_SERIAL_STATUSES].join(', ')}`);
     }
-    where.push(`status = $${i++}`);
+    where.push(`status = $${i}`);
     params.push(opts.status);
   }
   const result = await runQuery(
