@@ -527,6 +527,34 @@ const PERMISSIONS = Object.freeze({
     label: 'Update catalog item',
     description: 'Edit an existing product (name, price, cost, UoM, etc.).',
   },
+  // ─────────── Catalog v2 (Phase 2 W76/W77) ───────────
+  // Categories: hierarchical (parent_id chain) for the
+  // product catalog. Variants: per-item size/color
+  // attribute dimensions.
+  'finance.category.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog category',
+    description: 'View catalog categories (hierarchical) and breadcrumb paths.',
+  },
+  'finance.category.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog category',
+    description: 'Add a new catalog category (with optional parent).',
+  },
+  'finance.variant.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog variant',
+    description: 'View catalog variants (per-item size/color attributes).',
+  },
+  'finance.variant.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog variant',
+    description: 'Add a new variant (SKU + name + attributes) under a catalog item.',
+  },
   'finance.warehouse.read': {
     category: 'finance',
     sensitivity: 'low',

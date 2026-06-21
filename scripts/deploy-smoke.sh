@@ -116,6 +116,13 @@ const checks = [
   { path: '/api/finance/projects?status=active', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/projects?status=active tenant=0' },
   { path: '/api/finance/projects/1',        headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1 (404 for missing project)' },
   { path: '/api/finance/projects/1/tasks',  headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1/tasks (404 for missing project)' },
+  // Phase 2 catalog v2 (W77-1) — categories + variants
+  // reads (empty DB → 200, items: []; 404 for missing
+  // category/variant)
+  { path: '/api/finance/catalog/categories', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/categories tenant=0' },
+  { path: '/api/finance/catalog/categories?parent_id=1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/categories?parent_id=1 tenant=0' },
+  { path: '/api/finance/catalog/categories/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/categories/1 (404 for missing category)' },
+  { path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/variants/1 (404 for missing variant)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -180,6 +187,19 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/projects/1/tasks', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks (returns the task created above)' },
   { method: 'GET', path: '/api/finance/projects/1/tasks/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1 (returns the task created above)' },
   { method: 'GET', path: '/api/finance/projects/1/tasks/1/time-entries', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1/time-entries (returns the entry created above)' },
+  // Phase 2 catalog v2 (W77-1) — categories + variants
+  // writes. The category smoke check returns id > 0
+  // (the wave-14 production pg adapter regression
+  // guard). The variant smoke check depends on the
+  // catalog item (id=1, created by the earlier
+  // catalog smoke check) being present, so it must
+  // come AFTER the item POST.
+  { method: 'POST', path: '/api/finance/catalog/categories', body: { name: 'Smoke Category', slug: 'smoke-cat-1' }, expect: 201, name: 'POST /api/finance/catalog/categories (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/catalog/items/1/variants', body: { sku: 'SMOKE-VAR-1', name: 'Smoke Variant', unit_price_amd: 1500 }, expect: 201, name: 'POST /api/finance/catalog/items/1/variants (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/catalog/categories/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/categories/1 (returns the category created above)' },
+  { method: 'GET', path: '/api/finance/catalog/categories/1/path', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/categories/1/path (returns the breadcrumb path)' },
+  { method: 'GET', path: '/api/finance/catalog/items/1/variants', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/items/1/variants (returns the variant created above)' },
+  { method: 'GET', path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/variants/1 (returns the variant created above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

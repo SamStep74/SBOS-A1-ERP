@@ -68,6 +68,13 @@
 //   GET    /api/finance/projects/:id/tasks/:taskId
 //   GET    /api/finance/projects/:id/tasks/:taskId/time-entries
 //   POST   /api/finance/projects/:id/tasks/:taskId/time-entries
+//   GET    /api/finance/catalog/categories?parent_id=
+//   POST   /api/finance/catalog/categories
+//   GET    /api/finance/catalog/categories/:id
+//   GET    /api/finance/catalog/categories/:id/path
+//   GET    /api/finance/catalog/items/:itemId/variants
+//   POST   /api/finance/catalog/items/:itemId/variants
+//   GET    /api/finance/catalog/variants/:id
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -145,6 +152,15 @@ import {
   createTimeEntry,
   listTimeEntries,
 } from './projects.js';
+import {
+  createCategory,
+  listCategories,
+  getCategory,
+  getCategoryPath,
+  createVariant,
+  listVariants,
+  getVariant,
+} from './catalog.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -1516,9 +1532,187 @@ export function registerFinanceRoutes(app, opts = {}) {
         // (the pure function validates it via its task
         // existence check).
         const input = { ...(req.body || {}), task_id: taskId };
-        const out = await createTimeEntry(pgAdapter, input, tenantId);
+         const out = await createTimeEntry(pgAdapter, input, tenantId);
+         res.status(201).json(out);
+       },
+     ),
+   );
+
+  // ─────────── Catalog v2 (categories + variants) — Phase 2 wave 2 (W77) ───────────
+  //
+  // The catalog v2 module extends the existing flat
+  // catalog (Wave 7: catalog_items + catalog_variants
+  // + catalog_categories tables) with:
+  //   - Categories (hierarchical via parent_id) with
+  //     slug + description
+  //   - Variants (per-item SKU + name + attributes_json
+  //     + unit_price_amd + unit_cost_amd)
+  //
+  // Wave 2 wires 7 HTTP endpoints (consistent with the
+  // W70->W71 / W72->W73 / W74->W75 cadence): 2 reads +
+  // 1 path on categories, 1 write on categories, 1 read +
+  // 1 write on variants, 1 single-entity GET on variant.
+  // The 7 endpoints map to 4 perm keys (all NEW in
+  // W77-1; added to server/rbac/permissions.js):
+  //   finance.category.read  — list + get + path
+  //   finance.category.create — create
+  //   finance.variant.read   — list + get
+  //   finance.variant.create — create
+  // The new CatalogOperator perm set in
+  // server/rbac/matrix.js bundles all 4 keys (no existing
+  // perm set covered categories or variants).
+
+  // GET /api/finance/catalog/categories
+  //   List categories for the caller's tenant.
+  //   Optional ?parent_id= filter (returns only direct
+  //   children of category N). parent_id=null returns
+  //   ALL categories (flat list, ordered by id ASC).
+  //   The caller can filter to roots by checking
+  //   parent_id IS NULL in the response.
+  app.get('/api/finance/catalog/categories', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const parentIdRaw = req.query.parent_id;
+      // Empty string or absent = null (flat list).
+      // Numeric string = parentId (filtered list).
+      const parentId = parentIdRaw === undefined || parentIdRaw === ''
+        ? null
+        : Number(parentIdRaw);
+      const items = await listCategories(pgAdapter, tenantId, parentId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/categories
+  //   Create a new category. Body: { name, slug?,
+  //   description?, parent_id? }. name is required.
+  //   slug is optional (when present, must be unique
+  //   per tenant). parent_id is optional (null for
+  //   root).
+  app.post(
+    '/api/finance/catalog/categories',
+    requireTenant,
+    requirePerm('finance.category.create'),
+    wrapFinanceRoute(
+      'finance.category.create',
+      'catalog_category:new',
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const out = await createCategory(pgAdapter, req.body || {}, tenantId);
         res.status(201).json(out);
       },
     ),
   );
+
+  // GET /api/finance/catalog/categories/:id
+  //   Get a single category. Returns 404 if the category
+  //   is missing or cross-tenant. The pure getCategory
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline (the W73-1 pattern).
+  app.get('/api/finance/catalog/categories/:id', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const categoryId = Number(req.params.id);
+      const item = await getCategory(pgAdapter, categoryId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/catalog/categories/:id/path
+  //   Get the full breadcrumb path for a category
+  //   (root-to-leaf). Returns an array of {id, name}
+  //   objects. Empty array for a missing category
+  //   (the pure getCategoryPath function returns []
+  //   when the SQL recursive CTE finds no rows; this
+  //   is the consistent behavior — a missing category
+  //   is a 200 with [], NOT a 404, because the
+  //   "path" of a non-existent category is the empty
+  //   path). UIs can check items.length === 0 to
+  //   detect a missing category.
+  app.get(
+    '/api/finance/catalog/categories/:id/path',
+    async (req, res, next) => {
+      try {
+        const tenantId = readTenant(req);
+        const categoryId = Number(req.params.id);
+        const items = await getCategoryPath(pgAdapter, categoryId, tenantId);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/catalog/items/:itemId/variants
+  //   List variants for a catalog item. Returns an
+  //   empty array when the item has no variants (or
+  //   when the item is missing — the SQL returns no
+  //   rows for a missing item; the empty array is
+  //   the consistent behavior, similar to
+  //   /desk/cases/:id/replies).
+  app.get(
+    '/api/finance/catalog/items/:itemId/variants',
+    async (req, res, next) => {
+      try {
+        const tenantId = readTenant(req);
+        const itemId = Number(req.params.itemId);
+        const items = await listVariants(pgAdapter, tenantId, itemId);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/catalog/items/:itemId/variants
+  //   Create a new variant under a catalog item.
+  //   Body: { sku, name, attributes_json?,
+  //   unit_price_amd?, unit_cost_amd? }. sku + name
+  //   are required. The catalog_item_id is injected
+  //   from the URL (consistent with the W75-1
+  //   projects pattern).
+  app.post(
+    '/api/finance/catalog/items/:itemId/variants',
+    requireTenant,
+    requirePerm('finance.variant.create'),
+    wrapFinanceRoute(
+      'finance.variant.create',
+      'catalog_variant:new',
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const itemId = Number(req.params.itemId);
+        const input = { ...(req.body || {}), catalog_item_id: itemId };
+        const out = await createVariant(pgAdapter, input, tenantId);
+        res.status(201).json(out);
+      },
+    ),
+  );
+
+  // GET /api/finance/catalog/variants/:id
+  //   Get a single variant. Returns 404 if the variant
+  //   is missing or cross-tenant. The pure getVariant
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline (the W73-1 pattern).
+  app.get('/api/finance/catalog/variants/:id', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const variantId = Number(req.params.id);
+      const item = await getVariant(pgAdapter, variantId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
 }

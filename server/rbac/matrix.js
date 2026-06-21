@@ -234,6 +234,13 @@ const PERMISSION_SETS = Object.freeze({
       'finance.warehouse.update',
       'finance.stock.read',
       'finance.stock.move',
+      // Phase 2 catalog v2 (W77) — categories +
+      // variants. The admin user (who has the
+      // FinanceOperator set) gets these keys too.
+      'finance.category.read',
+      'finance.category.create',
+      'finance.variant.read',
+      'finance.variant.create',
       'finance.vendor.read',
       'finance.vendor.create',
       'finance.vendor.update',
@@ -348,6 +355,26 @@ const PERMISSION_SETS = Object.freeze({
     description: 'Manage warehouses and run valuation.',
     isSystem: true,
     permissions: Object.freeze(['inv.product.delete', 'inv.warehouse.update', 'inv.valuation.run']),
+  },
+
+  // ─────────── Catalog v2 sets (Phase 2 W76/W77) ───────────
+  // Catalog v2 adds hierarchical categories + per-item
+  // variants on top of the existing flat catalog (Wave 7).
+  // The 4 new perm keys (finance.category.read/create +
+  // finance.variant.read/create) are bundled here. The
+  // existing InventoryOperator set keeps the flat catalog
+  // (finance.product.*) and inventory (inv.*) keys.
+  CatalogOperator: {
+    id: 'CatalogOperator',
+    label: 'Catalog Operator',
+    description: 'Categories (hierarchical) and variants (per-item attributes).',
+    isSystem: true,
+    permissions: Object.freeze([
+      'finance.category.read',
+      'finance.category.create',
+      'finance.variant.read',
+      'finance.variant.create',
+    ]),
   },
 
   // ─────────── Purchase sets ───────────

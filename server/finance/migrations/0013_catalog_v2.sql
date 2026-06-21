@@ -52,11 +52,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS catalog_categories_slug_idx
 CREATE INDEX IF NOT EXISTS catalog_categories_parent_idx
     ON finance.catalog_categories (parent_id);
 
--- ───────────── Variants: add updated_at + sku unique ─────────────
+-- ───────────── Variants: add updated_at + price columns + sku unique ─────────────
 
 ALTER TABLE finance.catalog_variants
     ADD COLUMN updated_at TEXT
     NOT NULL DEFAULT (datetime('now'));
+
+-- The 0007_inventory.sql migration created the
+-- catalog_variants table with sku + name +
+-- attributes_json but no price columns. The W76-1
+-- createVariant pure function uses unit_price_amd +
+-- unit_cost_amd (matching the catalog_items
+-- convention). ALTER TABLE adds the columns with
+-- NULL default (existing rows have NULL prices,
+-- which is the safe default — the pure function
+-- validates that the price, when present, is a
+-- non-negative integer).
+ALTER TABLE finance.catalog_variants
+    ADD COLUMN unit_price_amd INTEGER;
+ALTER TABLE finance.catalog_variants
+    ADD COLUMN unit_cost_amd INTEGER;
 
 CREATE UNIQUE INDEX IF NOT EXISTS catalog_variants_sku_idx
     ON finance.catalog_variants (tenant_id, sku);
