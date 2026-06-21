@@ -898,9 +898,15 @@ const PERMISSION_SETS = Object.freeze({
     id: 'SecurityAdmin',
     label: 'Security Admin',
     description:
-      'Read-only user lookups for incident triage. Session/audit perms live in dedicated sets.',
+      'Read-only user lookups for incident triage. Session/audit perms live in dedicated sets. Approval queue access is in here because approvals are a security-domain concern (dual-control workflow for sensitive actions).',
     isSystem: true,
-    permissions: Object.freeze(['security.user.list', 'security.user.read']),
+    permissions: Object.freeze([
+      'security.user.list',
+      'security.user.read',
+      'security.approval.read',
+      'security.approval.request',
+      'security.approval.decide',
+    ]),
   },
 
   // ─────────── Read-only sets ───────────

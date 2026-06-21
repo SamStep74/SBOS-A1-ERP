@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { start } from '../server/server.js';
 import { makePgAdapter } from '../server/db/realDb.js';
 import { applyMigrations } from '../server/finance/migrate.js';
+import { seedRBAC } from '../server/rbac/seed.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Resolve DB path + apply schemas.
@@ -88,6 +89,34 @@ async function applySchemas(sqliteDb) {
     '\n  );',
   );
   sqliteDb.exec(rbacSchema);
+
+  // Seed the RBAC catalog on a fresh boot. The rbac routes fall back to
+  // the in-code catalog when the DB is empty, so /api/rbac/roles and
+  // /api/rbac/permissions always work — but the permission-check guard
+  // (e.g. requirePermFastify('security.approval.read')) needs the DB
+  // role→set→perm chain to be populated. seedRBAC is idempotent.
+  const rbacRowCount = sqliteDb
+    .prepare('SELECT COUNT(*) AS n FROM sbos_rbac_permissions')
+    .get();
+  if (!rbacRowCount || rbacRowCount.n === 0) {
+    const seedResult = await seedRBAC(sqliteDb);
+    console.warn(
+      `[sbos-server] seeded RBAC: ${seedResult.roles_seeded} roles, ${seedResult.permissions_seeded} permissions, ${seedResult.permission_sets_seeded} sets`,
+    );
+  }
+
+  // Link the admin stub user (id=1) to the Admin rbac role. Without
+  // this row, the admin user has `role: 'Admin'` text in the users
+  // table but the rbac permission check (which reads from
+  // sbos_rbac_user_roles) sees an empty role list — so every perm
+  // check fails with 403. Idempotent via ON CONFLICT.
+  sqliteDb
+    .prepare(
+      `INSERT INTO sbos_rbac_user_roles (user_id, role_id, tenant_id, assigned_at, assigned_by)
+       VALUES (?, ?, ?, datetime('now'), ?)
+       ON CONFLICT(user_id, role_id, tenant_id) DO NOTHING`,
+    )
+    .run(1, 'Admin', 0, 1);
 }
 
 // ────────────────────────────────────────────────────────────────────────

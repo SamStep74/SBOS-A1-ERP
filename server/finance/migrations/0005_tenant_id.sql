@@ -97,21 +97,22 @@ CREATE INDEX IF NOT EXISTS idx_finance_invoice_adjustments_tenant_created_at
   ON finance.invoice_adjustments (tenant_id, created_at);
 
 -- ───────────── VAT carry-forward ─────────────
-
-ALTER TABLE finance.vat_carry_forward
-  ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0;
-
--- Single-row per tenant (id=1 inside the table is the per-tenant key).
--- The composite index supports "look up the bank for tenant N" which is
--- the only access pattern on this table.
-CREATE INDEX IF NOT EXISTS idx_finance_vat_carry_forward_tenant
-  ON finance.vat_carry_forward (tenant_id, id);
+--
+-- The tenant_id column + composite PK are now declared in 0003 itself
+-- (per the 2026-06-21 deploy-test fix). No ALTER or extra index needed
+-- here: the PK (tenant_id, id) already provides the (tenant_id, id)
+-- lookup that the only access pattern on this table uses.
 
 -- NOTE: the original 0003 schema declared `id INTEGER PRIMARY KEY`,
 -- which restricts the table to a single row for the whole DB. With
 -- multi-tenant, each tenant needs its own id=1 row — otherwise the
--- bank credit gets clobbered across tenants. The pg path requires
--- a follow-up migration to recreate this table with a composite
--- PK on (tenant_id, id). The sqlite path is fixed in the inline
--- schema mirror in bin/sbos-server.mjs (which already uses
--- composite PK for this table) — pg migration is a follow-up.
+-- bank credit gets clobbered across tenants.
+--
+-- As of 2026-06-21, the canonical 0003 has been updated to use the
+-- composite PK (tenant_id, id) so the same schema works for both
+-- sqlite (via applyMigrations + sqliteTranslate) and pg. The deploy
+-- test caught the previous version's single-column PK as a 500 from
+-- /api/finance/vat/return. The inline schema mirrors in
+-- server.test.js' makeFinanceDb and the rbac seed also use the
+-- composite PK, so 0003 is now consistent with the test + production
+-- shapes.

@@ -14,20 +14,20 @@
 -- Idempotent (IF NOT EXISTS) so re-running the migration is a no-op on
 -- fresh and existing schemas.
 --
--- The ledger stores AT MOST ONE active row (id = 1). When a period
--- closes with a positive net that fully absorbs the prior credit, the
--- bank is reset to 0; when the net is negative, the bank grows; when
--- the net is positive but smaller than the prior credit, the bank
--- holds the leftover. The application (server/finance/vatLedger.js)
--- is the only writer; the schema is a single-row upsert target.
+-- The ledger stores ONE active row per tenant (id = 1 within the tenant).
+-- The composite PK (tenant_id, id) is what makes the multi-tenant bank work
+-- — without it, the carry-forward would be a single global row that
+-- clobbers across tenants. The application (server/finance/vatLedger.js)
+-- is the only writer; the schema is a single-row upsert target per tenant.
 
 CREATE TABLE IF NOT EXISTS finance.vat_carry_forward (
-  id              INTEGER PRIMARY KEY,
+  id              INTEGER NOT NULL,
+  tenant_id       INTEGER NOT NULL DEFAULT 0,
   balance_amd     INTEGER NOT NULL DEFAULT 0,
   as_of_period    TEXT NOT NULL,                -- 'YYYY-MM' the bank was last set
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (tenant_id, id)
 );
 
--- Only one row is ever active. The unique constraint is implicit on the
--- PRIMARY KEY (id=1), so no extra index is needed.
+-- No extra index needed: the PK already provides the lookup.
