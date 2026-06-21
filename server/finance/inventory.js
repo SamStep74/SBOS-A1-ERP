@@ -1,0 +1,821 @@
+// SBOS-A1-ERP finance — Inventory pure functions.
+//
+// Ported from packages/erp/src/{product-catalog,stock-moves}.ts in
+// A1-Suite-Local (the user's private R&D monorepo). All orgId
+// references renamed to tenantId for consistency with the rest of
+// SBOS-A1-ERP. The TypeScript type annotations are stripped; the
+// pg-style $N placeholders are kept (the realDb.js adapter
+// translates to ? on the way down to sqlite).
+//
+// Scope (Phase 1 of the ERP plan):
+//   - catalog items (products): create / list / get / archive
+//   - warehouses: create / list
+//   - stock locations: create / list
+//   - stock moves: receive / deliver / transfer / adjust
+//   - stock balances: list
+//
+// Out of scope (Phase 2+): lot/serial tracking, replenishment
+// reports, valuation handoff to Finance, low-stock alerts, stock
+// valuation entries mapped to RA chart of accounts. These are
+// follow-on work.
+
+// Strip the `finance.` schema prefix to match the production
+// migration runner's behavior (the table is `catalog_items` on
+// sqlite, `finance.catalog_items` on pg). The pure-function SQL
+// is written with the prefix for readability; the strip happens
+// at DML time so the same SQL works on both backends.
+function stripFinancePrefix(sql) {
+  return String(sql).replace(
+    /(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g,
+    '$1',
+  );
+}
+
+export class ValueError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValueError';
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// runQuery — same shape as server/finance/invoice.js. Tolerates
+// adapters that don't return rows on INSERT (sqlite path uses
+// lastInsertRowid via the realDb.js adapter's stmt.all path).
+// ────────────────────────────────────────────────────────────────────────
+
+async function runQuery(db, sql, params) {
+  const result = await db.query(stripFinancePrefix(sql), params || []);
+  if (result && Array.isArray(result.rows)) return result;
+  return { rows: [] };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Validation helpers
+// ────────────────────────────────────────────────────────────────────────
+
+function assertNonEmpty(value, name) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ValueError(`${name} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function assertSku(value) {
+  if (typeof value !== 'string') {
+    throw new ValueError('sku must be a string');
+  }
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 80) {
+    throw new ValueError('sku must be 1-80 characters');
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(trimmed)) {
+    throw new ValueError('sku must match /^[A-Za-z0-9][A-Za-z0-9_.-]*$/');
+  }
+  return trimmed;
+}
+
+function assertNonNegInt(value, name) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new ValueError(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function assertPosInt(value, name) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new ValueError(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+const VALID_ITEM_TYPES = new Set(['STOCKABLE', 'CONSUMABLE', 'SERVICE', 'DIGITAL']);
+const VALID_VAT_CLASSES = new Set(['VAT_STANDARD', 'VAT_REDUCED', 'VAT_EXEMPT', 'VAT_ZERO']);
+const VALID_LOCATION_TYPES = new Set(['INTERNAL', 'CUSTOMER', 'SUPPLIER']);
+// VALID_MOVE_TYPES is documented for the move_type enum but the
+// stock-move functions below dispatch by their own logic (the
+// move_type is set internally per-function, never accepted from
+// the caller) — kept as a set here for future callers that need
+// to validate user input.
+const VALID_MOVE_TYPES = new Set(['RECEIPT', 'DELIVERY', 'ADJUSTMENT', 'TRANSFER', 'INTERNAL']);
+void VALID_MOVE_TYPES;
+
+// ────────────────────────────────────────────────────────────────────────
+// Catalog items (products)
+// ────────────────────────────────────────────────────────────────────────
+
+export async function createCatalogItem(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const sku = assertSku(input.sku);
+  const name = assertNonEmpty(input.name, 'name');
+  if (input.type && !VALID_ITEM_TYPES.has(input.type)) {
+    throw new ValueError(`type must be one of: ${Array.from(VALID_ITEM_TYPES).join(', ')}`);
+  }
+  if (input.vat_class && !VALID_VAT_CLASSES.has(input.vat_class)) {
+    throw new ValueError(`vat_class must be one of: ${Array.from(VALID_VAT_CLASSES).join(', ')}`);
+  }
+  const type = input.type || 'STOCKABLE';
+  const vatClass = input.vat_class || 'VAT_STANDARD';
+  const uomCode = input.uom_code || 'pcs';
+  const standardPrice = input.standard_price != null ? assertNonNegInt(input.standard_price, 'standard_price') : 0;
+  const salePrice = input.sale_price != null ? assertNonNegInt(input.sale_price, 'sale_price') : 0;
+  const standardCost = input.standard_cost != null ? assertNonNegInt(input.standard_cost, 'standard_cost') : 0;
+
+  // UNIQUE (tenant_id, sku)
+  const dupe = await runQuery(
+    db,
+    'SELECT id FROM finance.catalog_items WHERE tenant_id = $1 AND sku = $2',
+    [tenantId, sku],
+  );
+  if (dupe.rows && dupe.rows.length > 0) {
+    throw new ValueError(`catalog item with sku "${sku}" already exists in tenant ${tenantId}`);
+  }
+
+  const res = await runQuery(
+    db,
+    `INSERT INTO finance.catalog_items
+       (tenant_id, sku, name, description, type, category_id, uom_id, uom_code,
+        barcode, vat_class, standard_price, sale_price, standard_cost, archived)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0)
+     RETURNING id`,
+    [
+      tenantId, sku, name, input.description || null, type,
+      input.category_id == null ? null : Number(input.category_id),
+      input.uom_id == null ? null : Number(input.uom_id),
+      uomCode,
+      input.barcode || null,
+      vatClass,
+      standardPrice, salePrice, standardCost,
+    ],
+  );
+
+  let id;
+  if (res.rows && res.rows.length > 0 && res.rows[0].id != null) {
+    id = Number(res.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    id = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+
+  return {
+    id, sku, name, type, vat_class: vatClass, uom_code: uomCode,
+    standard_price: standardPrice, sale_price: salePrice, standard_cost: standardCost,
+    tenant_id: tenantId,
+  };
+}
+
+export async function listCatalogItems(db, tenantId = 0) {
+  const res = await runQuery(
+    db,
+    `SELECT id, sku, name, type, vat_class, uom_code, standard_price, sale_price, standard_cost
+       FROM finance.catalog_items
+      WHERE tenant_id = $1 AND archived = 0
+      ORDER BY name ASC`,
+    [tenantId],
+  );
+  return (res.rows || []).map((r) => ({
+    id: Number(r.id), sku: r.sku, name: r.name, type: r.type, vat_class: r.vat_class,
+    uom_code: r.uom_code,
+    standard_price: Number(r.standard_price), sale_price: Number(r.sale_price),
+    standard_cost: Number(r.standard_cost), tenant_id: tenantId,
+  }));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Warehouses
+// ────────────────────────────────────────────────────────────────────────
+
+export async function createWarehouse(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const code = assertNonEmpty(input.code, 'code').toUpperCase();
+  const name = assertNonEmpty(input.name, 'name');
+
+  const dupe = await runQuery(
+    db,
+    'SELECT id FROM finance.warehouses WHERE tenant_id = $1 AND code = $2',
+    [tenantId, code],
+  );
+  if (dupe.rows && dupe.rows.length > 0) {
+    throw new ValueError(`warehouse with code "${code}" already exists in tenant ${tenantId}`);
+  }
+
+  const res = await runQuery(
+    db,
+    `INSERT INTO finance.warehouses (tenant_id, code, name) VALUES ($1, $2, $3) RETURNING id`,
+    [tenantId, code, name],
+  );
+  let id;
+  if (res.rows && res.rows.length > 0 && res.rows[0].id != null) {
+    id = Number(res.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    id = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+  return { id, code, name, tenant_id: tenantId };
+}
+
+export async function listWarehouses(db, tenantId = 0) {
+  const res = await runQuery(
+    db,
+    `SELECT id, code, name FROM finance.warehouses
+      WHERE tenant_id = $1 AND archived = 0
+      ORDER BY code ASC`,
+    [tenantId],
+  );
+  return (res.rows || []).map((r) => ({
+    id: Number(r.id), code: r.code, name: r.name, tenant_id: tenantId,
+  }));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Stock locations
+// ────────────────────────────────────────────────────────────────────────
+
+export async function createLocation(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const warehouseId = assertPosInt(input.warehouse_id, 'warehouse_id');
+  const code = assertNonEmpty(input.code, 'code').toUpperCase();
+  const name = assertNonEmpty(input.name, 'name');
+  const locationType = input.location_type || 'INTERNAL';
+  if (!VALID_LOCATION_TYPES.has(locationType)) {
+    throw new ValueError(`location_type must be one of: ${Array.from(VALID_LOCATION_TYPES).join(', ')}`);
+  }
+  // Warehouse must exist + belong to tenant.
+  const wh = await runQuery(
+    db,
+    'SELECT id FROM finance.warehouses WHERE tenant_id = $1 AND id = $2',
+    [tenantId, warehouseId],
+  );
+  if (!wh.rows || wh.rows.length === 0) {
+    throw new ValueError(`warehouse ${warehouseId} not found in tenant ${tenantId}`);
+  }
+  // UNIQUE (tenant, warehouse, code)
+  const dupe = await runQuery(
+    db,
+    'SELECT id FROM finance.stock_locations WHERE tenant_id = $1 AND warehouse_id = $2 AND code = $3',
+    [tenantId, warehouseId, code],
+  );
+  if (dupe.rows && dupe.rows.length > 0) {
+    throw new ValueError(`location with code "${code}" already exists in warehouse ${warehouseId}`);
+  }
+
+  const res = await runQuery(
+    db,
+    `INSERT INTO finance.stock_locations (tenant_id, warehouse_id, code, name, location_type, parent_id)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [tenantId, warehouseId, code, name, locationType, input.parent_id == null ? null : Number(input.parent_id)],
+  );
+  let id;
+  if (res.rows && res.rows.length > 0 && res.rows[0].id != null) {
+    id = Number(res.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    id = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+  return { id, warehouse_id: warehouseId, code, name, location_type: locationType, tenant_id: tenantId };
+}
+
+export async function listLocations(db, tenantId = 0, warehouseId) {
+  const sql = warehouseId != null
+    ? `SELECT id, warehouse_id, code, name, location_type, parent_id
+         FROM finance.stock_locations
+        WHERE tenant_id = $1 AND warehouse_id = $2 AND archived = 0
+        ORDER BY code ASC`
+    : `SELECT id, warehouse_id, code, name, location_type, parent_id
+         FROM finance.stock_locations
+        WHERE tenant_id = $1 AND archived = 0
+        ORDER BY code ASC`;
+  const params = warehouseId != null ? [tenantId, Number(warehouseId)] : [tenantId];
+  const res = await runQuery(db, sql, params);
+  return (res.rows || []).map((r) => ({
+    id: Number(r.id), warehouse_id: Number(r.warehouse_id), code: r.code, name: r.name,
+    location_type: r.location_type, parent_id: r.parent_id == null ? null : Number(r.parent_id),
+    tenant_id: tenantId,
+  }));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Stock moves
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Receive stock at a destination location. POST-style move with a
+ * source of NULL (or a SUPPLIER location for in-transit from a
+ * specific vendor). Updates the destination's stock_quants row
+ * with weighted-average cost.
+ */
+export async function receiveStock(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const itemId = assertPosInt(input.catalog_item_id, 'catalog_item_id');
+  const destLocationId = assertPosInt(input.destination_location_id, 'destination_location_id');
+  const quantity = assertPosInt(input.quantity, 'quantity');
+  const unitCost = input.unit_cost != null ? assertNonNegInt(input.unit_cost, 'unit_cost') : 0;
+  const sourceLocationId = input.source_location_id == null ? null : assertPosInt(input.source_location_id, 'source_location_id');
+  const reference = input.reference || null;
+  const notes = input.notes || null;
+  const userId = input.user_id == null ? null : Number(input.user_id);
+
+  // Item + dest must exist + belong to tenant.
+  const item = await runQuery(
+    db,
+    'SELECT id, standard_cost FROM finance.catalog_items WHERE tenant_id = $1 AND id = $2 AND archived = 0',
+    [tenantId, itemId],
+  );
+  if (!item.rows || item.rows.length === 0) {
+    throw new ValueError(`catalog item ${itemId} not found in tenant ${tenantId}`);
+  }
+  const dest = await runQuery(
+    db,
+    'SELECT id, location_type FROM finance.stock_locations WHERE tenant_id = $1 AND id = $2 AND archived = 0',
+    [tenantId, destLocationId],
+  );
+  if (!dest.rows || dest.rows.length === 0) {
+    throw new ValueError(`destination location ${destLocationId} not found in tenant ${tenantId}`);
+  }
+  // If a source_location_id is provided, validate it.
+  if (sourceLocationId != null) {
+    const src = await runQuery(
+      db,
+      'SELECT id FROM finance.stock_locations WHERE tenant_id = $1 AND id = $2',
+      [tenantId, sourceLocationId],
+    );
+    if (!src.rows || src.rows.length === 0) {
+      throw new ValueError(`source location ${sourceLocationId} not found in tenant ${tenantId}`);
+    }
+  }
+
+  // Compute the new weighted-average cost at the destination.
+  // formula: (existing_qty * existing_avg + received_qty * unit_cost) / (existing_qty + received_qty)
+  const existing = await runQuery(
+    db,
+    'SELECT quantity, average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, destLocationId],
+  );
+  const existingQty = existing.rows && existing.rows.length > 0 ? Number(existing.rows[0].quantity) : 0;
+  const existingAvg = existing.rows && existing.rows.length > 0 ? Number(existing.rows[0].average_cost) : (unitCost > 0 ? unitCost : Number(item.rows[0].standard_cost || 0));
+  const newQty = existingQty + quantity;
+  // Cost basis: explicit unit_cost > 0 wins, else use the existing average
+  // (for non-costed receipts like a return or a transfer-in).
+  const effectiveUnitCost = unitCost > 0 ? unitCost : existingAvg;
+  const newAvg = newQty > 0 ? Math.floor((existingQty * existingAvg + quantity * effectiveUnitCost) / newQty) : 0;
+
+  // Upsert stock_quants.
+  if (existingQty === 0) {
+    await runQuery(
+      db,
+      `INSERT INTO finance.stock_quants (tenant_id, catalog_item_id, location_id, quantity, reserved_quantity, average_cost)
+       VALUES ($1, $2, $3, $4, 0, $5)`,
+      [tenantId, itemId, destLocationId, quantity, newAvg],
+    );
+  } else {
+    await runQuery(
+      db,
+      `UPDATE finance.stock_quants
+          SET quantity = $1, average_cost = $2, updated_at = datetime('now')
+        WHERE tenant_id = $3 AND catalog_item_id = $4 AND location_id = $5`,
+      [newQty, newAvg, tenantId, itemId, destLocationId],
+    );
+  }
+
+  // If a source location was given (transfer from a SUPPLIER
+  // location or another internal location), decrement the source.
+  if (sourceLocationId != null && sourceLocationId !== destLocationId) {
+    const srcRow = await runQuery(
+      db,
+      'SELECT quantity FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+      [tenantId, itemId, sourceLocationId],
+    );
+    const srcQty = srcRow.rows && srcRow.rows.length > 0 ? Number(srcRow.rows[0].quantity) : 0;
+    const newSrcQty = Math.max(0, srcQty - quantity);
+    if (newSrcQty === 0) {
+      await runQuery(
+        db,
+        `DELETE FROM finance.stock_quants
+          WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3`,
+        [tenantId, itemId, sourceLocationId],
+      );
+    } else {
+      await runQuery(
+        db,
+        `UPDATE finance.stock_quants
+            SET quantity = $1, updated_at = datetime('now')
+          WHERE tenant_id = $2 AND catalog_item_id = $3 AND location_id = $4`,
+        [newSrcQty, tenantId, itemId, sourceLocationId],
+      );
+    }
+  }
+
+  // Append-only move row.
+  const moveRes = await runQuery(
+    db,
+    `INSERT INTO finance.stock_moves
+       (tenant_id, move_type, catalog_item_id, source_location_id, destination_location_id, quantity, unit_cost, reference, notes, created_by)
+     VALUES ($1, 'RECEIPT', $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [tenantId, itemId, sourceLocationId, destLocationId, quantity, effectiveUnitCost, reference, notes, userId],
+  );
+  let moveId;
+  if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
+    moveId = Number(moveRes.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+
+  return {
+    move_id: moveId,
+    move_type: 'RECEIPT',
+    catalog_item_id: itemId,
+    destination_location_id: destLocationId,
+    source_location_id: sourceLocationId,
+    quantity,
+    unit_cost: effectiveUnitCost,
+    new_quantity_at_destination: newQty,
+    new_average_cost: newAvg,
+  };
+}
+
+/**
+ * Deliver stock from a source location. Decrements the source's
+ * stock_quants. The unit_cost at the move is the source's
+ * current average_cost (for downstream COGS calculation).
+ */
+export async function deliverStock(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const itemId = assertPosInt(input.catalog_item_id, 'catalog_item_id');
+  const sourceLocationId = assertPosInt(input.source_location_id, 'source_location_id');
+  const quantity = assertPosInt(input.quantity, 'quantity');
+  const destLocationId = input.destination_location_id == null ? null : assertPosInt(input.destination_location_id, 'destination_location_id');
+  const reference = input.reference || null;
+  const notes = input.notes || null;
+  const userId = input.user_id == null ? null : Number(input.user_id);
+
+  // Source must have enough stock.
+  const src = await runQuery(
+    db,
+    'SELECT quantity, average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, sourceLocationId],
+  );
+  if (!src.rows || src.rows.length === 0) {
+    throw new ValueError(`no stock at source location ${sourceLocationId} for item ${itemId}`);
+  }
+  const srcQty = Number(src.rows[0].quantity);
+  const srcAvg = Number(src.rows[0].average_cost);
+  if (srcQty < quantity) {
+    throw new ValueError(`insufficient stock at source: have ${srcQty}, requested ${quantity}`);
+  }
+  // If a destination is given, validate it.
+  if (destLocationId != null) {
+    const dest = await runQuery(
+      db,
+      'SELECT id FROM finance.stock_locations WHERE tenant_id = $1 AND id = $2',
+      [tenantId, destLocationId],
+    );
+    if (!dest.rows || dest.rows.length === 0) {
+      throw new ValueError(`destination location ${destLocationId} not found in tenant ${tenantId}`);
+    }
+  }
+
+  const newSrcQty = srcQty - quantity;
+  if (newSrcQty === 0) {
+    await runQuery(
+      db,
+      'DELETE FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+      [tenantId, itemId, sourceLocationId],
+    );
+  } else {
+    await runQuery(
+      db,
+      `UPDATE finance.stock_quants SET quantity = $1, updated_at = datetime('now')
+        WHERE tenant_id = $2 AND catalog_item_id = $3 AND location_id = $4`,
+      [newSrcQty, tenantId, itemId, sourceLocationId],
+    );
+  }
+
+  // Optional: increment destination (e.g. customer location for
+  // consignment / drop-ship).
+  if (destLocationId != null) {
+    const destRow = await runQuery(
+      db,
+      'SELECT quantity, average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+      [tenantId, itemId, destLocationId],
+    );
+    const destQty = destRow.rows && destRow.rows.length > 0 ? Number(destRow.rows[0].quantity) : 0;
+    const destAvg = destRow.rows && destRow.rows.length > 0 ? Number(destRow.rows[0].average_cost) : srcAvg;
+    const newDestQty = destQty + quantity;
+    const newDestAvg = newDestQty > 0 ? Math.floor((destQty * destAvg + quantity * srcAvg) / newDestQty) : 0;
+    if (destQty === 0) {
+      await runQuery(
+        db,
+        `INSERT INTO finance.stock_quants (tenant_id, catalog_item_id, location_id, quantity, reserved_quantity, average_cost)
+         VALUES ($1, $2, $3, $4, 0, $5)`,
+        [tenantId, itemId, destLocationId, quantity, newDestAvg],
+      );
+    } else {
+      await runQuery(
+        db,
+        `UPDATE finance.stock_quants SET quantity = $1, average_cost = $2, updated_at = datetime('now')
+          WHERE tenant_id = $3 AND catalog_item_id = $4 AND location_id = $5`,
+        [newDestQty, newDestAvg, tenantId, itemId, destLocationId],
+      );
+    }
+  }
+
+  // Append-only move row.
+  const moveRes = await runQuery(
+    db,
+    `INSERT INTO finance.stock_moves
+       (tenant_id, move_type, catalog_item_id, source_location_id, destination_location_id, quantity, unit_cost, reference, notes, created_by)
+     VALUES ($1, 'DELIVERY', $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [tenantId, itemId, sourceLocationId, destLocationId, quantity, srcAvg, reference, notes, userId],
+  );
+  let moveId;
+  if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
+    moveId = Number(moveRes.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+
+  return {
+    move_id: moveId,
+    move_type: 'DELIVERY',
+    catalog_item_id: itemId,
+    source_location_id: sourceLocationId,
+    destination_location_id: destLocationId,
+    quantity,
+    unit_cost: srcAvg,
+    new_quantity_at_source: newSrcQty,
+  };
+}
+
+/**
+ * Transfer stock between two internal locations. Both locations
+ * must belong to the tenant and be location_type = INTERNAL.
+ */
+export async function transferStock(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const itemId = assertPosInt(input.catalog_item_id, 'catalog_item_id');
+  const sourceLocationId = assertPosInt(input.source_location_id, 'source_location_id');
+  const destLocationId = assertPosInt(input.destination_location_id, 'destination_location_id');
+  if (sourceLocationId === destLocationId) {
+    throw new ValueError('source and destination must be different');
+  }
+  const quantity = assertPosInt(input.quantity, 'quantity');
+  const reference = input.reference || null;
+  const notes = input.notes || null;
+  const userId = input.user_id == null ? null : Number(input.user_id);
+
+  // Validate both locations.
+  for (const locId of [sourceLocationId, destLocationId]) {
+    const loc = await runQuery(
+      db,
+      'SELECT id, location_type FROM finance.stock_locations WHERE tenant_id = $1 AND id = $2 AND archived = 0',
+      [tenantId, locId],
+    );
+    if (!loc.rows || loc.rows.length === 0) {
+      throw new ValueError(`location ${locId} not found in tenant ${tenantId}`);
+    }
+    if (loc.rows[0].location_type !== 'INTERNAL') {
+      throw new ValueError(`location ${locId} is not INTERNAL; transfers require internal locations`);
+    }
+  }
+  const src = await runQuery(
+    db,
+    'SELECT quantity, average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, sourceLocationId],
+  );
+  if (!src.rows || src.rows.length === 0) {
+    throw new ValueError(`no stock at source location ${sourceLocationId} for item ${itemId}`);
+  }
+  const srcQty = Number(src.rows[0].quantity);
+  if (srcQty < quantity) {
+    throw new ValueError(`insufficient stock at source: have ${srcQty}, requested ${quantity}`);
+  }
+  const srcAvg = Number(src.rows[0].average_cost);
+
+  const destRow = await runQuery(
+    db,
+    'SELECT quantity, average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, destLocationId],
+  );
+  const destQty = destRow.rows && destRow.rows.length > 0 ? Number(destRow.rows[0].quantity) : 0;
+  const destAvg = destRow.rows && destRow.rows.length > 0 ? Number(destRow.rows[0].average_cost) : srcAvg;
+
+  const newSrcQty = srcQty - quantity;
+  const newDestQty = destQty + quantity;
+  const newDestAvg = newDestQty > 0 ? Math.floor((destQty * destAvg + quantity * srcAvg) / newDestQty) : 0;
+
+  if (newSrcQty === 0) {
+    await runQuery(
+      db,
+      'DELETE FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+      [tenantId, itemId, sourceLocationId],
+    );
+  } else {
+    await runQuery(
+      db,
+      `UPDATE finance.stock_quants SET quantity = $1, updated_at = datetime('now')
+        WHERE tenant_id = $2 AND catalog_item_id = $3 AND location_id = $4`,
+      [newSrcQty, tenantId, itemId, sourceLocationId],
+    );
+  }
+  if (destQty === 0) {
+    await runQuery(
+      db,
+      `INSERT INTO finance.stock_quants (tenant_id, catalog_item_id, location_id, quantity, reserved_quantity, average_cost)
+       VALUES ($1, $2, $3, $4, 0, $5)`,
+      [tenantId, itemId, destLocationId, quantity, newDestAvg],
+    );
+  } else {
+    await runQuery(
+      db,
+      `UPDATE finance.stock_quants SET quantity = $1, average_cost = $2, updated_at = datetime('now')
+        WHERE tenant_id = $3 AND catalog_item_id = $4 AND location_id = $5`,
+      [newDestQty, newDestAvg, tenantId, itemId, destLocationId],
+    );
+  }
+
+  // Append-only move row.
+  const moveRes = await runQuery(
+    db,
+    `INSERT INTO finance.stock_moves
+       (tenant_id, move_type, catalog_item_id, source_location_id, destination_location_id, quantity, unit_cost, reference, notes, created_by)
+     VALUES ($1, 'TRANSFER', $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [tenantId, itemId, sourceLocationId, destLocationId, quantity, srcAvg, reference, notes, userId],
+  );
+  let moveId;
+  if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
+    moveId = Number(moveRes.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+  return {
+    move_id: moveId,
+    move_type: 'TRANSFER',
+    quantity,
+    new_quantity_at_source: newSrcQty,
+    new_quantity_at_destination: newDestQty,
+  };
+}
+
+/**
+ * Adjust the on-hand quantity at a single location to a new
+ * absolute value. Records the move with the `delta` column
+ * storing the new absolute quantity (NOT the delta in/out).
+ * Used for cycle counts, scrap, found stock, etc.
+ */
+export async function adjustStock(db, input, tenantId = 0) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input must be an object');
+  }
+  const itemId = assertPosInt(input.catalog_item_id, 'catalog_item_id');
+  const locationId = assertPosInt(input.location_id, 'location_id');
+  if (typeof input.new_quantity !== 'number' || !Number.isInteger(input.new_quantity) || input.new_quantity < 0) {
+    throw new ValueError('new_quantity must be a non-negative integer');
+  }
+  const newQty = input.new_quantity;
+  const reason = input.reason || null;
+  const userId = input.user_id == null ? null : Number(input.user_id);
+
+  const loc = await runQuery(
+    db,
+    'SELECT id FROM finance.stock_locations WHERE tenant_id = $1 AND id = $2',
+    [tenantId, locationId],
+  );
+  if (!loc.rows || loc.rows.length === 0) {
+    throw new ValueError(`location ${locationId} not found in tenant ${tenantId}`);
+  }
+  const existing = await runQuery(
+    db,
+    'SELECT quantity FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, locationId],
+  );
+  const oldQty = existing.rows && existing.rows.length > 0 ? Number(existing.rows[0].quantity) : 0;
+  if (newQty === 0) {
+    if (existing.rows && existing.rows.length > 0) {
+      await runQuery(
+        db,
+        'DELETE FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+        [tenantId, itemId, locationId],
+      );
+    }
+  } else if (existing.rows && existing.rows.length > 0) {
+    await runQuery(
+      db,
+      `UPDATE finance.stock_quants SET quantity = $1, updated_at = datetime('now')
+        WHERE tenant_id = $2 AND catalog_item_id = $3 AND location_id = $4`,
+      [newQty, tenantId, itemId, locationId],
+    );
+  } else {
+    await runQuery(
+      db,
+      `INSERT INTO finance.stock_quants (tenant_id, catalog_item_id, location_id, quantity, reserved_quantity, average_cost)
+       VALUES ($1, $2, $3, $4, 0, 0)`,
+      [tenantId, itemId, locationId, newQty],
+    );
+  }
+  const moveRes = await runQuery(
+    db,
+    `INSERT INTO finance.stock_moves
+       (tenant_id, move_type, catalog_item_id, destination_location_id, quantity, unit_cost, delta, notes, created_by)
+     VALUES ($1, 'ADJUSTMENT', $2, $3, $4, 0, $5, $6, $7)
+     RETURNING id`,
+    [tenantId, itemId, locationId, Math.abs(newQty - oldQty), newQty, reason, userId],
+  );
+  let moveId;
+  if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
+    moveId = Number(moveRes.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+  return { move_id: moveId, old_quantity: oldQty, new_quantity: newQty, delta: newQty - oldQty };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Stock balances + moves
+// ────────────────────────────────────────────────────────────────────────
+
+export async function listBalances(db, tenantId = 0, { itemId, locationId } = {}) {
+  const where = ['tenant_id = $1'];
+  const params = [tenantId];
+  let i = 2;
+  if (itemId != null) {
+    where.push(`catalog_item_id = $${i++}`);
+    params.push(Number(itemId));
+  }
+  if (locationId != null) {
+    where.push(`location_id = $${i++}`);
+    params.push(Number(locationId));
+  }
+  const res = await runQuery(
+    db,
+    `SELECT catalog_item_id, location_id, quantity, reserved_quantity, average_cost
+       FROM finance.stock_quants
+      WHERE ${where.join(' AND ')}
+      ORDER BY catalog_item_id, location_id`,
+    params,
+  );
+  return (res.rows || []).map((r) => ({
+    catalog_item_id: Number(r.catalog_item_id),
+    location_id: Number(r.location_id),
+    quantity: Number(r.quantity),
+    reserved_quantity: Number(r.reserved_quantity),
+    available_quantity: Number(r.quantity) - Number(r.reserved_quantity),
+    average_cost: Number(r.average_cost),
+  }));
+}
+
+export async function listMoves(db, tenantId = 0, { itemId, moveType, limit = 100 } = {}) {
+  const where = ['tenant_id = $1'];
+  const params = [tenantId];
+  let i = 2;
+  if (itemId != null) {
+    where.push(`catalog_item_id = $${i++}`);
+    params.push(Number(itemId));
+  }
+  if (moveType != null) {
+    where.push(`move_type = $${i++}`);
+    params.push(String(moveType));
+  }
+  const lim = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+  const res = await runQuery(
+    db,
+    `SELECT id, move_type, catalog_item_id, source_location_id, destination_location_id,
+            quantity, unit_cost, reference, notes, delta, created_at
+       FROM finance.stock_moves
+      WHERE ${where.join(' AND ')}
+      ORDER BY id DESC
+      LIMIT $${i}`,
+    [...params, lim],
+  );
+  return (res.rows || []).map((r) => ({
+    id: Number(r.id),
+    move_type: r.move_type,
+    catalog_item_id: Number(r.catalog_item_id),
+    source_location_id: r.source_location_id == null ? null : Number(r.source_location_id),
+    destination_location_id: r.destination_location_id == null ? null : Number(r.destination_location_id),
+    quantity: Number(r.quantity),
+    unit_cost: Number(r.unit_cost),
+    reference: r.reference,
+    notes: r.notes,
+    delta: r.delta == null ? null : Number(r.delta),
+    created_at: r.created_at,
+  }));
+}
