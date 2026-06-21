@@ -637,6 +637,90 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5f: Customer 360 endpoint (Wave 32) ==="
+# Wave 32 wires the customer 360 pure function (Wave 31) to a GET
+# route. Smoke: create a customer, hit the 360 endpoint, assert
+# the response shape (customer info + open_invoices + recent_payments
+# + totals + aging).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave32Smoke', hvhh: '55555555' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) Hit the 360 endpoint
+    const r = await call('GET', '/api/finance/customers/' + custId + '/360', null, tok);
+    if (r.status !== 200) {
+      console.log('  FAIL get 360:', r.status, JSON.stringify(r.body).slice(0, 200));
+      process.exit(1);
+    }
+    const b = r.body;
+    if (b.customer.id !== custId) {
+      console.log('  FAIL customer.id mismatch:', b.customer.id, 'expected', custId);
+      process.exit(1);
+    }
+    if (b.customer.name !== 'Wave32Smoke') {
+      console.log('  FAIL customer.name mismatch:', b.customer.name);
+      process.exit(1);
+    }
+    if (!Array.isArray(b.open_invoices) || b.open_invoices.length !== 0) {
+      console.log('  FAIL open_invoices: expected empty array, got', JSON.stringify(b.open_invoices));
+      process.exit(1);
+    }
+    if (typeof b.totals.open_count !== 'number' || b.totals.open_count !== 0) {
+      console.log('  FAIL totals.open_count: expected 0, got', b.totals.open_count);
+      process.exit(1);
+    }
+    if (typeof b.aging.current !== 'number') {
+      console.log('  FAIL aging.current: expected number, got', b.aging.current);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/customers/' + custId + '/360 returns the full 360 view (customer + open_invoices + recent_payments + totals + aging)');
+    // 3) 404 path
+    const nf = await call('GET', '/api/finance/customers/999999/360', null, tok);
+    if (nf.status !== 404) {
+      console.log('  FAIL 404 path: expected 404, got', nf.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 GET /api/finance/customers/999999/360 (missing customer returns 404)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  customer 360 OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")

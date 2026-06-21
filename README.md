@@ -421,6 +421,72 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
   - 1217/1217 tests pass (was 1216; +1 new). Smoke 86
     endpoints + STEP 5b + 5c + 5d + 5e all pass.
     `npm run check` clean, boundary 0.
+- **Wave 31 (Customer 360 — pure function + tests)** — DONE.
+  - `server/finance/customer360.js` exports
+    `getCustomer360(db, customerId, tenantId, opts)` which
+    returns the full 360 view of a customer in one call:
+    ```json
+    {
+      "customer": { id, name, hvhh, address, email, tenant_id },
+      "open_invoices": [{
+        id, invoice_number, issue_date, due_date, status,
+        total_amd, paid_amd, balance_amd, days_overdue
+      }],
+      "recent_payments": [{
+        id, invoice_id, invoice_number, paid_at, amount_amd,
+        method, reference
+      }],
+      "totals": {
+        open_count, open_total_amd, paid_total_amd,
+        outstanding_amd
+      },
+      "aging": {
+        current, days_1_30, days_31_60, days_61_90, days_90_plus
+      }
+    }
+    ```
+  - The aging buckets hold the BALANCE owed (not the original
+    total) so a partially-paid invoice buckets by its
+    `days_overdue` with the remaining amount — what the CFO
+    actually wants to see.
+  - 12 tests cover: missing customer (404), cross-tenant
+    invisibility, empty customer, 3 aging-bucket cases
+    (current / 31-60 / 90+), paid invoice exclusion,
+    partial-payment balance, due_date sort order,
+    recent_payments limit, invalid customerId / tenantId.
+  - Test pattern: real in-memory sqlite with the production
+    finance schema (mirrors `realdb-smoke.test.js`). The
+    adapter strips pg `::bigint` casts and translates
+    `$N` → `?` positional.
+  - 1240/1240 tests pass (was 1228; +12 new). Lint clean.
+    `npm run check` clean, boundary 0.
+- **Wave 32 (Customer 360 — route wiring)** — DONE.
+  - Wires the Wave 31 pure function to
+    `GET /api/finance/customers/:id/360`. Three middlewares:
+    `requireTenant` (Wave 28 defense-in-depth),
+    `requirePerm('finance.customer.read')` (the same perm the
+    customer list / get uses — 360 is read-only, no extra
+    perms), and the handler.
+  - Optional `?today=YYYY-MM-DD` query param for back-dated
+    aging reports + reproducible tests. Defaults to the
+    current date inside the pure function.
+  - 404 on missing or cross-tenant customer (no
+    existence-oracle leak between tenants — same pattern
+    as `getProject` / `getTask` / `getInvoice`).
+  - 2 new integration tests in `server.test.js`:
+    - 36d — `GET /api/finance/customers/:id/360` returns the
+      full 360 shape (customer info, empty open_invoices,
+      zero totals, zero aging).
+    - 36e — `GET /api/finance/customers/999999/360` returns
+      404 with `error: 'not_found'`.
+  - 1 new deploy smoke step (STEP 5f): creates a customer,
+    hits the 360 endpoint, asserts the response shape
+    (customer.id / customer.name / open_invoices=[] /
+    totals.open_count=0 / aging.current=0). Sanity: 404
+    path on a missing customer.
+  - 1242/1242 tests pass (was 1240; +2 new). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e + 5f all pass.
+    `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See

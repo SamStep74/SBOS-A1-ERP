@@ -1030,6 +1030,34 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(createRow, `expected create row with resource="customer:${custId}", got: ${JSON.stringify(body.items.map((r) => `${r.action}:${r.resource}`))}`);
   });
 
+  // ─── Wave 32: customer 360 route ───
+
+  test('36d. GET /api/finance/customers/:id/360 returns the full 360 view (Wave 32)', async () => {
+    // Create a customer, then assert the 360 endpoint returns
+    // the expected shape: customer info, open_invoices=[] (no
+    // invoices yet), totals all zero, aging all zero.
+    const c = await postJson(server, '/api/finance/customers', { name: 'Wave32Cust', hvhh: '44444444' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    const { status, body } = await get(server, `/api/finance/customers/${custId}/360`);
+    assert.equal(status, 200);
+    assert.equal(body.customer.id, custId);
+    assert.equal(body.customer.name, 'Wave32Cust');
+    assert.equal(body.customer.hvhh, '44444444');
+    assert.ok(Array.isArray(body.open_invoices));
+    assert.equal(body.open_invoices.length, 0);
+    assert.ok(Array.isArray(body.recent_payments));
+    assert.equal(body.totals.open_count, 0);
+    assert.equal(body.totals.outstanding_amd, 0);
+    assert.equal(body.aging.current, 0);
+  });
+
+  test('36e. GET /api/finance/customers/:id/360 returns 404 for missing customer (no existence-oracle leak)', async () => {
+    const { status, body } = await get(server, '/api/finance/customers/999999/360');
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {

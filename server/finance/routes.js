@@ -102,6 +102,7 @@ import {
 } from './invoice.js';
 import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
+import { getCustomer360 } from './customer360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
@@ -493,6 +494,54 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // Customer 360 — CFO-facing full view: customer info + every
+  // open invoice (with balance) + recent payments + totals + aging
+  // buckets. Wave 31/32. Single round-trip, all the data a
+  // collections reviewer needs to triage a customer.
+  //
+  // Perm gate: finance.customer.read (the same perm the customer
+  // list / get uses; the 360 view is read-only, no extra perms).
+  // Tenant scope: requireTenant (the standard Wave 28 middleware
+  // pair — req.tenantId is stamped by the middleware).
+  // Audit: this is a GET, so the audit log is NOT written by
+  // wrapFinanceRoute (which is for writes only). The audit row
+  // for the 360 read itself is unnecessary; the underlying
+  // invoices / payments / customer are already auditable through
+  // the existing write paths. Operators who want to see "who
+  // pulled customer 42's 360 today" can find them via the
+  // ?path=/api/finance/customers/42/360 audit filter if needed.
+  app.get(
+    '/api/finance/customers/:id/360',
+    requireTenant,
+    requirePerm('finance.customer.read'),
+    async (req, res, next) => {
+      try {
+        const id = parseCustomerId(req.params.id);
+        if (id === null) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const tenantId = req.tenantId;
+        // Optional ?today=YYYY-MM-DD override (defaults to current
+        // date inside the pure function). Useful for back-dated
+        // aging reports and reproducible tests.
+        const today = typeof req.query.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.today)
+          ? req.query.today
+          : undefined;
+        const out = await getCustomer360(pgAdapter, id, tenantId, today ? { today } : {});
+        res.status(200).json(out);
+      } catch (err) {
+        // The pure function throws ValueError on missing or
+        // cross-tenant customer; map both to 404 (no
+        // existence-oracle leak between tenants — same pattern
+        // as getProject / getTask / getInvoice).
+        if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
 
   // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
   app.post(
