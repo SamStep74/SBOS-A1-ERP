@@ -155,4 +155,131 @@ export async function listAudit(db, filters = {}) {
   }));
 }
 
-export const __internals = Object.freeze({ MAX_PAYLOAD_BYTES });
+// ────────────────────────────────────────────────────────────────────────
+// CSV export (Wave 40). Compliance teams want to pull the audit
+// log as a flat file for offline analysis (Excel, pandas, etc.).
+//
+// This is an async generator — the route handler can pipe chunks
+// to `res` as they arrive instead of buffering the whole export
+// in memory. The query uses the same filter shape as listAudit
+// (tenant_id is mandatory; everything else optional).
+//
+// CSV format: header line + one line per row. Fields are escaped
+// per RFC 4180: wrap in double quotes if the value contains
+// comma / newline / quote, and double up any embedded quotes.
+// payload_json is rendered as a single escaped string column.
+// ────────────────────────────────────────────────────────────────────────
+
+const CSV_HEADERS = Object.freeze([
+  'id', 'tenant_id', 'user_id', 'username', 'action', 'resource',
+  'method', 'path', 'status_code', 'payload_json', 'request_id',
+  'created_at',
+]);
+
+function csvEscape(value) {
+  if (value == null) return '';
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function csvLine(values) {
+  return values.map(csvEscape).join(',') + '\n';
+}
+
+/**
+ * Async generator that yields CSV chunks for the audit log.
+ * First chunk is the header line. Subsequent chunks are data
+ * rows (one row per yield). Uses the same filter shape as
+ * listAudit; chunk size is configurable (default 500 rows).
+ *
+ * The generator does NOT buffer — each yield is ready to write
+ * to res immediately. Memory-bounded by chunk size × row size.
+ *
+ * @param {object} db  raw node:sqlite handle (audit table is app infra)
+ * @param {object} filters  { tenant_id, user_id, action, resource_prefix,
+ *                            resource_id, since, until, limit, offset }
+ * @param {number} [chunkSize=500]  rows per yield
+ */
+export async function* streamAuditCsv(db, filters = {}, chunkSize = 500) {
+  const size = Math.min(Math.max(Number(chunkSize) || 500, 1), 5000);
+  const tenantId = filters.tenant_id == null ? 0 : Number(filters.tenant_id);
+  const where = ['tenant_id = $1'];
+  const params = [tenantId];
+  let i = 2;
+
+  if (filters.user_id != null) {
+    where.push(`user_id = $${i++}`);
+    params.push(Number(filters.user_id));
+  }
+  if (filters.action) {
+    where.push(`action = $${i++}`);
+    params.push(String(filters.action));
+  }
+  if (filters.resource_prefix) {
+    where.push(`resource LIKE $${i++}`);
+    params.push(String(filters.resource_prefix) + '%');
+  }
+  if (filters.resource_id != null) {
+    where.push(`resource LIKE $${i++}`);
+    params.push('%:' + String(filters.resource_id) + '%');
+  }
+  if (filters.since) {
+    where.push(`created_at >= $${i++}`);
+    params.push(String(filters.since));
+  }
+  if (filters.until) {
+    where.push(`created_at <= $${i++}`);
+    params.push(String(filters.until));
+  }
+
+  // Default to a higher cap for CSV export — 10k rows ≈ a few MB,
+  // which is a sensible upper bound for a compliance dump.
+  const limit = Math.min(Math.max(Number(filters.limit) || 10000, 1), 50000);
+  const offset = Math.max(Number(filters.offset) || 0, 0);
+
+  const sql = `SELECT id, tenant_id, user_id, username, action, resource,
+                       method, path, status_code, payload_json, request_id, created_at
+                  FROM audit
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY id ASC
+                 LIMIT $${i++} OFFSET $${i}`;
+  params.push(limit, offset);
+
+  const translated = sql.replace(/\$\d+/g, '?');
+  const stmt = db.prepare(translated);
+
+  // Yield the header first so the client always sees a valid CSV.
+  yield csvLine(CSV_HEADERS);
+
+  // Iterate in chunks so the generator can interleave yields with
+  // the caller's `res.write()` calls.
+  let buf = [];
+  for (const row of stmt.iterate(...params)) {
+    buf.push(csvLine([
+      row.id,
+      row.tenant_id,
+      row.user_id,
+      row.username,
+      row.action,
+      row.resource,
+      row.method,
+      row.path,
+      row.status_code,
+      row.payload_json,
+      row.request_id,
+      row.created_at,
+    ]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) {
+    yield buf.join('');
+  }
+}
+
+export const __internals = Object.freeze({ MAX_PAYLOAD_BYTES, CSV_HEADERS, csvEscape, csvLine });

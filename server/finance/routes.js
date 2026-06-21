@@ -108,7 +108,7 @@ import { getDashboard360 } from './dashboard360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
-import { recordAudit, listAudit } from './audit.js';
+import { recordAudit, listAudit, streamAuditCsv } from './audit.js';
 import {
   createCatalogItem,
   listCatalogItems,
@@ -971,6 +971,66 @@ export function registerFinanceRoutes(app, opts = {}) {
         const rawDb = req.app && req.app.locals && req.app.locals.db;
         const items = await listAudit(rawDb, filters);
         res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/export — CSV export of the audit log.
+  //
+  // Streams the audit log as a CSV file for compliance teams
+  // (Excel / pandas / etc.). Same filter shape as the JSON
+  // endpoint above. Uses async iteration to avoid buffering
+  // the whole export in memory — chunks land on `res` as
+  // they're read from the DB.
+  //
+  // Perm gate: `security.audit.read` (same as /audit).
+  //
+  // Query params (all optional):
+  //   user_id, action, resource, resource_id, since, until,
+  //   limit (default 10000, max 50000), offset, chunk_size
+  app.get(
+    '/api/finance/audit/export',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const filters = {
+          tenant_id: tenantId,
+          user_id: req.query.user_id,
+          action: req.query.action,
+          resource_prefix: req.query.resource,
+          resource_id: req.query.resource_id,
+          since: req.query.since,
+          until: req.query.until,
+          limit: req.query.limit,
+          offset: req.query.offset,
+        };
+        const chunkSize = req.query.chunk_size != null ? Number(req.query.chunk_size) : 500;
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res.status(500).json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        // Stream headers — the file is named with today's date so
+        // multiple exports on different days don't collide.
+        const today = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="audit-${today}.csv"`);
+        res.setHeader('Cache-Control', 'no-store');
+        // Iterate the generator and pipe chunks to res. Express's
+        // default compression would gzip the response; CSV
+        // is small enough that we don't bother.
+        for await (const chunk of streamAuditCsv(rawDb, filters, chunkSize)) {
+          // `res.write` returns false when the kernel buffer is full;
+          // we await `drain` to avoid backpressure blowing up the
+          // memory ceiling on large exports.
+          if (!res.write(chunk)) {
+            await new Promise((resolve) => res.once('drain', resolve));
+          }
+        }
+        res.end();
       } catch (err) {
         next(err);
       }

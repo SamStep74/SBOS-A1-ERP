@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { recordAudit, listAudit } from './audit.js';
+import { recordAudit, listAudit, streamAuditCsv } from './audit.js';
 
 function makeAuditDb() {
   const db = new DatabaseSync(':memory:');
@@ -142,4 +142,139 @@ test('listAudit: limit + offset (most-recent first)', async () => {
   // Pages don't overlap.
   const ids = new Set([page1[0].id, page1[1].id, page2[0].id, page2[1].id]);
   assert.equal(ids.size, 4);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 40 — streamAuditCsv (CSV export)
+// ────────────────────────────────────────────────────────────────────────
+
+async function consumeStream(gen) {
+  const chunks = [];
+  for await (const chunk of gen) {
+    chunks.push(chunk);
+  }
+  return chunks.join('');
+}
+
+function seedAudit(db, rows) {
+  for (const r of rows) {
+    recordAudit(db, r);
+  }
+}
+
+test('streamAuditCsv: header line + rows are emitted (header first)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'admin', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/api/finance/invoices',
+      status_code: 201, payload_json: '{}', request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'admin', action: 'update',
+      resource: 'invoice:1', method: 'PATCH', path: '/api/finance/invoices/1',
+      status_code: 200, payload_json: '{"status":"posted"}', request_id: 'r2', created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  const csv = await consumeStream(streamAuditCsv(db, { tenant_id: 0 }));
+  const lines = csv.trim().split('\n');
+  assert.equal(lines.length, 3, 'expected header + 2 rows');
+  // Header columns in the documented order.
+  assert.match(lines[0], /^id,tenant_id,user_id,username,action,resource/);
+  // Second line is row 1 (id=1).
+  assert.match(lines[1], /^1,/);
+  assert.match(lines[1], /,create,/);
+  // Third line is row 2 (id=2).
+  assert.match(lines[2], /^2,/);
+  assert.match(lines[2], /,update,/);
+});
+
+test('streamAuditCsv: CSV-escapes commas + quotes + newlines in fields', async () => {
+  const db = makeAuditDb();
+  // payload_json contains a comma, quotes, and a newline.
+  // recordAudit reads entry.payload (then JSON.stringifies it).
+  const nasty = { note: 'hello, world\nwith "quotes" inside' };
+  recordAudit(db, {
+    tenant_id: 0, user_id: 7, username: 'eve, the auditor', action: 'create',
+    resource: 'invoice:1', method: 'POST', path: '/api/finance/invoices',
+    status_code: 201, payload: nasty, request_id: 'r1', created_at: '2026-06-21T10:00:00Z',
+  });
+  const csv = await consumeStream(streamAuditCsv(db, { tenant_id: 0 }));
+  // The username "eve, the auditor" must be quoted in the CSV.
+  assert.match(csv, /"eve, the auditor"/);
+  // The payload_json (serialized form) contains a comma, embedded
+  // " (which CSV escapes as ""), and a newline. The whole field
+  // must be wrapped in " ... " with the inner " doubled up.
+  // JSON.stringify turns \n into the literal \n inside the JSON
+  // string body. So the CSV cell is:
+  //   "{""note"":""hello, world\nwith \""quotes\"" inside""}"
+  assert.match(csv, /"\{""note"":""hello, world\\nwith \\""quotes\\"" inside""\}"/);
+});
+
+test('streamAuditCsv: tenant-scoped (tenant 7 rows are filtered out when querying tenant 0)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/p',
+      status_code: 201, payload_json: null, request_id: null, created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 7, user_id: 2, username: 'b', action: 'create',
+      resource: 'invoice:99', method: 'POST', path: '/p',
+      status_code: 201, payload_json: null, request_id: null, created_at: '2026-06-21T10:00:00Z' },
+  ]);
+  const csv = await consumeStream(streamAuditCsv(db, { tenant_id: 0 }));
+  const lines = csv.trim().split('\n');
+  // header + 1 row (tenant 7 excluded).
+  assert.equal(lines.length, 2);
+  // The row should be tenant 0's, not tenant 7's.
+  assert.match(lines[1], /^1,0,/);
+});
+
+test('streamAuditCsv: honors the same filters as listAudit (action + resource_prefix)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/p',
+      status_code: 201, payload_json: null, request_id: null, created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'invoice:1', method: 'PATCH', path: '/p',
+      status_code: 200, payload_json: null, request_id: null, created_at: '2026-06-21T10:01:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'vendor:5', method: 'PATCH', path: '/p',
+      status_code: 200, payload_json: null, request_id: null, created_at: '2026-06-21T10:02:00Z' },
+  ]);
+  // Filter: action=update + resource_prefix=invoice
+  const csv = await consumeStream(streamAuditCsv(db, {
+    tenant_id: 0, action: 'update', resource_prefix: 'invoice',
+  }));
+  const lines = csv.trim().split('\n');
+  // header + 1 row (only the invoice update; vendor update is filtered out).
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /,update,/);
+  assert.match(lines[1], /,invoice:1,/);
+});
+
+test('streamAuditCsv: empty result emits only the header line (no spurious blank lines)', async () => {
+  const db = makeAuditDb();
+  const csv = await consumeStream(streamAuditCsv(db, { tenant_id: 0 }));
+  // Just the header, terminated by a newline.
+  assert.equal(csv, 'id,tenant_id,user_id,username,action,resource,method,path,status_code,payload_json,request_id,created_at\n');
+});
+
+test('streamAuditCsv: chunk size controls the number of yields (rows > chunkSize → multiple yields)', async () => {
+  const db = makeAuditDb();
+  const rows = [];
+  for (let i = 0; i < 25; i++) {
+    rows.push({
+      tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:' + i, method: 'POST', path: '/p',
+      status_code: 201, payload_json: null, request_id: null,
+      created_at: '2026-06-21T10:' + String(i).padStart(2, '0') + ':00Z',
+    });
+  }
+  seedAudit(db, rows);
+  // chunkSize=10 + 25 rows → 4 yields:
+  //   1 header
+  //   2 data chunks of 10 rows each (full chunks)
+  //   1 final flush of the leftover 5 rows
+  let yields = 0;
+  for await (const _chunk of streamAuditCsv(db, { tenant_id: 0 }, 10)) {
+    yields++;
+  }
+  assert.equal(yields, 4);
 });

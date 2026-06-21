@@ -1048,6 +1048,54 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     }
   });
 
+  // ─── Wave 40: audit log CSV export ───
+
+  test('40a. GET /api/finance/audit/export returns text/csv with a header line', async () => {
+    // The earlier tests in this suite have populated the audit log
+    // for tenant 0. Verify the export endpoint returns a CSV with
+    // the documented header row + at least one data row. The
+    // server.test.js server runs in stub auth mode, so no
+    // Authorization header is needed.
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/export?limit=10`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /^text\/csv/);
+    assert.match(
+      res.headers.get('content-disposition') || '',
+      /^attachment; filename="audit-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    const text = await res.text();
+    const lines = text.trim().split('\n');
+    assert.ok(lines.length >= 2, 'expected header + at least 1 data row');
+    // Header columns in the documented order.
+    assert.match(lines[0], /^id,tenant_id,user_id,username,action,resource/);
+  });
+
+  test('40b. GET /api/finance/audit/export honors the resource_id filter', async () => {
+    // Find an existing audit row for tenant 0 with a resource
+    // shaped like 'customer:N'. Then export filtered by that id
+    // and verify every returned row has resource_id = N.
+    const list = await get(server, '/api/finance/audit?limit=20');
+    assert.equal(list.status, 200);
+    const customerRow = list.body.items.find((r) => /^customer:\d+/.test(r.resource));
+    assert.ok(customerRow, 'expected at least one customer:* audit row to filter on');
+    const idMatch = customerRow.resource.match(/^customer:(\d+)/);
+    assert.ok(idMatch);
+    const id = idMatch[1];
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/export?resource_id=${id}&limit=100`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    const lines = text.trim().split('\n');
+    assert.ok(lines.length >= 2, 'expected header + data rows');
+    // Every data row must reference the requested id.
+    for (let i = 1; i < lines.length; i++) {
+      assert.match(lines[i], new RegExp(`,customer:${id}(,|:)`), `unexpected row: ${lines[i].slice(0, 100)}`);
+    }
+  });
+
   // ─── Wave 29: audit resource captures the actual entity id ───
 
   test('36a. PATCH /api/finance/customers/:id records audit with resource=customer:<id> (not the literal customer:id)', async () => {

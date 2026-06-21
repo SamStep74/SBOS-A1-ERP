@@ -1123,6 +1123,83 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5k: Audit log CSV export (Wave 40) ==="
+# Smoke coverage for the CSV export endpoint. The audit log should
+# have rows from the earlier writes in this smoke (the POSTs +
+# PATCHes in STEP 5f etc.). The export endpoint must:
+#   1. Return text/csv with a header line
+#   2. Return a Content-Disposition with today's date in the filename
+#   3. Include the rows we just created
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+
+  (async () => {
+    const url = '/api/finance/audit/export?limit=20';
+    const data = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path: url, method: 'GET',
+        headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: buf }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    // 1. Status + content-type
+    if (data.status !== 200) {
+      console.log('  FAIL GET /api/finance/audit/export: expected 200, got', data.status, data.body.slice(0, 100));
+      process.exit(1);
+    }
+    const ct = data.headers['content-type'] || '';
+    if (!/^text\/csv/.test(ct)) {
+      console.log('  FAIL content-type:', ct);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/audit/export returns text/csv (' + ct + ')');
+
+    // 2. Content-Disposition header
+    const cd = data.headers['content-disposition'] || '';
+    if (!/^attachment; filename=\"audit-\\d{4}-\\d{2}-\\d{2}\\.csv\"$/.test(cd)) {
+      console.log('  FAIL content-disposition:', cd);
+      process.exit(1);
+    }
+    console.log('  PASS content-disposition: ' + cd);
+
+    // 3. CSV body has a header line + at least 1 data row.
+    const lines = data.body.trim().split('\\n');
+    if (lines.length < 2) {
+      console.log('  FAIL expected header + data rows, got ' + lines.length + ' lines');
+      process.exit(1);
+    }
+    if (!/^id,tenant_id,user_id,username,action,resource/.test(lines[0])) {
+      console.log('  FAIL header row unexpected:', lines[0].slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS CSV header line present (12 columns)');
+
+    // 4. At least one row should reference a finance.* resource.
+    const hasFinanceRow = lines.slice(1).some(l => /,finance\\./.test(l) || /,invoice:/.test(l) || /,customer:/.test(l));
+    if (!hasFinanceRow) {
+      console.log('  FAIL no finance.* / invoice / customer audit rows found in export');
+      console.log('    first data row:', lines[1] ? lines[1].slice(0, 100) : '(none)');
+      process.exit(1);
+    }
+    console.log('  PASS CSV body has at least one finance write row (' + (lines.length - 1) + ' data rows total)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  audit CSV export OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
