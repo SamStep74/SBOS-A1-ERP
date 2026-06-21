@@ -1,125 +1,116 @@
-# AGENTS.md — Agent Conventions for SBOS-A1-ERP
+# AGENTS.md — A1-portfolio (cross-repo documentation)
 
-This file applies to every agent (human or AI) that touches the SBOS-A1-ERP
-repository. It extends, and never weakens, the global rules in
-`~/.claude/rules/common/`.
+This file applies to every agent (human or AI) that touches the `armosphera/A1-portfolio`
+repository. It extends, and never weakens, the global rules in this same repo's
+`LICENSING.md`, `ARCHITECTURE.md`, and `SECURITY.md`.
 
-## 1. Workflow: Test-Driven Development (TDD)
+## 1. What this repo is — and isn't
 
-**Mandatory for every non-trivial change.**
+`A1-portfolio` is the **cross-repo documentation source of truth** for the entire A1
+product family. It contains:
 
-1. Write the test first (RED). The test must fail for the right reason.
-2. Run the test and confirm it fails.
-3. Write the minimum implementation that makes it pass (GREEN).
-4. Run the test and confirm it passes.
-5. Refactor (IMPROVE) while keeping tests green.
-6. Verify coverage stays at or above the **80% floor** for any touched module.
+- `README.md` — repo index grouped by layer (Engine / Application / Reference)
+- `LICENSING.md` — license matrix across all 9 repos
+- `ARCHITECTURE.md` — layer cake, data flow, open portfolio questions
+- `SECURITY.md` — vulnerability reporting, severity SLAs
 
-If you are tempted to skip the failing-test step, you are about to write
-dead code. Stop and write the test first.
+**This repo has no code, no tests, no CI.** It's documentation. Edits here are edits
+to the *portfolio* — they ripple by being read by humans and agents in every other repo.
 
-## 2. Coverage Floor — 80%
+## 2. When to edit this repo
 
-- Unit tests, integration tests, and (for critical paths) E2E tests are all
-  required.
-- Coverage is measured per touched module, not just repo-wide.
-- PRs that drop coverage below 80% for any modified file are blocked.
+Touch this repo whenever:
 
-## 3. Immutability by Default
+1. You add a new A1 repo → update the **Repo index** in `README.md` and the layer cake
+   in `ARCHITECTURE.md`.
+2. You change a license in any repo → update the matrix in `LICENSING.md`. (Per the
+   file's preamble: "If a repo's `LICENSE` file disagrees with this document, the
+   `LICENSE` file wins — but please open an issue so we can resolve the drift.")
+3. You introduce a new cross-repo invariant (e.g. a new pinned SHA, a new eval lane
+   contract, a new sovereignty constraint) → document it in `ARCHITECTURE.md` and link
+   from `SECURITY.md` if it touches security posture.
+4. You change release / tagging convention → update `docs/RELEASE-PROCESS.md` (TODO —
+   does not exist yet).
+5. You change which repo is canonical for a domain → update `docs/PRODUCTS.md` (TODO).
 
-Prefer `const`, frozen objects, and "update returns a new value" helpers over
-in-place mutation. Pure functions are easier to test, easier to reason about,
-and safer under concurrency.
+## 3. The 4 files you must keep coherent
 
-```ts
-// WRONG
-function setStatus(invoice, status) {
-  invoice.status = status;
-  return invoice;
-}
+These are the load-bearing docs. **All four must agree on the canonical repo list.**
 
-// RIGHT
-function withStatus(invoice, status) {
-  return { ...invoice, status };
-}
-```
+- `README.md` — repo index
+- `LICENSING.md` — license matrix table
+- `ARCHITECTURE.md` — layer cake (must show the same repos)
+- `SECURITY.md` — supported versions table
+
+If you add a repo, edit all 4. If you deprecate a repo, edit all 4 + open an issue.
 
 ## 4. Conventional Commits
 
 ```
-<type>: <description>
+<type>(<scope>): <description>
 
 <optional body>
 ```
 
-Allowed types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`,
-`build`.
+Allowed types: `docs`, `chore`, `feat` (for new docs sections), `fix` (typos /
+wrong claims), `refactor` (restructuring existing docs).
 
 - Subject line ≤72 chars, imperative mood, no trailing period.
 - Body explains **why**, not **what** (the diff shows the what).
-- Attribution is disabled globally; do not add `Co-Authored-By` trailers.
 
-## 5. No Hardcoded Secrets
+## 5. No Code, No Secrets
 
-- API keys, passwords, tokens, private URLs, and customer data must never
-  appear in source.
-- Use environment variables, read at process start, and validated for presence.
-- A `SECURITY.md` policy governs rotation; if a secret leaks, rotate first,
-  fix second.
+- This repo has no source code, no tests, no CI. **Don't add any.**
+- No secrets, no API keys, no customer data. If you find one in a PR, reject and rotate.
 
-## 6. Porting over Net-New Invention
+## 6. Markdown Discipline
 
-`~/dev/A1-ERP-HY/` is a battle-tested reference for an Armenian SME ERP.
-**Before** writing a new module, search that repo for an equivalent
-implementation. If one exists and is well-tested, port it. If a partial
-match exists, fork and adapt. Only invent from scratch when the reference
-is clearly inadequate — and document why in the commit body.
+- One H1 per file. Use H2 for sections, H3 for subsections.
+- Code blocks must specify language: ` ```bash `, ` ```js `, ` ```python `, etc.
+- Tables use GitHub-flavored markdown alignment (left for text, right for numbers).
+- Internal links use relative paths (`./LICENSING.md`), external links use full URLs.
+- Line length ≤120 chars (Markdown doesn't hard-wrap but keep readable in raw view).
 
-## 7. Files, Functions, Nesting
+## 7. Drift Detection (TODO)
 
-- One concept per file. Aim for 200–400 lines, 800 hard cap.
-- Functions: <50 lines, single responsibility.
-- No nesting deeper than 4 levels. Prefer early returns and small
-  helper functions.
+This repo should grow a CI check that:
 
-## 8. TypeScript Discipline
+- Compares the repo index in `README.md` against the actual list of repos in the
+  `armosphera` org.
+- Compares the license matrix in `LICENSING.md` against each repo's `LICENSE` file.
+- Compares the architecture layer cake in `ARCHITECTURE.md` against the actual repo
+  descriptions.
 
-- `strict: true` plus `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
-- No `any` in committed code. Use `unknown` + narrowing when the type is
-  genuinely unknown.
-- No non-null assertions (`!`) outside of tests with a clear justification.
+Add as a Karpathy eval lane: `portfolio-drift-contract`.
 
-## 9. No Debug Noise in Shipped Code
-
-- `console.log` is for development only. Production code uses a structured
-  logger.
-- No `debugger`, `// FIXME` left behind, or commented-out blocks in PRs.
-
-## 10. Test Runner Flags (16GB Mac Safety)
-
-Always run the test suite with the same flags the 11GB-swap-on-16GB-Mac fix
-uses:
+## 8. Day-One Checklist
 
 ```
-node --test --test-concurrency=4 --test-timeout=60000
+1. cat AGENTS.md             # this file
+2. cat README.md             # current repo index
+3. cat LICENSING.md          # current license matrix
+4. cat ARCHITECTURE.md       # current layer cake
+5. cat SECURITY.md           # current policy
+6. Now edit — keep all 4 in sync.
 ```
 
-Bare `node --test` is unsafe on memory-constrained hardware.
+## 9. Roadmap Items (Track Here)
 
-## 11. Local-First, Offline-Capable
+The following are **known portfolio gaps** that this repo will track:
 
-SBOS-A1-ERP must run end-to-end with no network dependency beyond
-opt-in AI features. Do not introduce code that requires a SaaS to function.
+- [ ] `docs/CONTRIBUTING.md` — how to file issues against the right repo
+- [ ] `docs/RELEASE-PROCESS.md` — how releases are cut (tag, notes, publishing)
+- [ ] `docs/PRODUCTS.md` — naming matrix: which repo is canonical for X
+- [ ] AGPL-3.0 dual-license migration for engines (2026 H2)
+- [ ] Portfolio drift CI (drift between docs and actual repos)
+- [ ] Cross-repo evaluation report (which repos have AGENTS.md, program.md,
+      .orchestration/, Karpathy eval lanes — vs which don't)
 
-## 12. Armenian-Specific Code Paths
+## 10. Ownership
 
-- Chart of accounts, VAT forms, and e-invoice schemas are Armenia-specific.
-- Any change touching these areas must cite the authoritative source
-  (SRC decree, ARLIS act, or maintained Armenian l10n dataset) in the
-  commit body.
+**Armosphera LLC** · contact: ops@a1-suite.local · security: ops@a1-suite.local
 
-## 13. Question Before Damage
+---
 
-If an instruction is ambiguous and a wrong move would lose data, break
-the build for everyone, or rewrite a lot of working code, **ask first**.
-Otherwise, prefer momentum: small, reversible, well-tested steps.
+*Adapted from `armosphera/SBOS-A1-ERP/AGENTS.md`. Specializes for "this repo IS the
+documentation." License: Proprietary (`LicenseRef-Armosphera-Proprietary`). See `LICENSE`.*
