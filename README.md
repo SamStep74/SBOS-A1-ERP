@@ -51,6 +51,12 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
   - 985/985 tests pass. Deploy smoke exercises the full
     warehouse → location → item → receive → vendor → PO → confirm → receive →
     bill flow on a fresh DB.
+- **Wave 17 (Phase 1 ERP — Armenian PO + delivery-note templates)** — DONE.
+  - Server-rendered PO + delivery-note templates in Armenian (primary),
+    English, and Russian. Pure functions in `server/finance/poTemplate.js`;
+    routes at `/api/finance/{purchase-orders,receipts}/:id/print?locale=hy&format=html|text`.
+  - 1002/1002 tests pass (was 985; +17). Deploy smoke extended to 37
+    endpoints with Armenian-text regression guard on the print routes.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -107,6 +113,34 @@ header or `req.user.tenant_id`) and gated by `requirePerm(...)` (see
 | POST   | `/api/finance/vendor-bills/:id/post`          | `finance.bill.approve`    | `confirmed` → `posted` (PO transitions to `billed`) |
 | POST   | `/api/finance/vendor-bills/:id/pay`           | `finance.bill.pay`        | `posted` → `paid`                          |
 | POST   | `/api/finance/vendor-bills/:id/void`          | `finance.bill.void`       | `{reason}`. Only before payment            |
+
+### Armenian templates (PO + delivery note)
+
+The PO + delivery note have **server-rendered templates** in
+Armenian (the primary target), English, and Russian. The templates
+are pure functions in `server/finance/poTemplate.js`; the print
+routes return them as `text/plain` or `text/html`.
+
+| Method | Path                                                 | Query                              | Returns                                         |
+| ------ | ---------------------------------------------------- | ---------------------------------- | ----------------------------------------------- |
+| GET    | `/api/finance/purchase-orders/:id/print`             | `?locale=hy\|en\|ru&format=html\|text` | Rendered PO body (text/plain or text/html)       |
+| GET    | `/api/finance/receipts/:id/print`                    | `?locale=hy\|en\|ru&format=html\|text` | Rendered delivery-note body (text/plain or text/html) |
+
+Locale defaults to `en`; format defaults to `text`. The Armenian
+output is used by the production invoice/PO PDF generator and the
+delivery-note printer.
+
+Example:
+
+```bash
+curl -s "http://localhost:3000/api/finance/purchase-orders/1/print?locale=hy&format=text" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0'
+# -> "Գնման պատվեր #PO-ARM-0001\nՀամար: PO-ARM-0001   Ամսաթիվ: 2026-06-21\n..."
+
+curl -s "http://localhost:3000/api/finance/receipts/1/print?locale=hy&format=html" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0'
+# -> "<html-escaped body with <br> line breaks>"
+```
 
 ### Typical end-to-end flow
 

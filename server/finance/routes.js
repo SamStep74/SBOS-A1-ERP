@@ -44,6 +44,8 @@
 //   POST   /api/finance/vendor-bills/:id/post
 //   POST   /api/finance/vendor-bills/:id/pay
 //   POST   /api/finance/vendor-bills/:id/void
+//   GET    /api/finance/purchase-orders/:id/print?locale=hy&format=html|text
+//   GET    /api/finance/receipts/:id/print?locale=hy&format=html|text
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -92,6 +94,8 @@ import {
   cancelPurchaseOrder,
   receivePurchaseOrder,
   listPurchaseOrders,
+  getPurchaseOrder,
+  getReceipt,
   createVendorBillFromReceipt,
   confirmVendorBill,
   postVendorBill,
@@ -99,6 +103,7 @@ import {
   voidVendorBill,
   listVendorBills,
 } from './purchase.js';
+import { renderPurchaseOrder, renderDeliveryNote } from './poTemplate.js';
 import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -830,4 +835,64 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.status(200).json(out);
     }),
   );
+
+  // ─── Phase 1 ERP: PO + delivery-note print routes ───
+  //
+  // GET /api/finance/purchase-orders/:id/print?locale=hy&format=html|text
+  //   Returns the rendered PO body in the requested locale + format.
+  //   format defaults to 'text'. locale defaults to 'en'.
+  //   Content-Type: text/plain; charset=utf-8 (or text/html).
+  //
+  // The hydration is done by getPurchaseOrder (joins item names +
+  // vendor fields). The rendering is done by renderPurchaseOrder
+  // (poTemplate.js). Both are pure, both are tenant-scoped.
+  app.get('/api/finance/purchase-orders/:id/print', async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = readTenant(req);
+      const po = await getPurchaseOrder(pgAdapter, id, tenantId);
+      if (!po) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const locale = String(req.query.locale || 'en');
+      const format = String(req.query.format || 'text');
+      const body = renderPurchaseOrder(po, locale, { format });
+      if (format === 'html') {
+        res.status(200).type('text/html; charset=utf-8').send(body);
+      } else {
+        res.status(200).type('text/plain; charset=utf-8').send(body);
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/finance/receipts/:id/print?locale=hy&format=html|text
+  //   Same pattern as the PO print route, but for delivery notes.
+  app.get('/api/finance/receipts/:id/print', async (req, res, next) => {
+    try {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = readTenant(req);
+      const receipt = await getReceipt(pgAdapter, id, tenantId);
+      if (!receipt) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const locale = String(req.query.locale || 'en');
+      const format = String(req.query.format || 'text');
+      const body = renderDeliveryNote(receipt, locale, { format });
+      if (format === 'html') {
+        res.status(200).type('text/html; charset=utf-8').send(body);
+      } else {
+        res.status(200).type('text/plain; charset=utf-8').send(body);
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
 }

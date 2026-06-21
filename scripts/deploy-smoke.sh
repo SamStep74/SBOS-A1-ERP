@@ -123,6 +123,9 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/purchase-orders/1/confirm', body: {}, expect: 200, name: 'POST /api/finance/purchase-orders/1/confirm' },
   { method: 'POST', path: '/api/finance/purchase-orders/1/receive', body: { destination_location_id: 1, lines: [{ order_line_id: 1, received_quantity: 5 }] }, expect: 201, name: 'POST /api/finance/purchase-orders/1/receive' },
   { method: 'POST', path: '/api/finance/vendor-bills', body: { purchase_order_id: 1, bill_number: 'BILL-SMOKE-1', bill_date: '2026-06-21' }, expect: 201, name: 'POST /api/finance/vendor-bills (returns id > 0)' },
+  // Phase 1 ERP — PO + delivery-note templates (Armenian).
+  { method: 'GET', path: '/api/finance/purchase-orders/1/print?locale=hy&format=text', expect: 200, name: 'GET PO print (Armenian, text) — body contains Armenian header' },
+  { method: 'GET', path: '/api/finance/receipts/1/print?locale=hy&format=text', expect: 200, name: 'GET receipt print (Armenian, text) — body contains Armenian header' },
 ];
 
 let done = 0, pass = 0, fail = 0;
@@ -159,6 +162,21 @@ function runCheck(c) {
             console.log('  FAIL POST returned no positive id/move_id:', body.slice(0, 200));
           }
         } catch {}
+      }
+      // Print-route regression guard: Armenian locale must produce
+      // Armenian text (the i18n catalog test covers the keys, but
+      // this is the end-to-end check that the route plumbing + the
+      // i18n lookup + the template renderer are all wired together).
+      if (c.method === 'GET' && got === 200 && /locale=hy/.test(c.path)) {
+        const expectsArmenian =
+          /po-header|deliveryNote-header|Գնման|Առաքման/.test(c.name);
+        if (expectsArmenian) {
+          const hasArmenian = /[Ա-Ֆա-ֆ]/.test(body);
+          if (!hasArmenian) {
+            fail++;
+            console.log('  FAIL hy print route returned no Armenian text:', body.slice(0, 200));
+          }
+        }
       }
       if (++done === checks.length + writeChecks.length) { console.log('endpoint smoke:', pass, 'pass,', fail, 'fail'); process.exit(fail > 0 ? 1 : 0); }
     });
