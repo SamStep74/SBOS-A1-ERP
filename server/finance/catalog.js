@@ -65,6 +65,13 @@ function assertPositiveInt(value, name) {
   }
 }
 
+function assertDateString(value, name) {
+  if (value === null || value === undefined) return;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ValueError(`${name} must be a date string in YYYY-MM-DD format`);
+  }
+}
+
 function assertSlug(value, name = 'slug') {
   if (typeof value !== 'string' || !SLUG_RE.test(value)) {
     throw new ValueError(
@@ -553,4 +560,180 @@ export async function listBundleItems(db, bundleId, tenantId = 0) {
     [bundleId, tenantId],
   );
   return result.rows;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Pricing rules (catalog v2 wave 3c / W80-1)
+// ────────────────────────────────────────────────────────────────────────
+//
+// Pricing rules are tenant-scoped configuration
+// records that describe price overrides. The rule
+// itself is just a record (header + config_json
+// blob); the actual price-application logic (which
+// rule applies to which item, how to compute the
+// final price) is a future concern (a follow-up
+// wave that integrates the rules with the catalog
+// + invoice flow).
+//
+// This module ships the minimum-viable pricing
+// rules CRUD:
+//   - createPricingRule
+//   - listPricingRules
+//   - getPricingRule
+//
+// Phase 2 catalog v2 wave 3c (W80-1): schema +
+// pure functions + tests. Wave 3d (future): route
+// wiring + perm keys + smoke check.
+
+const PRICING_RULE_TYPES = ['volume_discount', 'time_based', 'category_discount'];
+
+function assertPricingRuleType(value) {
+  // Type is required (no default — the operator must
+  // explicitly choose the rule type).
+  if (value === null || value === undefined) {
+    throw new ValueError(
+      `pricing rule type is required (one of: ${PRICING_RULE_TYPES.join(', ')})`,
+    );
+  }
+  if (!PRICING_RULE_TYPES.includes(value)) {
+    throw new ValueError(
+      `pricing rule type must be one of: ${PRICING_RULE_TYPES.join(', ')}`,
+    );
+  }
+}
+
+function assertPricingRulePriority(value) {
+  if (value === null || value === undefined) return;
+  if (!Number.isInteger(value)) {
+    throw new ValueError('priority must be an integer');
+  }
+}
+
+function validateCreatePricingRuleInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('pricing rule input is required');
+  }
+  assertString(input.name, 'name', { min: 1, max: 255 });
+  assertPricingRuleType(input.type);
+  assertOptionalString(input.config_json, 'config_json', { max: 8192 });
+  assertPricingRulePriority(input.priority);
+  assertDateString(input.valid_from, 'valid_from');
+  assertDateString(input.valid_to, 'valid_to');
+}
+
+export async function createPricingRule(db, input, tenantId = 0) {
+  validateCreatePricingRuleInput(input);
+  const ins = await runQuery(
+    db,
+    `INSERT INTO finance.catalog_pricing_rules
+       (tenant_id, name, type, config_json, priority,
+        valid_from, valid_to)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id`,
+    [
+      tenantId,
+      input.name,
+      input.type,
+      input.config_json ?? null,
+      input.priority ?? 100,
+      input.valid_from ?? null,
+      input.valid_to ?? null,
+    ],
+  );
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(
+      db,
+      'SELECT LAST_INSERT_ROWID()',
+      [],
+    );
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
+}
+
+export async function listPricingRules(
+  db,
+  tenantId = 0,
+  { archived = false, type = null } = {},
+) {
+  // Order by priority ASC (lower priority value =
+  // higher priority; the most-applicable rule
+  // appears first). Then by id ASC for stable
+  // ordering when priorities tie.
+  //
+  // When archived=false (default), only non-
+  // archived rules are returned. When
+  // archived=true, all rules (including archived)
+  // are returned.
+  //
+  // When type is set, only rules of that type are
+  // returned (e.g. { type: 'volume_discount' } for
+  // the "show me all volume discounts" view).
+  let result;
+  if (archived && type !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, name, type, config_json, priority,
+              valid_from, valid_to, archived,
+              created_at, updated_at
+         FROM finance.catalog_pricing_rules
+        WHERE tenant_id = $1 AND type = $2
+        ORDER BY priority ASC, id ASC`,
+      [tenantId, type],
+    );
+  } else if (archived) {
+    result = await runQuery(
+      db,
+      `SELECT id, name, type, config_json, priority,
+              valid_from, valid_to, archived,
+              created_at, updated_at
+         FROM finance.catalog_pricing_rules
+        WHERE tenant_id = $1
+        ORDER BY priority ASC, id ASC`,
+      [tenantId],
+    );
+  } else if (type !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, name, type, config_json, priority,
+              valid_from, valid_to, archived,
+              created_at, updated_at
+         FROM finance.catalog_pricing_rules
+        WHERE tenant_id = $1 AND archived = 0 AND type = $2
+        ORDER BY priority ASC, id ASC`,
+      [tenantId, type],
+    );
+  } else {
+    result = await runQuery(
+      db,
+      `SELECT id, name, type, config_json, priority,
+              valid_from, valid_to, archived,
+              created_at, updated_at
+         FROM finance.catalog_pricing_rules
+        WHERE tenant_id = $1 AND archived = 0
+        ORDER BY priority ASC, id ASC`,
+      [tenantId],
+    );
+  }
+  return result.rows;
+}
+
+export async function getPricingRule(db, ruleId, tenantId = 0) {
+  assertPositiveInt(ruleId, 'ruleId');
+  const result = await runQuery(
+    db,
+    `SELECT id, name, type, config_json, priority,
+            valid_from, valid_to, archived,
+            created_at, updated_at
+       FROM finance.catalog_pricing_rules
+      WHERE id = $1 AND tenant_id = $2`,
+    [ruleId, tenantId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    throw new ValueError(`pricing rule ${ruleId} not found in tenant ${tenantId}`);
+  }
+  return result.rows[0];
 }

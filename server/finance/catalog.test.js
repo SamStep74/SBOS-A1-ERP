@@ -33,6 +33,9 @@ import {
   getBundle,
   addBundleItem,
   listBundleItems,
+  createPricingRule,
+  listPricingRules,
+  getPricingRule,
   ValueError,
 } from './catalog.js';
 
@@ -102,6 +105,19 @@ function makeMemoryDb() {
       catalog_item_id INTEGER NOT NULL,
       quantity INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE catalog_pricing_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config_json TEXT,
+      priority INTEGER NOT NULL DEFAULT 100,
+      valid_from TEXT,
+      valid_to TEXT,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     -- The catalog_variants_sku_idx is needed for the
     -- createVariant unique-sku test (which asserts a
@@ -718,4 +734,166 @@ test('catalog: listBundleItems is tenant-scoped', async () => {
   // The bundle in tenant 1 is empty.
   const items1 = await listBundleItems(db, bun1.id, 1);
   assert.equal(items1.length, 0);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Pricing rules (catalog v2 wave 3c / W80-1)
+// ────────────────────────────────────────────────────────────────────────
+
+test('catalog: createPricingRule inserts a row + returns the id', async () => {
+  const db = makeMemoryDb();
+  const out = await createPricingRule(
+    db,
+    { name: 'Volume 10+ 5%', type: 'volume_discount' },
+    0,
+  );
+  assert.equal(typeof out.id, 'number');
+  assert.ok(out.id > 0);
+});
+
+test('catalog: createPricingRule applies default priority=100', async () => {
+  const db = makeMemoryDb();
+  const out = await createPricingRule(
+    db,
+    { name: 'R', type: 'volume_discount' },
+    0,
+  );
+  const rule = await getPricingRule(db, out.id, 0);
+  assert.equal(rule.priority, 100);
+});
+
+test('catalog: createPricingRule validates type', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createPricingRule(
+      db,
+      { name: 'R', type: 'unknown_type' },
+      0,
+    ),
+    /pricing rule type/,
+  );
+});
+
+test('catalog: createPricingRule requires name + type', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createPricingRule(db, { type: 'volume_discount' }, 0),
+    /name/,
+  );
+  await assert.rejects(
+    createPricingRule(db, { name: 'R' }, 0),
+    /pricing rule type/,
+  );
+});
+
+test('catalog: createPricingRule validates config_json + priority + dates', async () => {
+  const db = makeMemoryDb();
+  // config_json is optional but when present must be a string
+  await assert.rejects(
+    createPricingRule(
+      db,
+      { name: 'R', type: 'volume_discount', config_json: 12345 },
+      0,
+    ),
+    /config_json/,
+  );
+  // priority must be an integer
+  await assert.rejects(
+    createPricingRule(
+      db,
+      { name: 'R', type: 'volume_discount', priority: 1.5 },
+      0,
+    ),
+    /priority/,
+  );
+  // valid_from must be YYYY-MM-DD
+  await assert.rejects(
+    createPricingRule(
+      db,
+      { name: 'R', type: 'time_based', valid_from: 'not-a-date' },
+      0,
+    ),
+    /valid_from/,
+  );
+});
+
+test('catalog: listPricingRules returns all non-archived rules for the tenant', async () => {
+  const db = makeMemoryDb();
+  await createPricingRule(db, { name: 'A', type: 'volume_discount' }, 0);
+  await createPricingRule(db, { name: 'B', type: 'time_based' }, 0);
+  const items = await listPricingRules(db, 0);
+  assert.equal(items.length, 2);
+});
+
+test('catalog: listPricingRules orders by priority ASC (lowest first)', async () => {
+  const db = makeMemoryDb();
+  await createPricingRule(
+    db,
+    { name: 'High', type: 'volume_discount', priority: 200 },
+    0,
+  );
+  await createPricingRule(
+    db,
+    { name: 'Low', type: 'volume_discount', priority: 10 },
+    0,
+  );
+  await createPricingRule(
+    db,
+    { name: 'Mid', type: 'volume_discount', priority: 100 },
+    0,
+  );
+  const items = await listPricingRules(db, 0);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].name, 'Low');
+  assert.equal(items[1].name, 'Mid');
+  assert.equal(items[2].name, 'High');
+});
+
+test('catalog: listPricingRules filters by type', async () => {
+  const db = makeMemoryDb();
+  await createPricingRule(db, { name: 'A', type: 'volume_discount' }, 0);
+  await createPricingRule(db, { name: 'B', type: 'time_based' }, 0);
+  await createPricingRule(db, { name: 'C', type: 'category_discount' }, 0);
+  const volume = await listPricingRules(db, 0, { type: 'volume_discount' });
+  const time = await listPricingRules(db, 0, { type: 'time_based' });
+  const category = await listPricingRules(db, 0, { type: 'category_discount' });
+  assert.equal(volume.length, 1);
+  assert.equal(volume[0].name, 'A');
+  assert.equal(time.length, 1);
+  assert.equal(time[0].name, 'B');
+  assert.equal(category.length, 1);
+  assert.equal(category[0].name, 'C');
+});
+
+test('catalog: listPricingRules is tenant-scoped', async () => {
+  const db = makeMemoryDb();
+  await createPricingRule(db, { name: 'A', type: 'volume_discount' }, 0);
+  await createPricingRule(db, { name: 'B', type: 'volume_discount' }, 1);
+  const items0 = await listPricingRules(db, 0);
+  const items1 = await listPricingRules(db, 1);
+  assert.equal(items0.length, 1);
+  assert.equal(items0[0].name, 'A');
+  assert.equal(items1.length, 1);
+  assert.equal(items1[0].name, 'B');
+});
+
+test('catalog: getPricingRule throws ValueError for missing rule', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    getPricingRule(db, 999, 0),
+    /pricing rule.*not found in tenant/,
+  );
+});
+
+test('catalog: getPricingRule is tenant-scoped', async () => {
+  const db = makeMemoryDb();
+  const out = await createPricingRule(
+    db,
+    { name: 'A', type: 'volume_discount' },
+    0,
+  );
+  await assert.rejects(
+    getPricingRule(db, out.id, 1),
+    /pricing rule.*not found in tenant/,
+  );
 });
