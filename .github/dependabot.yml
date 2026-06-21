@@ -23,9 +23,16 @@ updates:
       prefix: "deps"
       prefix-development: "deps(dev)"
       include: "scope"
-    # Severity threshold: open PRs for moderate+, close-and-ignore for low
-    # (GitHub doesn't natively support auto-close; Dependabot will simply open the PR and a maintainer triages)
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
-    # Cross-eng: only opens PRs that pass CI in the target repo
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
