@@ -234,6 +234,9 @@ const PERMISSION_SETS = Object.freeze({
       'finance.warehouse.update',
       'finance.stock.read',
       'finance.stock.move',
+      // Phase 2 lots + serials (W37 / W39).
+      'inventory.lot.read',
+      'inventory.serial.read',
       // Phase 2 catalog v2 (W77) — categories +
       // variants. The admin user (who has the
       // FinanceOperator set) gets these keys too.

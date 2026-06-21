@@ -614,6 +614,18 @@ const PERMISSIONS = Object.freeze({
     label: 'Read stock',
     description: 'View stock balances and the move history.',
   },
+  'inventory.lot.read': {
+    category: 'inv',
+    sensitivity: 'low',
+    label: 'Read lots',
+    description: 'View lots + per-location lot quantities (FEFO-friendly).',
+  },
+  'inventory.serial.read': {
+    category: 'inv',
+    sensitivity: 'low',
+    label: 'Read serials',
+    description: 'View unit-level serials (location, status, lot binding).',
+  },
   'finance.stock.move': {
     category: 'finance',
     sensitivity: 'high',

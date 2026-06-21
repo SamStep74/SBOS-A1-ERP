@@ -302,6 +302,8 @@ const expected = [
   // Phase 1 ERP — purchase (migration 0008)
   'vendors', 'purchase_orders', 'purchase_order_lines', 'purchase_receipts',
   'purchase_receipt_lines', 'vendor_bills', 'vendor_bill_lines',
+  // Wave 37+39 — lots + serials (migration 0014)
+  'lots', 'serials', 'stock_lots',
 ];
 const got = new Set(tables.map(t => t.name));
 let missing = expected.filter(t => !got.has(t));
@@ -983,6 +985,143 @@ DB_PATH="$DB" PORT="$PORT" node -e "
   fi
 echo
 
+echo "=== STEP 5j: Lots + serials endpoint smoke (Wave 39) ==="
+# Smoke coverage for the new lots + serials route wiring:
+#   1. POST a catalog item
+#   2. Create a lot via direct DB write (no POST route yet — the
+#      pure function is exercised by lots.test.js)
+#   3. GET /api/finance/lots/:id returns the lot row
+#   4. GET /api/finance/lots?catalog_item_id=N returns it in the list
+#   5. GET /api/finance/items/:itemId/lots (route alias) returns it too
+#   6. GET /api/finance/lots/:id for an unknown id returns 404
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const http = require('node:http');
+
+  function get(path) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method: 'GET',
+        headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      req.end();
+    });
+  }
+
+  function postJson(path, body) {
+    return new Promise((resolve) => {
+      const data = JSON.stringify(body);
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method: 'POST',
+        headers: {
+          'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      req.write(data);
+      req.end();
+    });
+  }
+
+  (async () => {
+    // 1. Create a catalog item.
+    const item = await postJson('/api/finance/catalog/items', {
+      sku: 'W39-SMOKE', name: 'W39 smoke item',
+    });
+    if (item.status !== 201) {
+      console.log('  FAIL create catalog item: status=' + item.status, JSON.stringify(item.body).slice(0, 120));
+      process.exit(1);
+    }
+
+    // 2. Seed a lot directly via DB write (no POST route yet — the
+    // pure function is exercised by lots.test.js).
+    const db = new DatabaseSync(process.env.DB_PATH);
+    db.prepare('DELETE FROM lots WHERE code = ?').run('LOT-SMOKE-1');
+    db.prepare(\`INSERT INTO lots
+      (tenant_id, code, catalog_item_id, received_at)
+      VALUES (?, ?, ?, ?)\`).run(0, 'LOT-SMOKE-1', item.body.id, '2026-06-21');
+    const lotRow = db.prepare('SELECT id FROM lots WHERE code = ?').get('LOT-SMOKE-1');
+
+    // 3. GET /api/finance/lots/:id returns the lot row.
+    const r3 = await get('/api/finance/lots/' + lotRow.id);
+    if (r3.status !== 200) {
+      console.log('  FAIL GET /api/finance/lots/' + lotRow.id + ': status=' + r3.status, JSON.stringify(r3.body).slice(0, 120));
+      process.exit(1);
+    }
+    if (r3.body.id !== lotRow.id || r3.body.code !== 'LOT-SMOKE-1') {
+      console.log('  FAIL lot row mismatch:', JSON.stringify(r3.body).slice(0, 120));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/lots/' + lotRow.id + ' returns the lot row');
+
+    // 4. GET /api/finance/lots?catalog_item_id=N lists it.
+    const r4 = await get('/api/finance/lots?catalog_item_id=' + item.body.id);
+    if (r4.status !== 200 || !Array.isArray(r4.body.items) || r4.body.items.length !== 1) {
+      console.log('  FAIL GET /api/finance/lots?catalog_item_id=' + item.body.id + ':', JSON.stringify(r4.body).slice(0, 120));
+      process.exit(1);
+    }
+    if (r4.body.items[0].code !== 'LOT-SMOKE-1') {
+      console.log('  FAIL listed lot code mismatch:', JSON.stringify(r4.body.items[0]));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/lots?catalog_item_id=' + item.body.id + ' lists the lot');
+
+    // 5. GET /api/finance/items/:itemId/lots (route alias) returns the same data.
+    const r5 = await get('/api/finance/items/' + item.body.id + '/lots');
+    if (r5.status !== 200 || !Array.isArray(r5.body.items) || r5.body.items.length !== 1) {
+      console.log('  FAIL GET /api/finance/items/' + item.body.id + '/lots:', JSON.stringify(r5.body).slice(0, 120));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/items/' + item.body.id + '/lots (route alias) returns the same data');
+
+    // 6. GET /api/finance/lots/:id for an unknown id returns 404.
+    const r6 = await get('/api/finance/lots/999999');
+    if (r6.status !== 404) {
+      console.log('  FAIL GET /api/finance/lots/999999: expected 404, got', r6.status, JSON.stringify(r6.body).slice(0, 80));
+      process.exit(1);
+    }
+    if (r6.body.error !== 'not_found') {
+      console.log('  FAIL 404 error code:', r6.body.error);
+      process.exit(1);
+    }
+    console.log('  PASS 404 GET /api/finance/lots/999999 (missing lot — no existence-oracle leak)');
+
+    // 7. GET /api/finance/lots without catalog_item_id returns 400.
+    const r7 = await get('/api/finance/lots');
+    if (r7.status !== 400) {
+      console.log('  FAIL GET /api/finance/lots (no catalog_item_id): expected 400, got', r7.status);
+      process.exit(1);
+    }
+    console.log('  PASS 400 GET /api/finance/lots (missing required catalog_item_id)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  lots + serials endpoint smoke OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
@@ -1489,8 +1628,8 @@ echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
-  echo "  - DB schema correct: 18 expected tables present"
-  echo "  - 5 finance migrations applied via applyMigrations"
+  echo "  - DB schema correct: 36 expected tables present"
+  echo "  - 17 finance migrations applied via applyMigrations"
   echo "  - RBAC seed populated on fresh boot"
   echo "  - vat_carry_forward PK is composite"
   echo "  - Admin user linked to Admin rbac role"
@@ -1498,8 +1637,8 @@ echo "=== STEP 8: Summary ==="
   echo "  - Graceful shutdown works (SIGTERM)"
   echo "  - Restart is idempotent"
   echo "  - Boot-time GL reconciliation ran (Wave 24)"
-  echo "  - A1-Validator client integration smoke (Wave 27)
-  - HVVH validation via A1-Validator wrapper (Wave 32)"
+  echo "  - A1-Validator client integration smoke (Wave 27)"
+  echo "  - HVVH validation via A1-Validator wrapper (Wave 32)"
   exit 0
 # Pre-existing orphaned `else` from before my edit (no matching `if`).
 # The script always exits at the `exit 0` above, so the else was

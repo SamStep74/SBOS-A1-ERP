@@ -183,6 +183,21 @@ import {
 import { findUnpostedMoves, reconcileJournal } from './reconciliation.js';
 import { renderTrialBalance, formatTrialBalanceText } from './trialBalance.js';
 import { requirePerm } from '../rbac/express-adapter.js';
+// Wave 39: lot + serial tracking routes. We import lazily because
+// older deploys (pre-0014 migration) may not have the lots/serials
+// tables — the lot/serial routes need to fail gracefully (503 or
+// a clear 'not_supported' error) in that case.
+let lotsModule = null;
+async function getLotsModule() {
+  if (lotsModule === null) {
+    try {
+      lotsModule = await import('./lots.js');
+    } catch (_e) {
+      lotsModule = false;
+    }
+  }
+  return lotsModule || null;
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Validation helpers
@@ -612,6 +627,223 @@ export function registerFinanceRoutes(app, opts = {}) {
       } catch (err) {
         if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
           return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // Wave 39 — lot + serial tracking endpoints
+  //
+  // Six routes. Read-only (CRUD lives in the lots module for now;
+  // route-level create would need audit + form validation that's
+  // out of scope for Wave 39 commit 3).
+  //
+  // Perm gates:
+  //   - inventory.lot.read — for /api/finance/lots/:id, /lots (lists),
+  //     /items/:itemId/lots, /locations/:locationId/lots
+  //   - inventory.serial.read — for /api/finance/serials/:id,
+  //     /serials (lists), /items/:itemId/serials,
+  //     /locations/:locationId/serials
+  //
+  // Graceful degradation: if the lots module can't be loaded
+  // (pre-0014 migration deploys), the routes return 501 with a
+  // clear error message instead of 500. This matches the
+  // graceful-degradation contract used for the A1-Validator
+  // client (Wave 27 / Wave 38 lessons).
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/lots/:id — single lot by id.
+  app.get(
+    '/api/finance/lots/:id',
+    requireTenant,
+    requirePerm('inventory.lot.read'),
+    async (req, res, next) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'lots module not available (run migration 0014)' });
+        }
+        const out = await lotsApi.getLot(pgAdapter, id, req.tenantId);
+        if (out == null) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        res.status(200).json(out);
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/lots — list lots. Required query: ?catalog_item_id=N.
+  app.get(
+    '/api/finance/lots',
+    requireTenant,
+    requirePerm('inventory.lot.read'),
+    async (req, res, next) => {
+      try {
+        const itemId = Number(req.query.catalog_item_id);
+        if (!Number.isInteger(itemId) || itemId <= 0) {
+          return res.status(400).json({ error: 'bad_request', message: 'catalog_item_id is required' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'lots module not available (run migration 0014)' });
+        }
+        const out = await lotsApi.listLotsForItem(pgAdapter, itemId, req.tenantId);
+        res.status(200).json({ items: out });
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/items/:itemId/lots — lots for a specific item,
+  // joined with stock_lots so the response includes the per-location
+  // quantity (the caller can also pass ?location_id=N to scope).
+  app.get(
+    '/api/finance/items/:itemId/lots',
+    requireTenant,
+    requirePerm('inventory.lot.read'),
+    async (req, res, next) => {
+      try {
+        const itemId = Number(req.params.itemId);
+        if (!Number.isInteger(itemId) || itemId <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'lots module not available (run migration 0014)' });
+        }
+        const locationId = req.query.location_id != null ? Number(req.query.location_id) : null;
+        if (locationId != null && (!Number.isInteger(locationId) || locationId <= 0)) {
+          return res.status(400).json({ error: 'bad_request', message: 'location_id must be a positive integer' });
+        }
+        if (locationId != null) {
+          const lots = await lotsApi.listLotsForLocation(pgAdapter, req.tenantId, locationId);
+          // Filter to just the lots for this item (listLotsForLocation
+          // returns all lots at the location; client asked for this item).
+          const filtered = lots.filter(l => l.catalog_item_id === itemId);
+          return res.status(200).json({ items: filtered });
+        }
+        const out = await lotsApi.listLotsForItem(pgAdapter, itemId, req.tenantId);
+        res.status(200).json({ items: out });
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/serials/:id — single serial by id.
+  app.get(
+    '/api/finance/serials/:id',
+    requireTenant,
+    requirePerm('inventory.serial.read'),
+    async (req, res, next) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'serials module not available (run migration 0014)' });
+        }
+        const out = await lotsApi.getSerial(pgAdapter, id, req.tenantId);
+        if (out == null) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        res.status(200).json(out);
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/serials — list serials. Required query: ?catalog_item_id=N.
+  // Optional: ?status=in_stock|sold|returned|lost|scrap, ?lot_id=N.
+  app.get(
+    '/api/finance/serials',
+    requireTenant,
+    requirePerm('inventory.serial.read'),
+    async (req, res, next) => {
+      try {
+        const itemId = Number(req.query.catalog_item_id);
+        if (!Number.isInteger(itemId) || itemId <= 0) {
+          return res.status(400).json({ error: 'bad_request', message: 'catalog_item_id is required' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'serials module not available (run migration 0014)' });
+        }
+        const opts = {};
+        if (req.query.status != null) opts.status = String(req.query.status);
+        if (req.query.lot_id != null) {
+          const lotId = Number(req.query.lot_id);
+          if (!Number.isInteger(lotId) || lotId <= 0) {
+            return res.status(400).json({ error: 'bad_request', message: 'lot_id must be a positive integer' });
+          }
+          opts.lot_id = lotId;
+        }
+        const out = await lotsApi.listSerialsForItem(pgAdapter, itemId, req.tenantId, opts);
+        res.status(200).json({ items: out });
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/items/:itemId/serials — serials for a specific item,
+  // optional ?status= and ?lot_id= filters. Useful for an item's
+  // "where are my units?" drill-down.
+  app.get(
+    '/api/finance/items/:itemId/serials',
+    requireTenant,
+    requirePerm('inventory.serial.read'),
+    async (req, res, next) => {
+      try {
+        const itemId = Number(req.params.itemId);
+        if (!Number.isInteger(itemId) || itemId <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'serials module not available (run migration 0014)' });
+        }
+        const opts = {};
+        if (req.query.status != null) opts.status = String(req.query.status);
+        if (req.query.lot_id != null) {
+          const lotId = Number(req.query.lot_id);
+          if (!Number.isInteger(lotId) || lotId <= 0) {
+            return res.status(400).json({ error: 'bad_request', message: 'lot_id must be a positive integer' });
+          }
+          opts.lot_id = lotId;
+        }
+        const out = await lotsApi.listSerialsForItem(pgAdapter, itemId, req.tenantId, opts);
+        res.status(200).json({ items: out });
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
         }
         next(err);
       }

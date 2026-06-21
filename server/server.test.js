@@ -352,6 +352,42 @@ function makeFinanceDb() {
       credit INTEGER NOT NULL DEFAULT 0,
       description TEXT
     );
+    -- Wave 39: lots + serials tables (mirror 0014_lots_serials.sql).
+    CREATE TABLE lots (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id           INTEGER NOT NULL DEFAULT 0,
+      code                TEXT NOT NULL,
+      supplier_lot_number TEXT,
+      catalog_item_id     INTEGER NOT NULL,
+      expiry_date         TEXT,
+      received_at         TEXT NOT NULL,
+      notes               TEXT,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE serials (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id             INTEGER NOT NULL DEFAULT 0,
+      serial_number         TEXT NOT NULL,
+      catalog_item_id       INTEGER NOT NULL,
+      lot_id                INTEGER,
+      status                TEXT NOT NULL DEFAULT 'in_stock',
+      current_location_id   INTEGER,
+      received_at           TEXT NOT NULL,
+      sold_at               TEXT,
+      notes                 TEXT,
+      created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE stock_lots (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id       INTEGER NOT NULL DEFAULT 0,
+      lot_id          INTEGER NOT NULL,
+      location_id     INTEGER NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      quantity        INTEGER NOT NULL DEFAULT 0,
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   return { sqliteDb, dir };
 }
@@ -1148,6 +1184,86 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     const { status, body } = await get(server, '/api/finance/vendors/999998/360');
     assert.equal(status, 404, 'vendor 999998 should not exist in this tenant');
     assert.equal(body.error, 'not_found');
+  });
+
+  // ─── Wave 39: lots + serials route wiring ───
+
+  test('39a. GET /api/finance/lots?catalog_item_id=N returns the items lots (Wave 39)', async () => {
+    // Seed a catalog item + a lot via the admin path.
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W39-LOT-RT', name: 'W39 lot route test item',
+    });
+    assert.equal(item.status, 201);
+    const { createLot } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-RT-1', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const { status, body } = await get(server, `/api/finance/lots?catalog_item_id=${item.body.id}`);
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.items));
+    assert.equal(body.items.length, 1);
+    assert.equal(body.items[0].id, lot.id);
+    assert.equal(body.items[0].code, 'LOT-RT-1');
+  });
+
+  test('39b. GET /api/finance/lots/:id returns a single lot (Wave 39)', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W39-LOT-SINGLE', name: 'W39 single lot',
+    });
+    const { createLot } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-SINGLE', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const { status, body } = await get(server, `/api/finance/lots/${lot.id}`);
+    assert.equal(status, 200);
+    assert.equal(body.id, lot.id);
+    assert.equal(body.code, 'LOT-SINGLE');
+  });
+
+  test('39c. GET /api/finance/lots/:id returns 404 for missing lot (no existence-oracle leak)', async () => {
+    const { status, body } = await get(server, '/api/finance/lots/999999');
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
+  test('39d. GET /api/finance/lots without catalog_item_id returns 400', async () => {
+    const { status, body } = await get(server, '/api/finance/lots');
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_request');
+    assert.match(body.message, /catalog_item_id/);
+  });
+
+  test('39e. GET /api/finance/serials?catalog_item_id=N returns the items serials (Wave 39)', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W39-SERIAL-RT', name: 'W39 serial route test item',
+    });
+    const { createSerial } = await import('./finance/lots.js');
+    const s1 = await createSerial(full.pgAdapter, {
+      serial_number: 'SN-RT-1', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const s2 = await createSerial(full.pgAdapter, {
+      serial_number: 'SN-RT-2', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const { status, body } = await get(server, `/api/finance/serials?catalog_item_id=${item.body.id}`);
+    assert.equal(status, 200);
+    assert.equal(body.items.length, 2);
+    const ids = body.items.map(s => s.id).sort();
+    assert.deepEqual(ids, [s1.id, s2.id].sort());
+  });
+
+  test('39f. GET /api/finance/items/:itemId/lots returns the same data as /api/finance/lots?catalog_item_id=N (route alias)', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W39-LOT-ALIAS', name: 'W39 lot alias test',
+    });
+    const { createLot } = await import('./finance/lots.js');
+    await createLot(full.pgAdapter, {
+      code: 'LOT-ALIAS', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const a = await get(server, `/api/finance/lots?catalog_item_id=${item.body.id}`);
+    const b = await get(server, `/api/finance/items/${item.body.id}/lots`);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    assert.equal(b.body.items.length, a.body.items.length);
   });
 
   // ─── Deferred item: per-permission endpoint guards ───
