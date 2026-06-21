@@ -60,17 +60,18 @@ async function getPackageVersion() {
 
 function toExpressRoute(url) {
   // Fastify's `:name(*)` wildcard syntax translates to Express's
-  // unnamed `*` wildcard syntax. The unnamed `*` works in BOTH
-  // Express 4 (path-to-regexp 0.1.13) AND Express 5 (path-to-regexp
-  // v8) — the named-wildcard `*name` syntax only works in path-to-
-  // regexp v6+. The captured value is at `req.params[0]` as a single
-  // string (Express's path-to-regexp doesn't split it into segments
-  // automatically — the route handlers just use it as-is).
+  // `*name` wildcard syntax. The named splat `*name` is accepted by
+  // path-to-regexp v6+ (Express 5 ships v8). The integration-gate
+  // verifier's commit (387b3ce) tried the unnamed `*` for cross-
+  // version compat, but path-to-regexp v8 actually REJECTS unnamed
+  // `*` (requires a name on the splat). So `*name` is the correct
+  // shape for our environment.
   //
-  // Path-to-regexp v8 explicitly REJECTS `:name(*)` with a PathError,
-  // and path-to-regexp 0.1.13 doesn't support `*name`. The unnamed
-  // `*` is the lowest-common-denominator that works across versions.
-  return String(url).replace(/\/:([A-Za-z_][A-Za-z0-9_]*)\(\*\)/g, '/*');
+  // The handler-side fallback to `req.params[0]` (added in 387b3ce)
+  // is still in place — it covers the case where path-to-regexp
+  // v0.x is loaded (older installs), which exposes the splat under
+  // `params[0]` instead of `params[name]`.
+  return String(url).replace(/\/:([A-Za-z_][A-Za-z0-9_]*)\(\*\)/g, '/*$1');
 }
 
 function normalizeRouteParams(params = {}) {
