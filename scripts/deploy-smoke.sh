@@ -412,6 +412,70 @@ DB_PATH="$DB" PORT="$PORT" node -e "
   fi
 echo
 
+echo "=== STEP 5c: GET route perm gate (HRSpecialist → 403 on /api/finance/invoices) ==="
+# Wave 27: every finance GET is now perm-gated. HRSpecialist's role
+# matrix has HROperator + DocsOperator + AIEnabled + StandardUser
+# but no FinanceOperator / CRMOperator / DeskOperator / etc. —
+# HRSpecialist holds no finance.* perm and should 403 on
+# /api/finance/invoices. Sanity-check: the admin still gets 200
+# (Admin inherits FinanceOperator via the role matrix).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const { login, hashPassword } = require('$REPO_ROOT/server/auth-login.js');
+  const http = require('node:http');
+  const db = new DatabaseSync(process.env.DB_PATH);
+
+  const { hash, salt } = hashPassword('hr-pass');
+  db.prepare(\`INSERT OR REPLACE INTO users
+    (id, username, email, role, tenant_id, password_hash, password_salt)
+    VALUES (3, 'hruser', 'hr@example.com', 'HRSpecialist', 0, ?, ?)\`)
+    .run(hash, salt);
+
+  const session = login(db, 'hruser', 'hr-pass');
+  if (session.error) {
+    console.log('  FAIL hr login:', session.error);
+    process.exit(1);
+  }
+  const hrToken = session.token;
+
+  function call(method, path, token) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: token ? { 'authorization': 'Bearer ' + token } : {},
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.end();
+    });
+  }
+  (async () => {
+    // 1) HRSpecialist → 403 on /api/finance/invoices
+    const hr = await call('GET', '/api/finance/invoices?limit=5', hrToken);
+    if (hr.status !== 403) {
+      console.log('  FAIL hr audit: expected 403, got', hr.status, hr.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 403 GET /api/finance/invoices (HRSpecialist, no finance.invoice.read)');
+    // 2) Admin → 200 on the same endpoint (sanity: Admin still has the perm)
+    const adm = await call('GET', '/api/finance/invoices?limit=5', process.env.ADMIN_TOKEN);
+    if (adm.status !== 200) {
+      console.log('  FAIL admin sanity: expected 200, got', adm.status, adm.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/invoices (admin sanity)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  GET perm gate OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

@@ -509,6 +509,12 @@ const PERMISSIONS = Object.freeze({
     label: 'Edit customer',
     description: 'Edit a customer record (name, HVVH, address, email).',
   },
+  'finance.customer.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'View customers',
+    description: 'List / read finance customer records.',
+  },
   'finance.product.read': {
     category: 'finance',
     sensitivity: 'low',
@@ -1653,6 +1659,12 @@ const PERMISSIONS = Object.freeze({
     sensitivity: 'low',
     label: 'Reply to case',
     description: 'Reply to a service case.',
+  },
+  'desk.reply.read': {
+    category: 'desk',
+    sensitivity: 'low',
+    label: 'View case replies',
+    description: 'List / read service case replies.',
   },
   'desk.knowledge.read': {
     category: 'desk',

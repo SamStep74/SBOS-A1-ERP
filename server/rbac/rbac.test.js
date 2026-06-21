@@ -856,6 +856,66 @@ describe('requirePerm (pure function)', () => {
     assert.equal(ctx.outcome.allowed, true);
   });
 
+  test('returns false for a PayrollClerk on finance.customer.read (Wave 27 GET-route hardening)', () => {
+    // PayrollClerk's role matrix has FinanceOperator (which gives
+    // finance.invoice.read / finance.journal.read / etc.) but NOT
+    // CRMOperator (which holds finance.customer.read after this
+    // wave). A PayrollClerk should 403 on /api/finance/customers.
+    const u = {
+      id: 5,
+      role: 'PayrollClerk',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('finance.customer.read', ctx), false);
+    assert.equal(ctx.outcome.reason, 'no_permission');
+    assert.equal(ctx.outcome.permissionKey, 'finance.customer.read');
+  });
+
+  test('returns true for an Admin on finance.customer.read (Admin inherits via CRMOperator)', () => {
+    const u = {
+      id: 1,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('finance.customer.read', ctx), true);
+    assert.equal(ctx.outcome.allowed, true);
+  });
+
+  test('returns false for a SalesRep on desk.reply.read (Wave 27 GET-route hardening)', () => {
+    // desk.reply.read is bound to the DeskOperator perm set, which
+    // only Desk / Service roles hold. SalesRep doesn't.
+    const u = {
+      id: 6,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('desk.reply.read', ctx), false);
+    assert.equal(ctx.outcome.reason, 'no_permission');
+    assert.equal(ctx.outcome.permissionKey, 'desk.reply.read');
+  });
+
+  test('returns true for an Admin on desk.reply.read (Admin inherits via DeskOperator)', () => {
+    const u = {
+      id: 1,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
+    const ctx = { user: u };
+    assert.equal(requirePerm('desk.reply.read', ctx), true);
+    assert.equal(ctx.outcome.allowed, true);
+  });
+
   test('returns false + mfa_required when perm requires MFA but session unverified', () => {
     const u = {
       id: 3,

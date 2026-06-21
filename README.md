@@ -222,6 +222,53 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     every request to a stub Admin).
   - 1161/1161 tests pass (was 1159; +2). Smoke 68 endpoints
     + 1 new 403 check. `npm run check` clean, boundary 0.
+- **Wave 27 (Finance GETs — systematic perm audit)** — DONE.
+  - A pre-wave grep audit found that **33 of 34 finance GET
+    routes** had no perm gate. Every POST + PATCH was gated;
+    the GETs were all perm-less. For a multi-tenant finance
+    system that's a real security gap (any authenticated user
+    could read all invoices, all customers, all journal
+    entries, the full trial balance, etc.).
+  - Fix:
+    1. Added `requirePerm('<perm>.read')` middleware to all
+       33 GETs in `server/finance/routes.js`. Most map to an
+       existing perm (`finance.invoice.read`,
+       `finance.journal.read`, `crm.lead.read`,
+       `desk.case.read`, `projects.project.read`, etc.).
+    2. Added 2 missing read perms to the catalog:
+       `finance.customer.read` (bound to CRMOperator, which
+       already had `finance.customer.{create,update}`) and
+       `desk.reply.read` (bound to DeskOperator, which already
+       had `desk.reply.create`).
+    3. The dashboard endpoint uses `reports.dashboard.read`,
+       which is already in the catalog and bound to multiple
+       perm sets.
+  - The routes still use `readTenant(req)` (silent fallback
+    to 0) — switching to `requireTenant` middleware is a
+    related but separate concern. The 33 perm gates are the
+    primary hardening; the tenant middleware is a follow-up
+    (a few hundred lines of route refactor, ~1 wave).
+  - 4 new unit tests in `server/rbac/rbac.test.js`:
+    - PayrollClerk (has FinanceOperator, no CRMOperator) gets
+      `no_permission` for `finance.customer.read`.
+    - Admin gets `allowed` for `finance.customer.read`.
+    - SalesRep (no DeskOperator) gets `no_permission` for
+      `desk.reply.read`.
+    - Admin gets `allowed` for `desk.reply.read`.
+  - 1 new deploy smoke step (STEP 5c): seeds an HRSpecialist
+    user (no FinanceOperator, no CRMOperator, no DeskOperator
+    — pure HR role), mints a session, hits
+    `/api/finance/invoices`, asserts 403. Sanity: admin hits
+    the same endpoint, asserts 200. HRSpecialist is a good
+    test role because it has `HROperator + DocsOperator +
+    AIEnabled + StandardUser` but zero finance / customer /
+    desk / project perms.
+  - RBAC catalog grew from 435 to 437 perms (the 2 new
+    `*.read` keys).
+  - 1190/1190 tests pass (was 1161; +4 rbac + the +25 from
+    the catalog v2 wave 1 commit that landed on origin in
+    parallel). Smoke 68 endpoints + 2 new 403 checks (5b
+    audit + 5c GET). `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
