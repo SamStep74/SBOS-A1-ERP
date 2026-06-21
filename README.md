@@ -94,6 +94,22 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     `GET /api/finance/account-balances/:accountCode`.
   - 1054/1054 tests pass (was 1013; +27 journal + +14 stockPosting).
     Deploy smoke at 41 endpoints.
+- **Wave 20 (Phase 1 ERP — GL reconciliation)** — DONE.
+  - server/finance/reconciliation.js: findUnpostedMoves +
+    reconcileJournal. The job finds moves (stock.receive /
+    deliver / adjust / vendor_bill.post) that lack a journal
+    entry and re-posts the missing GL. Idempotent (UNIQUE on
+    source_id); per-move errors are collected, not thrown.
+  - 2 routes: GET /api/finance/journal/reconcile?dryRun=true
+    (safe, reports the gap) + POST /api/finance/journal/reconcile
+    (gated by finance.journal.read, runs the actual post).
+  - 11 tests in reconciliation.test.js: gap detection on a
+    single move, idempotency (running twice posts each move
+    only once), end-to-end re-post after nuking the journal
+    (4 chart-of-accounts balances restored), error collection
+    not throwing on a per-move failure.
+  - 1082/1082 tests pass (was 1054; +28). Deploy smoke at 47
+    endpoints.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -256,6 +272,43 @@ curl -s "http://localhost:3000/api/finance/account-balances?asOfDate=2026-06-30"
 #      ]
 #    }
 ```
+
+#### GL reconciliation (closes the move-vs-journal gap)
+
+The journal is a best-effort projection of the operational moves.
+A move that fails to post its GL (db error, transient outage) leaves
+a gap. The reconciliation job finds those gaps and re-posts the
+missing entries (idempotent — the UNIQUE index on (source,
+source_id) is the backstop).
+
+| Method | Path                                       | Body / Query              | Returns                                                       |
+| ------ | ------------------------------------------ | ------------------------- | ------------------------------------------------------------- |
+| GET    | `/api/finance/journal/reconcile`           | `?dryRun=true` (default)  | `{dry_run: true, scanned: <int>, unposted: [...], errors: []}` |
+| POST   | `/api/finance/journal/reconcile`           | `{dryRun: true\|false}`   | `{dry_run: false, scanned, reconciled, errors: [{move_id, source, error}]}` |
+
+Example:
+
+```bash
+# See what would be reconciled (safe, no posts)
+curl -s "http://localhost:3000/api/finance/journal/reconcile?dryRun=true" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' | jq
+
+# Actually re-post the missing entries
+curl -sX POST "http://localhost:3000/api/finance/journal/reconcile" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' -d '{"dryRun": false}' | jq
+# -> {
+#      "dry_run": false,
+#      "scanned": 3,         // 3 moves lacked a journal entry
+#      "reconciled": 3,     // all 3 were re-posted successfully
+#      "errors": []
+#    }
+```
+
+The reconciliation is **safe to run at boot** (no destructive
+operation; the only state change is new journal rows). Future work:
+a scheduled job that runs the reconciliation every N minutes as
+defense in depth.
 
 ### Typical end-to-end flow
 

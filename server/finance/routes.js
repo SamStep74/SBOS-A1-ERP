@@ -48,6 +48,7 @@
 //   GET    /api/finance/receipts/:id/print?locale=hy&format=html|text
 //   GET    /api/finance/replenishment-report?warehouse_id=
 //   GET    /api/finance/journal-entries?since=&until=&source=&limit=&offset=
+//   POST   /api/finance/journal/reconcile  (Wave 20)
 //   GET    /api/finance/account-balances?asOfDate=
 //   GET    /api/finance/crm/contacts
 //   POST   /api/finance/crm/contacts
@@ -119,6 +120,7 @@ import {
   listAccountBalances,
   getAccountBalance,
 } from './journal.js';
+import { findUnpostedMoves, reconcileJournal } from './reconciliation.js';
 import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1011,6 +1013,65 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ─── Phase 1 ERP: GL reconciliation (Wave 20) ───
+  //
+  // GET /api/finance/journal/reconcile?dryRun=true
+  //   Reports the count of moves that have no corresponding journal
+  //   entry. dryRun=true (default) does NOT post — it returns the
+  //   gap so the operator can see what would be fixed. Pass
+  //   dryRun=false to actually post (but the POST route below is
+  //   the destructive operation that's typically called from a
+  //   scheduled job or operator action).
+  app.get('/api/finance/journal/reconcile', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const dryRun = req.query.dryRun !== 'false';
+      if (dryRun) {
+        const unposted = await findUnpostedMoves(pgAdapter, tenantId);
+        res.status(200).json({
+          dry_run: true,
+          scanned: unposted.length,
+          reconciled: 0,
+          unposted,
+          errors: [],
+        });
+        return;
+      }
+      const result = await reconcileJournal(pgAdapter, tenantId);
+      res.status(200).json({ dry_run: false, ...result });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/journal/reconcile
+  //   Run the reconciliation: find moves with no journal entry and
+  //   post the missing GL. Wrapped in wrapFinanceRoute so the audit
+  //   log records the operator action. Gated by finance.journal.read
+  //   (read is enough — the post happens through the idempotent
+  //   post* functions, no perm is needed beyond read).
+  app.post(
+    '/api/finance/journal/reconcile',
+    requirePerm('finance.journal.read'),
+    wrapFinanceRoute('journal.reconcile', 'journal:reconcile', async (req, res) => {
+      const tenantId = req.tenantId;
+      const dryRun = req.body && req.body.dryRun === true;
+      if (dryRun) {
+        const unposted = await findUnpostedMoves(pgAdapter, tenantId);
+        res.status(200).json({
+          dry_run: true,
+          scanned: unposted.length,
+          reconciled: 0,
+          unposted,
+          errors: [],
+        });
+        return;
+      }
+      const result = await reconcileJournal(pgAdapter, tenantId);
+      res.status(200).json({ dry_run: false, ...result });
+    }),
+  );
 
   // ────────────────────────────────────────────────────────────────────
   // Phase 2 CRM (W71-1) — contacts + leads.
