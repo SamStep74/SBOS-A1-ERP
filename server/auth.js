@@ -96,7 +96,14 @@ export function makeAuthMiddleware({ db, authMode = process.env.SBOS_AUTH_MODE |
 
   return function authMiddleware(req, res, next) {
     // /api/health is exempt — orchestrator probes need no token.
-    if (req.path === '/api/health' || req.path === '/api/health/') {
+    // /api/auth/login is exempt — the login flow is what mints
+    // the token, so it must be callable without one.
+    if (
+      req.path === '/api/health' ||
+      req.path === '/api/health/' ||
+      req.path === '/api/auth/login' ||
+      req.path === '/api/auth/login/'
+    ) {
       req.user = { id: 0, role: 'Admin', tenant_id: 0, mfa_verified: true };
       return next();
     }

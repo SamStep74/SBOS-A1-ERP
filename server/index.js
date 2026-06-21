@@ -35,6 +35,7 @@ import { registerRbacRoutes } from './rbac/routes.js';
 import { registerFinanceRoutes } from './finance/routes.js';
 import { renderDashboard } from './finance/dashboard.js';
 import { makeAuthMiddleware } from './auth.js';
+import { login as authLogin } from './auth-login.js';
 
 // Version reported by /api/health. Pulled from package.json lazily so
 // the value tracks the actual installed version without a hardcode.
@@ -260,6 +261,16 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
   }
   const app = express();
 
+  // Stash the raw sqlite db on app.locals so the finance routes
+  // (and the audit + auth-login modules) can reach it for write
+  // operations that need a synchronous sqlite handle (audit row,
+  // session row insert, failed-login counter). The pg adapter
+  // (`opts.pgAdapter`) is the right interface for the pure
+  // functions; this raw handle is for in-house infrastructure
+  // writes that the pure functions don't own.
+  app.locals.db = db;
+  app.locals.pgAdapter = pgAdapter;
+
   // Body parser — 1mb cap matches the spec.
   app.use(express.json({ limit: '1mb' }));
 
@@ -304,6 +315,42 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
   app.get('/api/health', async (_req, res) => {
     const version = await getPackageVersion();
     res.status(200).json({ ok: true, version });
+  });
+
+  // POST /api/auth/login — public (no Bearer required). Verifies
+  // username + password against the users table, applies the
+  // failed-login lockout policy, and on success mints a session
+  // row in sbos_rbac_sessions (same scheme as the boot-minted
+  // admin token). The response shape matches what the existing
+  // Bearer middleware expects, so the client can swap the boot
+  // token for a login token without changing any other code.
+  app.post('/api/auth/login', express.json({ limit: '1mb' }), (req, res) => {
+    const { username, password } = req.body || {};
+    const result = authLogin(db, username, password);
+    if (result.error) {
+      const code = result.status === 423 ? 423 : result.status === 400 ? 400 : 401;
+      return res.status(code).json({ error: code === 423 ? 'locked' : 'unauthorized', message: result.error });
+    }
+    res.status(200).json({
+      token: result.token,
+      expires_at: result.expiresAt,
+      user: result.user,
+    });
+  });
+
+  // POST /api/auth/logout — revoke the current session. Best-effort:
+  // if the token is unknown or already revoked, we still return 200
+  // (the goal is to make the token unusable, which is already true
+  // for an unknown/revoked token).
+  app.post('/api/auth/logout', makeAuthMiddlewareForApp({ db }), (req, res) => {
+    if (req.session && req.session.id) {
+      try {
+        db.prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(req.session.id);
+      } catch (_e) {
+        // best-effort
+      }
+    }
+    res.status(200).json({ ok: true });
   });
 
   // Generic 404.

@@ -67,17 +67,36 @@ async function applySchemas(sqliteDb) {
       tenant_id INTEGER NOT NULL DEFAULT 0,
       org_id INTEGER,
       mfa_required INTEGER NOT NULL DEFAULT 0,
-      mfa_verified INTEGER NOT NULL DEFAULT 0
+      mfa_verified INTEGER NOT NULL DEFAULT 0,
+      password_hash TEXT,
+      password_salt TEXT,
+      failed_logins INTEGER NOT NULL DEFAULT 0,
+      locked_until TEXT
     );
   `);
-  // Seed the stub admin user when missing.
+  // Seed the stub admin user when missing. Set a random initial
+  // password so the operator must read it from the token file (or
+  // the auth-token-file-derived log) and use POST /api/auth/login
+  // to mint a session. The env var SBOS_ADMIN_PASSWORD overrides.
   const existing = sqliteDb.prepare('SELECT id FROM users WHERE id = 1').get();
   if (!existing) {
+    const { randomBytes, scryptSync } = await import('node:crypto');
+    const adminPassword =
+      process.env.SBOS_ADMIN_PASSWORD || randomBytes(18).toString('base64url');
+    const salt = randomBytes(16).toString('base64url');
+    const hash = scryptSync(adminPassword, salt, 64).toString('base64url');
     sqliteDb
       .prepare(
-        'INSERT INTO users (id, username, email, role, tenant_id, org_id) VALUES (?, ?, ?, ?, ?, ?)',
+        `INSERT INTO users (id, username, email, role, tenant_id, org_id, password_hash, password_salt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(1, 'admin', 'admin@example.com', 'Admin', 0, null);
+      .run(1, 'admin', 'admin@example.com', 'Admin', 0, null, hash, salt);
+    if (!process.env.SBOS_ADMIN_PASSWORD) {
+      const bootPort = process.env.PORT || 3000;
+      const bootHost = process.env.HOST || '127.0.0.1';
+      console.warn(`[sbos-server] admin password (random): ${adminPassword}`);
+      console.warn(`[sbos-server] login at: curl -X POST http://${bootHost}:${bootPort}/api/auth/login -H 'content-type: application/json' -d '{"username":"admin","password":"<this>"}'`);
+    }
   }
 
   // RBAC schema. The canonical schema has a redundant composite PK on

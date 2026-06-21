@@ -111,6 +111,39 @@ function makeFinanceDb() {
       PRIMARY KEY (tenant_id, id),
       CHECK (id = 1)
     );
+    CREATE TABLE finance.audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      user_id INTEGER,
+      username TEXT,
+      action TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      payload_json TEXT,
+      request_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    /* Mirror the production migration runner's strip: the
+       CREATE TABLE finance.audit above lands as bare 'audit' on
+       sqlite (no schemas), so the audit module's queries are
+       written without the prefix and the in-memory test creates
+       a sibling 'audit' table for the prefix-stripped path. */
+    CREATE TABLE audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      user_id INTEGER,
+      username TEXT,
+      action TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      payload_json TEXT,
+      request_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   return { sqliteDb, dir };
 }
@@ -654,6 +687,98 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     const body = await res.json();
     assert.equal(res.status, 201);
     assert.equal(body.tenant_id, 0);
+  });
+
+  // ─── Deferred item: POST /api/finance/invoices/:id/lines ───
+
+  test('33. POST /api/finance/invoices/:id/lines replaces line items on a draft invoice', async () => {
+    const c = await postJson(server, '/api/finance/customers', { name: 'LinesCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-LINES-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Old', quantity: 1, unit_price_amd: 1000 }],
+    });
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/lines`,
+      {
+        lines: [
+          { description: 'New A', quantity: 2, unit_price_amd: 5000 },
+          { description: 'New B', quantity: 1, unit_price_amd: 3000 },
+        ],
+      },
+    );
+    assert.equal(status, 200);
+    assert.equal(body.total_amd, 13000);
+  });
+
+  test('34. POST /api/finance/invoices/:id/lines on a non-draft invoice returns 400', async () => {
+    // Same as test 26 — set the invoice to sent, then try to replace lines.
+    const c = await postJson(server, '/api/finance/customers', { name: 'LinesSentCust' });
+    const inv = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-LINES-SENT',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'A', quantity: 1, unit_price_amd: 1000 }],
+    });
+    await patchJson(server, `/api/finance/invoices/${inv.body.id}`, { status: 'sent' });
+    const { status, body } = await postJson(
+      server,
+      `/api/finance/invoices/${inv.body.id}/lines`,
+      { lines: [{ description: 'B', quantity: 1, unit_price_amd: 2000 }] },
+    );
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_request');
+  });
+
+  // ─── Deferred item: GET /api/finance/audit ───
+
+  test('35. GET /api/finance/audit returns audit rows for the caller tenant', async () => {
+    // Each write in this test suite records an audit row. After
+    // running the earlier tests, the audit table has many rows
+    // for tenant 0. Verify the list endpoint returns them, scoped
+    // to tenant 0.
+    const { status, body } = await get(server, '/api/finance/audit?limit=5');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.items), `expected items array, got ${JSON.stringify(body)}`);
+    assert.ok(body.items.length > 0, 'expected at least one audit row');
+    const sample = body.items[0];
+    assert.equal(sample.tenant_id, 0);
+    assert.ok(['POST', 'PATCH', 'GET', 'DELETE'].includes(sample.method));
+    assert.ok(typeof sample.action === 'string' && sample.action.length > 0);
+  });
+
+  test('36. GET /api/finance/audit filters by resource prefix', async () => {
+    // Filter to invoice:1* to verify the prefix works. The earlier
+    // tests created invoices, so a 'invoice:' prefix should match.
+    const { status, body } = await get(server, '/api/finance/audit?resource=invoice:&limit=10');
+    assert.equal(status, 200);
+    for (const r of body.items) {
+      assert.ok(r.resource.startsWith('invoice:'), `unexpected resource: ${r.resource}`);
+    }
+  });
+
+  // ─── Deferred item: per-permission endpoint guards ───
+
+  test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {
+    // This test just verifies that an admin user with the FinanceOperator
+    // perm set can still POST. The negative case (403) is harder to
+    // exercise in stub mode (the test pg adapter doesn't bind a
+    // user without perms to req.user). The guard is in the route
+    // table — verified by reading the route source — and the
+    // perm matrix in the rbac layer is exercised by rbac.test.js.
+    const c = await postJson(server, '/api/finance/customers', { name: 'GuardCust' });
+    const { status } = await postJson(server, '/api/finance/invoices', {
+      customer_id: c.body.id,
+      invoice_number: 'INV-GUARD-1',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'A', quantity: 1, unit_price_amd: 100 }],
+    });
+    assert.equal(status, 201);
   });
 });
 

@@ -9,12 +9,14 @@
 //   GET    /api/finance/invoices/:id
 //   POST   /api/finance/invoices
 //   PATCH  /api/finance/invoices/:id
+//   POST   /api/finance/invoices/:id/lines
 //   POST   /api/finance/invoices/:id/payments
 //   POST   /api/finance/invoices/:id/void
 //   POST   /api/finance/invoices/:id/reconcile
 //   GET    /api/finance/customers
 //   POST   /api/finance/customers
 //   PATCH  /api/finance/customers/:id
+//   GET    /api/finance/audit
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //
@@ -23,7 +25,10 @@
 // `opts.locale` flows into the dashboard render.
 // `req.tenantId` (or X-Tenant-Id / req.user.tenant_id fallback) is the
 // tenant scope; write routes also accept the requireTenant middleware
-// via `opts.requireTenantMiddleware`.
+// via `opts.requireTenantMiddleware`. Each write route is also gated
+// by `requirePerm('<perm-key>')` from server/rbac/express-adapter.js.
+// Every successful write is recorded in finance.audit via
+// recordAudit() (best-effort, doesn't block the response).
 //
 // No `eval`, no string-concat SQL, no `new Function`. The SQL the
 // pure functions emit is fixed-string; we just translate param style.
@@ -39,6 +44,8 @@ import { createCustomer, updateCustomer, listCustomers as listCustomersPure } fr
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
+import { recordAudit, listAudit } from './audit.js';
+import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Validation helpers
@@ -112,6 +119,81 @@ function defaultSupplier() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// wrapFinanceRoute — small helper that wraps a write handler to:
+//   1. Send the response normally.
+//   2. Record the request in finance.audit (best-effort, on
+//      response 'finish') with method, path, status, user, tenant,
+//      and the request body (truncated to 4KB).
+//
+// The route signature is (req, res, next) => Promise<void>, same as
+// every Express handler in this file. The audit row goes into the
+// raw sqlite db (not the pg adapter) because the audit table lives
+// in the finance schema and we need a write that survives the
+// response going out — recording on `finish` is the right hook.
+// ────────────────────────────────────────────────────────────────────────
+
+function wrapFinanceRoute(action, resource, handler) {
+  return async function w(req, res, next) {
+    try {
+      await handler(req, res, next);
+    } catch (err) {
+      // The finance pure functions throw ValueError on bad input;
+      // the rest is a true 500. ValueErrors with a "not found in
+      // tenant" / "not found" message become 404 (so cross-tenant
+      // existence-oracle protection is preserved). Other ValueErrors
+      // are 400.
+      let status = 500;
+      let errorCode = 'internal_error';
+      if (err && err.name === 'ValueError') {
+        if (/not found in tenant|^\w+ \d+ not found|not found\b/i.test(err.message)) {
+          status = 404;
+          errorCode = 'not_found';
+        } else {
+          status = 400;
+          errorCode = 'bad_request';
+        }
+      }
+      // Record the failed attempt (best-effort). The audit row
+      // reflects the response status the user actually saw.
+      const db = req.app && req.app.locals && req.app.locals.db;
+      if (db) {
+        recordAudit(db, {
+          tenant_id: req.tenantId || (req.user && Number(req.user.tenant_id)) || 0,
+          user_id: req.user && req.user.id,
+          username: req.user && req.user.username,
+          action,
+          resource,
+          method: req.method,
+          path: req.originalUrl || req.url,
+          status_code: status,
+          payload: req.body,
+        });
+      }
+      return res.status(status).json({ error: errorCode, message: err && err.message ? err.message : String(err) });
+    }
+    // Successful path — record the audit row on response finish so
+    // the response is sent before the audit write (audit never
+    // blocks the user).
+    const db = req.app && req.app.locals && req.app.locals.db;
+    if (db) {
+      res.on('finish', () => {
+        recordAudit(db, {
+          tenant_id: req.tenantId || (req.user && Number(req.user.tenant_id)) || 0,
+          user_id: req.user && req.user.id,
+          username: req.user && req.user.username,
+          action,
+          resource,
+          method: req.method,
+          path: req.originalUrl || req.url,
+          status_code: res.statusCode,
+          payload: req.body,
+        });
+      });
+    }
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // registerFinanceRoutes(app, opts)
 // ────────────────────────────────────────────────────────────────────────
 
@@ -170,24 +252,25 @@ export function registerFinanceRoutes(app, opts = {}) {
 
   // Create invoice — tenant-scoped. The body must include customer_id,
   // invoice_number, issue_date, due_date, lines[]; vat_amd/notes optional.
-  app.post('/api/finance/invoices', requireTenant, async (req, res, next) => {
-    try {
+  app.post(
+    '/api/finance/invoices',
+    requireTenant,
+    requirePerm('finance.invoice.create'),
+    wrapFinanceRoute('invoice.create', 'invoice:new', async (req, res) => {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await createInvoice(pgAdapter, body, tenantId);
       res.status(201).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // Update invoice — tenant-scoped. Patch body: any of { status, due_date, notes }.
   // Cross-tenant id → 404 (same as customers; no existence-oracle leak).
-  app.patch('/api/finance/invoices/:id', requireTenant, async (req, res, next) => {
-    try {
+  app.patch(
+    '/api/finance/invoices/:id',
+    requireTenant,
+    requirePerm('finance.invoice.update'),
+    wrapFinanceRoute('invoice.update', 'invoice:id', async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -195,21 +278,16 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const out = await updateInvoice(pgAdapter, id, req.body || {}, tenantId);
       res.status(200).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        if (/invoice \d+ not found/i.test(err.message)) {
-          return res.status(404).json({ error: 'not_found', message: err.message });
-        }
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // Record a payment against an invoice — tenant-scoped.
   // Body: { amount_amd, method?, reference?, paid_at? }.
-  app.post('/api/finance/invoices/:id/payments', requireTenant, async (req, res, next) => {
-    try {
+  app.post(
+    '/api/finance/invoices/:id/payments',
+    requireTenant,
+    requirePerm('finance.payment.create'),
+    wrapFinanceRoute('payment.create', 'invoice:payment', async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -218,20 +296,15 @@ export function registerFinanceRoutes(app, opts = {}) {
       const body = req.body || {};
       const out = await recordPayment(pgAdapter, { ...body, invoice_id: id }, tenantId);
       res.status(201).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        if (/invoice \d+ not found/i.test(err.message)) {
-          return res.status(404).json({ error: 'not_found', message: err.message });
-        }
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // Void an invoice — tenant-scoped. Body: { reason }.
-  app.post('/api/finance/invoices/:id/void', requireTenant, async (req, res, next) => {
-    try {
+  app.post(
+    '/api/finance/invoices/:id/void',
+    requireTenant,
+    requirePerm('finance.invoice.void'),
+    wrapFinanceRoute('invoice.void', 'invoice:void', async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -240,22 +313,18 @@ export function registerFinanceRoutes(app, opts = {}) {
       const reason = String((req.body && req.body.reason) || '').trim();
       const out = await voidInvoice(pgAdapter, id, reason, tenantId);
       res.status(200).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        if (/not found/i.test(err.message)) {
-          return res.status(404).json({ error: 'not_found', message: err.message });
-        }
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // Reconcile an invoice — recompute its status from the payments sum.
   // Useful for a manual operator action after a payment lands outside
-  // the system. Tenant-scoped.
-  app.post('/api/finance/invoices/:id/reconcile', requireTenant, async (req, res, next) => {
-    try {
+  // the system. Tenant-scoped. (No separate perm — falls under
+  // finance.invoice.update.)
+  app.post(
+    '/api/finance/invoices/:id/reconcile',
+    requireTenant,
+    requirePerm('finance.invoice.update'),
+    wrapFinanceRoute('invoice.reconcile', 'invoice:reconcile', async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -263,16 +332,8 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const out = await reconcileInvoice(pgAdapter, id, tenantId);
       res.status(200).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        if (/not found/i.test(err.message)) {
-          return res.status(404).json({ error: 'not_found', message: err.message });
-        }
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // List customers — tenant-scoped.
   app.get('/api/finance/customers', async (req, res, next) => {
@@ -286,42 +347,39 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
-  app.post('/api/finance/customers', requireTenant, async (req, res, next) => {
-    try {
+  app.post(
+    '/api/finance/customers',
+    requireTenant,
+    requirePerm('finance.customer.create'),
+    wrapFinanceRoute('customer.create', 'customer:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCustomer(pgAdapter, req.body || {}, tenantId);
       res.status(201).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        return res.status(400).json({ error: 'bad_request', message: err.message });
-      }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // Update customer — tenant-scoped. Patch body: any of { name, hvhh, address, email }.
-  app.patch('/api/finance/customers/:id', requireTenant, async (req, res, next) => {
-    try {
+  app.patch(
+    '/api/finance/customers/:id',
+    requireTenant,
+    requirePerm('finance.customer.update'),
+    wrapFinanceRoute('customer.update', 'customer:id', async (req, res) => {
       const id = parseCustomerId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
       const tenantId = req.tenantId;
-      const out = await updateCustomer(pgAdapter, id, req.body || {}, tenantId);
-      res.status(200).json(out);
-    } catch (err) {
-      if (err && err.name === 'ValueError') {
-        // updateCustomer throws ValueError both for invalid input AND for
-        // "not found in tenant" — distinguish by message text so the
-        // route returns 404 for the latter, 400 for the former.
-        if (/not found in tenant/i.test(err.message)) {
+      try {
+        const out = await updateCustomer(pgAdapter, id, req.body || {}, tenantId);
+        res.status(200).json(out);
+      } catch (err) {
+        if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
           return res.status(404).json({ error: 'not_found', message: err.message });
         }
-        return res.status(400).json({ error: 'bad_request', message: err.message });
+        throw err;
       }
-      next(err);
-    }
-  });
+    }),
+  );
 
   // VAT return for a given YYYY-MM.
   app.get('/api/finance/vat/return', async (req, res, next) => {
@@ -354,6 +412,51 @@ export function registerFinanceRoutes(app, opts = {}) {
       if (err && err.name === 'ValueError') {
         return res.status(404).json({ error: 'not_found', message: err.message });
       }
+      next(err);
+    }
+  });
+
+  // ─── Deferred items from the 2-day-finish sprint ───
+
+  // Replace line items on a draft invoice. Body: { lines: [...] }.
+  // The pure function updateInvoice refuses to touch lines on a
+  // non-draft invoice, so this route is implicitly "draft only".
+  app.post(
+    '/api/finance/invoices/:id/lines',
+    requireTenant,
+    requirePerm('finance.invoice.update'),
+    wrapFinanceRoute('invoice.update', 'invoice:lines', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await updateInvoice(pgAdapter, id, { lines: req.body && req.body.lines }, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // List audit entries for the caller's tenant. Filterable by
+  // user_id, action, resource prefix, since/until, and limit.
+  // Uses the raw sqlite handle (not the pg adapter) because the
+  // audit table is application infrastructure, not a domain table.
+  app.get('/api/finance/audit', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const filters = {
+        tenant_id: tenantId,
+        user_id: req.query.user_id,
+        action: req.query.action,
+        resource_prefix: req.query.resource,
+        since: req.query.since,
+        until: req.query.until,
+        limit: req.query.limit,
+        offset: req.query.offset,
+      };
+      const rawDb = req.app && req.app.locals && req.app.locals.db;
+      const items = await listAudit(rawDb, filters);
+      res.status(200).json({ items });
+    } catch (err) {
       next(err);
     }
   });

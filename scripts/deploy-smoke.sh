@@ -100,6 +100,8 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/customers', body: { name: 'SmokeCustomer', hvhh: '99887766' }, expect: 201, name: 'POST /api/finance/customers (returns id > 0)' },
   { method: 'PATCH', path: '/api/finance/customers/1', body: { name: 'SmokeRenamed' }, expect: 200, name: 'PATCH /api/finance/customers/1' },
   { method: 'POST', path: '/api/finance/invoices', body: { customer_id: 1, invoice_number: 'INV-SMOKE-1', issue_date: '2026-06-21', due_date: '2026-07-21', lines: [{ description: 'X', quantity: 1, unit_price_amd: 1000 }] }, expect: 201, name: 'POST /api/finance/invoices (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/invoices/1/lines', body: { lines: [{ description: 'Replaced', quantity: 1, unit_price_amd: 2000 }] }, expect: 200, name: 'POST /api/finance/invoices/1/lines (replace on draft)' },
+  { method: 'GET',  path: '/api/finance/audit?limit=5', expect: 200, name: 'GET /api/finance/audit (returns rows from the writes above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
@@ -180,7 +182,53 @@ process.exit(0);
 DB_RC=$?
 echo
 
-echo "=== STEP 5: Graceful shutdown ==="
+echo "=== STEP 5: Auth login (POST /api/auth/login with the seeded password) ==="
+# The server prints the random admin password to stdout on first
+# boot. Login with it to verify the scrypt hash + session-mint
+# path works end-to-end. This catches the wave-15 class of bugs
+# (the deploy token file is fine but the login flow is broken).
+# Done BEFORE step 6 (graceful shutdown) so the server is still up.
+LOGIN_PASSWORD=$(grep -oE "admin password \(random\): [^ ]+" "$LOG" | head -1 | awk '{print $NF}')
+if [ -z "$LOGIN_PASSWORD" ]; then
+  echo "  FAIL: server did not print a random admin password"
+  SMOKE_RC=1
+else
+  LOGIN_PASSWORD="$LOGIN_PASSWORD" node -e "
+  const http = require('node:http');
+  const PORT = $PORT;
+  const PASSWORD = process.env.LOGIN_PASSWORD;
+  const req = http.request({
+    host: '127.0.0.1', port: PORT, path: '/api/auth/login', method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  }, (res) => {
+    let body = '';
+    res.on('data', d => body += d);
+    res.on('end', () => {
+      if (res.statusCode === 200) {
+        try {
+          const parsed = JSON.parse(body);
+          if (typeof parsed.token === 'string' && parsed.token.length > 0) {
+            console.log('  PASS 200 POST /api/auth/login (returns a session token)');
+            process.exit(0);
+          }
+        } catch {}
+      }
+      console.log('  FAIL', res.statusCode, body.slice(0, 200));
+      process.exit(1);
+    });
+  });
+  req.write(JSON.stringify({ username: 'admin', password: PASSWORD }));
+  req.end();
+  "
+  if [ $? = 0 ]; then
+    echo "  login OK"
+  else
+    SMOKE_RC=1
+  fi
+fi
+echo
+
+echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
 for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -216,7 +264,6 @@ kill -9 $SERVER_PID 2>/dev/null
 
 echo
 echo "=== STEP 7: Summary ==="
-if [ "$SMOKE_RC" = "0" ] && [ "$DB_RC" = "0" ]; then
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
   echo "  - DB schema correct: 18 expected tables present"
@@ -224,6 +271,7 @@ if [ "$SMOKE_RC" = "0" ] && [ "$DB_RC" = "0" ]; then
   echo "  - RBAC seed populated on fresh boot"
   echo "  - vat_carry_forward PK is composite"
   echo "  - Admin user linked to Admin rbac role"
+  echo "  - POST /api/auth/login returns a session token"
   echo "  - Graceful shutdown works (SIGTERM)"
   echo "  - Restart is idempotent"
   exit 0

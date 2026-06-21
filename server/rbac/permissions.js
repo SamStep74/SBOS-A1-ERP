@@ -497,6 +497,18 @@ const PERMISSIONS = Object.freeze({
     label: 'Edit invoice',
     description: 'Edit a draft invoice.',
   },
+  'finance.customer.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create customer',
+    description: 'Create a new customer record.',
+  },
+  'finance.customer.update': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Edit customer',
+    description: 'Edit a customer record (name, HVVH, address, email).',
+  },
   'finance.invoice.issue': {
     category: 'finance',
     sensitivity: 'high',
