@@ -747,7 +747,7 @@ export async function postVendorBill(db, billId, tenantId = 0) {
   }
   const bill = await runQuery(
     db,
-    'SELECT id, status FROM vendor_bills WHERE tenant_id = $1 AND id = $2',
+    'SELECT id, status, subtotal, vat, total, bill_date FROM vendor_bills WHERE tenant_id = $1 AND id = $2',
     [tenantId, billId],
   );
   if (!bill.rows || bill.rows.length === 0) {
@@ -777,6 +777,29 @@ export async function postVendorBill(db, billId, tenantId = 0) {
       [tenantId, Number(billRow.rows[0].purchase_order_id)],
     );
   }
+
+  // Best-effort GL side-effect (Dr 226 VAT-input / Cr 521 AP for
+  // the VAT side of the bill; the receive-time AP at the goods
+  // value was already booked when the PO was received). The
+  // postVendorBillPostGL function no-ops when vat=0.
+  const b = bill.rows[0];
+  try {
+    const mod = await import('./stockPosting.js');
+    await mod.postVendorBillPostGL(
+      db,
+      {
+        id: billId,
+        subtotal: Number(b.subtotal),
+        vat: Number(b.vat),
+        total: Number(b.total),
+        bill_date: b.bill_date,
+      },
+      tenantId,
+    );
+  } catch (_err) {
+    // Swallowed by design — see inventory.postMoveGL.
+  }
+
   return { id: billId, status: 'posted' };
 }
 

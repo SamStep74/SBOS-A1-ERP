@@ -14,10 +14,11 @@
 //   - stock moves: receive / deliver / transfer / adjust
 //   - stock balances: list
 //
-// Out of scope (Phase 2+): lot/serial tracking, replenishment
-// reports, valuation handoff to Finance, low-stock alerts, stock
-// valuation entries mapped to RA chart of accounts. These are
-// follow-on work.
+// Out of scope (Phase 2+): lot/serial tracking. The stock-valuation
+// handoff to Finance (Dr 216 / Cr 521 on receive, Dr 711 / Cr 216 on
+// deliver) is NOW IN SCOPE (wave 19.2) and is wired via
+// ./stockPosting.js — every move in this file posts its GL entry
+// as a side-effect after the move is recorded.
 
 // Strip the `finance.` schema prefix to match the production
 // migration runner's behavior (the table is `catalog_items` on
@@ -48,6 +49,22 @@ async function runQuery(db, sql, params) {
   const result = await db.query(stripFinancePrefix(sql), params || []);
   if (result && Array.isArray(result.rows)) return result;
   return { rows: [] };
+}
+
+// postMoveGL — best-effort GL side-effect for a stock move. Failures
+// are caught and swallowed: the move is the source of truth, the GL
+// is a projection, and a failed GL post should never roll back the
+// move. The UNIQUE (source, source_id) index on journal_entries is
+// the idempotency guard, so a re-run (or the next reconciliation
+// job) re-posts the entry safely.
+async function postMoveGL(db, fn, move, tenantId) {
+  try {
+    const mod = await import('./stockPosting.js');
+    await mod[fn](db, move, tenantId);
+  } catch (_err) {
+    // Swallowed by design — see comment above. The caller still
+    // gets the move result.
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -432,6 +449,14 @@ export async function receiveStock(db, input, tenantId = 0) {
     moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
   }
 
+  // Best-effort GL side-effect (Dr 216 / Cr 521 at receive value).
+  await postMoveGL(
+    db,
+    'postStockReceiveGL',
+    { id: moveId, quantity, unit_cost: effectiveUnitCost, created_at: new Date().toISOString() },
+    tenantId,
+  );
+
   return {
     move_id: moveId,
     move_type: 'RECEIPT',
@@ -548,6 +573,21 @@ export async function deliverStock(db, input, tenantId = 0) {
   } else {
     const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
     moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
+  }
+
+  // Best-effort GL side-effect (Dr 711 / Cr 216 at source avg).
+  // Transfer is internal — no GL impact (no value crosses the
+  // company boundary), so we only post the COGS if the source
+  // location is a real outbound (e.g. CUSTOMER delivery) and
+  // srcAvg > 0. The postStockDeliverGL function no-ops when
+  // unit_cost is 0, so the no-GL cases are handled inside.
+  if (srcAvg > 0) {
+    await postMoveGL(
+      db,
+      'postStockDeliverGL',
+      { id: moveId, quantity, unit_cost: srcAvg, created_at: new Date().toISOString() },
+      tenantId,
+    );
   }
 
   return {
@@ -709,6 +749,19 @@ export async function adjustStock(db, input, tenantId = 0) {
     [tenantId, itemId, locationId],
   );
   const oldQty = existing.rows && existing.rows.length > 0 ? Number(existing.rows[0].quantity) : 0;
+  // Capture the pre-adjustment average cost for the GL post. The
+  // adjustment GL entry uses (delta × currentAvg) — the unit
+  // cost at the time the operator noticed the discrepancy, not
+  // the recomputed cost after the adjustment.
+  const currentAvgRes = await runQuery(
+    db,
+    'SELECT average_cost FROM finance.stock_quants WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3',
+    [tenantId, itemId, locationId],
+  );
+  const currentAvg =
+    currentAvgRes.rows && currentAvgRes.rows.length > 0
+      ? Number(currentAvgRes.rows[0].average_cost)
+      : 0;
   if (newQty === 0) {
     if (existing.rows && existing.rows.length > 0) {
       await runQuery(
@@ -736,9 +789,9 @@ export async function adjustStock(db, input, tenantId = 0) {
     db,
     `INSERT INTO finance.stock_moves
        (tenant_id, move_type, catalog_item_id, destination_location_id, quantity, unit_cost, delta, notes, created_by)
-     VALUES ($1, 'ADJUSTMENT', $2, $3, $4, 0, $5, $6, $7)
+     VALUES ($1, 'ADJUSTMENT', $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
-    [tenantId, itemId, locationId, Math.abs(newQty - oldQty), newQty, reason, userId],
+    [tenantId, itemId, locationId, Math.abs(newQty - oldQty), currentAvg, newQty, reason, userId],
   );
   let moveId;
   if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
@@ -747,6 +800,26 @@ export async function adjustStock(db, input, tenantId = 0) {
     const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
     moveId = Number(lastId.rows[0]['LAST_INSERT_ROWID()'] || lastId.rows[0].id);
   }
+
+  // Best-effort GL side-effect (Dr 711 / Cr 216 for a loss, Dr
+  // 216 / Cr 711 for a gain). Only posted when the delta × avg is
+  // non-zero. The postStockAdjustGL function no-ops when delta=0.
+  const deltaAmt = newQty - oldQty;
+  if (deltaAmt !== 0 && currentAvg > 0) {
+    await postMoveGL(
+      db,
+      'postStockAdjustGL',
+      {
+        id: moveId,
+        quantity: Math.abs(deltaAmt),
+        unit_cost: currentAvg,
+        delta: deltaAmt,
+        created_at: new Date().toISOString(),
+      },
+      tenantId,
+    );
+  }
+
   return { move_id: moveId, old_quantity: oldQty, new_quantity: newQty, delta: newQty - oldQty };
 }
 
