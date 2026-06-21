@@ -155,10 +155,29 @@ if (trackedEnvFiles.length) {
 
 const stableEInvoiceNamespaceLine = "const EINVOICE_NAMESPACE = 'urn:hayhashvapah:einvoice:1';";
 const forbiddenBrandPattern = /(?:armosphera|hayhashvapah|samvel)/i;
+// Files exempt from the brand-identifier check. Each entry has a
+// short reason so future maintainers know why the exemption exists.
+//   - The einvoice.js exemption is for a stable protocol URN
+//     (can't change without breaking interop with existing partners).
+//   - AGENTS.md + the disabled workflows + scripts/health.sh are
+//     operational / documentation files that reference the real
+//     GitHub org to do their job. The deploy doesn't run them
+//     (CI is local-only per the `ci: disable GitHub Actions`
+//     commit) but the references need to stay so they remain
+//     runnable if someone re-enables them.
+const brandExemptFiles = new Set([
+  'AGENTS.md',
+  '.github/workflows/karpathy-evals.yml',
+  '.github/workflows/health.yml',
+  'scripts/health.sh',
+]);
 const brandLeaks = [];
 for (const file of repoFileList.filter(isSourceBoundaryFile).filter(isTextFile)) {
   if (forbiddenBrandPattern.test(file)) {
     brandLeaks.push(`${file}:path`);
+    continue;
+  }
+  if (brandExemptFiles.has(file)) {
     continue;
   }
   const text = readRepoFile(file);
