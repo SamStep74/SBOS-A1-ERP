@@ -129,6 +129,13 @@ const checks = [
   { path: '/api/finance/catalog/bundles?archived=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles?archived=true tenant=0' },
   { path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1 (404 for missing bundle)' },
   { path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1/items (404 for missing bundle)' },
+  // Phase 3 POS basics (W88-1) — registers + shifts reads
+  // (empty DB → 200, items: []; 404 for missing register/shift)
+  { path: '/api/finance/pos/registers', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/registers tenant=0' },
+  { path: '/api/finance/pos/registers/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/pos/registers/1 (404 for missing register)' },
+  { path: '/api/finance/pos/shifts', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/shifts tenant=0' },
+  { path: '/api/finance/pos/shifts?status=open', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/shifts?status=open tenant=0' },
+  { path: '/api/finance/pos/shifts/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/pos/shifts/1 (404 for missing shift)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -217,6 +224,19 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/catalog/bundles/1/items', body: { catalog_item_id: 1, quantity: 2 }, expect: 201, name: 'POST /api/finance/catalog/bundles/1/items (returns id > 0)' },
   { method: 'GET', path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1 (returns the bundle created above)' },
   { method: 'GET', path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1/items (returns the recipe item created above)' },
+  // Phase 3 POS basics (W88-1) — full register/shift/sale/
+  // line/payment lifecycle. Each POST returns id > 0 (the
+  // wave-14 production pg adapter regression guard).
+  // Order matters: shift depends on register; sale depends
+  // on shift + register; line + payment depend on sale.
+  { method: 'POST', path: '/api/finance/pos/registers', body: { code: 'SMOKE-REG-1', name: 'Smoke Register', location: 'Store 1' }, expect: 201, name: 'POST /api/finance/pos/registers (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/pos/shifts', body: { register_id: 1, opened_by: 1, opening_cash_amd: 5000 }, expect: 201, name: 'POST /api/finance/pos/shifts (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/pos/registers/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/pos/registers/1 (returns the register created above)' },
+  { method: 'GET', path: '/api/finance/pos/shifts/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/pos/shifts/1 (returns the shift created above)' },
+  { method: 'POST', path: '/api/finance/pos/sales', body: { shift_id: 1, register_id: 1, cashier_id: 1 }, expect: 201, name: 'POST /api/finance/pos/sales (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/pos/sales/1/lines', body: { catalog_item_id: 1, quantity: 2, unit_price_amd: 1500 }, expect: 201, name: 'POST /api/finance/pos/sales/1/lines (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/pos/sales/1/payments', body: { payment_method: 'cash', amount_amd: 3000, tendered_amd: 5000, change_amd: 2000 }, expect: 201, name: 'POST /api/finance/pos/sales/1/payments (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/pos/shifts/1/close', body: { closed_by: 1, closing_cash_amd: 5000 }, expect: 200, name: 'POST /api/finance/pos/shifts/1/close (state-machine guard open → closed)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
@@ -1699,6 +1719,83 @@ trap - EXIT
 if [ $SMOKE_RC != 0 ]; then
   exit 1
 fi
+
+
+echo
+echo "=== STEP 7h: CRM lead TIN validation via A1-Validator wrapper (v0.8.0) ==="
+# Same pattern as STEP 7g (contact TIN), but for leads. The lead
+# represents a prospective customer; the hvhh is the company TIN.
+LOG7H="$TESTDIR/server-7h.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7H" 2>&1 &
+SERVER_PID_7H=$!
+SMOKE_RC=0
+cleanup_7h() { kill -9 $SERVER_PID_7H 2>/dev/null; wait $SERVER_PID_7H 2>/dev/null; }
+trap cleanup_7h EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7h"
+    tail -20 "$LOG7H"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7H=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7H" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7H" ]; then
+    echo "  FAIL: STEP 7h server did not print admin session token"
+    tail -20 "$LOG7H"
+    SMOKE_RC=1
+  else
+    # Valid 8-digit hvhh should persist
+    LEAD_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/crm/leads" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7H" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"LeadCo","company":"LeadCorp","hvhh":"01234567"}')
+    if echo "$LEAD_OUT" | grep -q '"hvhh":"01234567"'; then
+      echo "  OK lead create with valid hvhh persisted"
+    else
+      echo "  FAIL: valid lead hvhh did not persist: $LEAD_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Invalid 9-digit hvhh should be 400
+    LEAD_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/crm/leads" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7H" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"BadLead","hvhh":"123456789"}')
+    if [ "$LEAD_BAD" = "400" ]; then
+      echo "  OK invalid 9-digit lead hvhh returns 400"
+    else
+      echo "  FAIL: invalid lead hvhh returned $LEAD_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # No hvhh is fine (optional field)
+    LEAD_NONE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/crm/leads" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7H" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"NoHvhhLead"}')
+    if echo "$LEAD_NONE" | grep -q '"name":"NoHvhhLead"'; then
+      echo "  OK lead create without hvhh (optional) succeeds"
+    else
+      echo "  FAIL: lead create without hvhh failed: $LEAD_NONE"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7H 2>/dev/null
+wait $SERVER_PID_7H 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
 
 
 echo

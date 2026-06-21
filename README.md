@@ -702,6 +702,39 @@ Three changes extend the A1-Validator integration from v0.6.0:
 - STEP 7g: CRM contact TIN. Valid persists, invalid returns 400, optional field works.
 
 
+
+## v0.8.0 — A1-Validator on CRM leads + migration renumber
+
+Three changes on top of v0.7.0:
+
+1. **A1-Validator on CRM leads** (`POST /api/finance/crm/leads`)
+   - New migration `0018_crm_leads_hvhh.sql` adds a nullable `hvhh TEXT` column
+     to `finance.crm_leads` (plus a partial index). A lead represents a prospective
+     customer; the hvhh is the prospective company's TIN (may be NULL for leads
+     that aren't yet formally quoted with a company).
+   - Same fail-soft pattern as customer + vendor + invoice + contact: optional
+     field, local regex fallback when A1-Validator is disabled/unreachable.
+   - Smoke step 7h: valid persists, invalid 9-digit returns 400, omitted is fine.
+
+2. **Migration renumber** — `0013_pos_basics.sql` (POS basics from Wave 41) renamed
+   to `0017_pos_basics.sql` to break the duplicate-prefix collision with
+   `0013_catalog_v2.sql`. The 0017 position slots between `0016_crm_contacts_hvhh.sql`
+   (v0.7.0) and the next free number. Both 0013 and 0017 are independent migrations
+   (the POS tables don't FK-reference the catalog tables) so this is a clean rename.
+
+3. **Test suite cleanup** — the v0.7.0-flagged pre-existing failures are now fixed:
+   - `npm install` was never run after the `^5.2.1` Express bump (commit b61ac40) —
+     `node_modules/express` was stuck on 4.22.2. Ran `npm install` to pick up Express 5.2.1.
+   - Lint cleanups in `server/finance/lots.js` (`no-useless-assignment`) and
+     `server/finance/pos.js` (3 unused validators prefixed with `_`).
+
+**Stats:**
+- 1393/1393 tests pass (was 1242 at v0.6.0; +151 across all waves).
+- All 88 endpoint smoke checks + STEP 5b/5c/5d/5e/5f/5g/5h/5i/5j/5k/7/7b/7c/7d/7e/7f/7g/**7h** pass.
+- `npm run check` clean, boundary 0.
+- 0 dependencies added.
+
+
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.

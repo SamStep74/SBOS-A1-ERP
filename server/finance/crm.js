@@ -135,6 +135,27 @@ function validateLeadInput(input) {
   assertLeadStatus(input.status);
   assertOptionalInt(input.estimated_value_amd, 'estimated_value_amd');
   assertOptionalString(input.notes, 'notes', { max: 4096 });
+  // HVVH is optional (most leads don't have a TIN). The A1-Validator
+  // pass below does the primary validation.
+  if (input.hvhh !== undefined && input.hvhh !== null && input.hvhh !== '') {
+    if (typeof input.hvhh !== 'string') {
+      throw new ValueError('hvhh must be a string of 8 digits or null');
+    }
+  }
+}
+
+/**
+ * Async HVVH validation for CRM leads — uses the A1-Validator HTTP
+ * service with local regex fallback. Mirrors the customer + vendor +
+ * invoice + contact patterns. Returns the normalized form on success,
+ * throws ValueError on invalid input.
+ */
+export async function assertValidLeadHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'lead hvhh is invalid');
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -199,12 +220,17 @@ export async function listContacts(db, tenantId = 0) {
 
 export async function createLead(db, input, tenantId = 0) {
   validateLeadInput(input);
+  // A1-Validator pass — validates lead.hvhh (optional). Same fail-soft
+  // pattern as customer + vendor + invoice + contact. Throws ValueError
+  // on invalid input (caught by the route handler as 400).
+  await assertValidLeadHvhhAsync(input);
+  const { hvhh = null } = input;
   const ins = await runQuery(
     db,
     `INSERT INTO finance.crm_leads
        (tenant_id, name, company, email, phone, source,
-        status, estimated_value_amd, notes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        status, estimated_value_amd, notes, hvhh)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       tenantId,
@@ -216,6 +242,7 @@ export async function createLead(db, input, tenantId = 0) {
       input.status ?? 'new',
       input.estimated_value_amd ?? null,
       input.notes ?? null,
+      hvhh,
     ],
   );
   let id;
@@ -229,7 +256,7 @@ export async function createLead(db, input, tenantId = 0) {
     );
     id = Number(lastId.rows[0].id);
   }
-  return { id };
+  return { id, name: input.name, company: input.company ?? null, hvhh, tenant_id: tenantId };
 }
 
 export async function listLeads(db, tenantId = 0, status = null) {
@@ -242,7 +269,7 @@ export async function listLeads(db, tenantId = 0, status = null) {
     result = await runQuery(
       db,
       `SELECT id, name, company, email, phone, source,
-              status, estimated_value_amd, notes,
+              status, estimated_value_amd, notes, hvhh,
               created_at, updated_at
          FROM finance.crm_leads
         WHERE tenant_id = $1 AND status = $2
@@ -253,7 +280,7 @@ export async function listLeads(db, tenantId = 0, status = null) {
     result = await runQuery(
       db,
       `SELECT id, name, company, email, phone, source,
-              status, estimated_value_amd, notes,
+              status, estimated_value_amd, notes, hvhh,
               created_at, updated_at
          FROM finance.crm_leads
         WHERE tenant_id = $1

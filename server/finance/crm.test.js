@@ -47,6 +47,7 @@ function makeMemoryDb() {
       status TEXT NOT NULL DEFAULT 'new',
       estimated_value_amd INTEGER,
       notes TEXT,
+      hvhh TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -342,6 +343,56 @@ test('createContact: valid 8-digit hvhh persists', async () => {
   const out = await createContact(
     db,
     { name: 'GoodContact', hvhh: '00123456' },
+    0,
+  );
+  assert.equal(out.hvhh, '00123456');
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — lead.hvhh (optional). Same fail-soft pattern
+// as customer + vendor + invoice + contact. Default test env has no
+// A1_VALIDATOR_URL, so the local regex (^\d{8}$) enforces 8 digits.
+// ────────────────────────────────────────────────────────────────────────
+
+test('createLead: hvhh is validated via A1-Validator wrapper (9 digits rejected)', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createLead(db, { name: 'BadLead', hvhh: '123456789' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createLead: hvhh with non-digit char is rejected', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createLead(db, { name: 'BadLead', hvhh: '1234567A' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createLead: hvhh=null is allowed (optional field)', async () => {
+  const db = makeMemoryDb();
+  const out = await createLead(db, { name: 'NoHvhh', hvhh: null }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createLead: hvhh="" is allowed (empty string = absent)', async () => {
+  const db = makeMemoryDb();
+  const out = await createLead(db, { name: 'Empty', hvhh: '' }, 0);
+  assert.equal(out.hvhh, '');
+});
+
+test('createLead: hvhh omitted is allowed', async () => {
+  const db = makeMemoryDb();
+  const out = await createLead(db, { name: 'Omitted' }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createLead: valid 8-digit hvhh persists', async () => {
+  const db = makeMemoryDb();
+  const out = await createLead(
+    db,
+    { name: 'GoodLead', hvhh: '00123456' },
     0,
   );
   assert.equal(out.hvhh, '00123456');

@@ -1,4 +1,4 @@
--- 0013_pos_basics.sql
+-- 0017_pos_basics.sql
 -- POS basics (Phase 3 W87-1) — minimum viable point-of-sale:
 -- registers, shifts, sales, sale lines, payments.
 --
