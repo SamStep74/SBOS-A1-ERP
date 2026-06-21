@@ -126,6 +126,8 @@ const writeChecks = [
   // Phase 1 ERP — PO + delivery-note templates (Armenian).
   { method: 'GET', path: '/api/finance/purchase-orders/1/print?locale=hy&format=text', expect: 200, name: 'GET PO print (Armenian, text) — body contains Armenian header' },
   { method: 'GET', path: '/api/finance/receipts/1/print?locale=hy&format=text', expect: 200, name: 'GET receipt print (Armenian, text) — body contains Armenian header' },
+  // Phase 1 ERP — Replenishment report (Wave 18)
+  { method: 'GET', path: '/api/finance/replenishment-report', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/replenishment-report (empty items: array on fresh DB)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

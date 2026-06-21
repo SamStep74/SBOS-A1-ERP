@@ -144,6 +144,191 @@ function makeFinanceDb() {
       request_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    /* Migration 0007 (inventory): ported schema mirror. The actual
+       table name on sqlite is 'catalog_items' (no finance.
+       prefix) because the migration runner strips it. Same for
+       all inventory tables. */
+    CREATE TABLE catalog_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      sku TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      type TEXT NOT NULL DEFAULT 'STOCKABLE',
+      category_id INTEGER,
+      uom_id INTEGER,
+      uom_code TEXT NOT NULL DEFAULT 'pcs',
+      barcode TEXT,
+      vat_class TEXT NOT NULL DEFAULT 'VAT_STANDARD',
+      standard_price INTEGER NOT NULL DEFAULT 0,
+      sale_price INTEGER NOT NULL DEFAULT 0,
+      standard_cost INTEGER NOT NULL DEFAULT 0,
+      reorder_point INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE catalog_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      parent_id INTEGER,
+      name TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE unit_of_measures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'count',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE warehouses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE stock_locations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      warehouse_id INTEGER NOT NULL,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      location_type TEXT NOT NULL DEFAULT 'INTERNAL',
+      parent_id INTEGER,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE stock_quants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      catalog_item_id INTEGER NOT NULL,
+      location_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      reserved_quantity INTEGER NOT NULL DEFAULT 0,
+      average_cost INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE stock_moves (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      move_type TEXT NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      source_location_id INTEGER,
+      destination_location_id INTEGER,
+      quantity INTEGER NOT NULL,
+      unit_cost INTEGER NOT NULL DEFAULT 0,
+      reference TEXT,
+      delta INTEGER,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_by INTEGER
+    );
+    /* Migration 0008 (purchase) — ported schema mirror. The actual
+       table names on sqlite are vendors / purchase_orders / etc.
+       (no finance. prefix) because the migration runner strips
+       it. The pure-function SQL is written with the prefix and
+       stripped at DML time so the same SQL works on pg. */
+    CREATE TABLE vendors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      hvhh TEXT,
+      address TEXT,
+      email TEXT,
+      phone TEXT,
+      contact_name TEXT,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE purchase_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      order_number TEXT NOT NULL,
+      vendor_id INTEGER NOT NULL,
+      vendor_name TEXT NOT NULL,
+      vendor_hvhh TEXT,
+      status TEXT NOT NULL DEFAULT 'rfq',
+      order_date TEXT NOT NULL,
+      expected_date TEXT,
+      received_quantity INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      cancelled_at TEXT,
+      cancelled_reason TEXT
+    );
+    CREATE TABLE purchase_order_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      order_id INTEGER NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      unit_cost INTEGER NOT NULL DEFAULT 0,
+      description TEXT,
+      line_order INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE purchase_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      order_id INTEGER NOT NULL,
+      receipt_number TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE purchase_receipt_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      receipt_id INTEGER NOT NULL,
+      order_line_id INTEGER NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      received_quantity INTEGER NOT NULL,
+      unit_cost INTEGER NOT NULL DEFAULT 0,
+      destination_location_id INTEGER
+    );
+    CREATE TABLE vendor_bills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      bill_number TEXT NOT NULL,
+      vendor_id INTEGER NOT NULL,
+      vendor_name TEXT NOT NULL,
+      purchase_order_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'draft',
+      subtotal INTEGER NOT NULL DEFAULT 0,
+      vat INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0,
+      bill_date TEXT NOT NULL,
+      due_date TEXT,
+      notes TEXT,
+      posted_at TEXT,
+      paid_at TEXT,
+      voided_at TEXT,
+      voided_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE vendor_bill_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      bill_id INTEGER NOT NULL,
+      catalog_item_id INTEGER,
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      unit_cost INTEGER NOT NULL DEFAULT 0,
+      line_subtotal INTEGER NOT NULL DEFAULT 0,
+      vat INTEGER NOT NULL DEFAULT 0,
+      line_total INTEGER NOT NULL DEFAULT 0
+    );
   `);
   return { sqliteDb, dir };
 }

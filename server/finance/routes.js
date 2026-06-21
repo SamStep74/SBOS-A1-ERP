@@ -46,6 +46,7 @@
 //   POST   /api/finance/vendor-bills/:id/void
 //   GET    /api/finance/purchase-orders/:id/print?locale=hy&format=html|text
 //   GET    /api/finance/receipts/:id/print?locale=hy&format=html|text
+//   GET    /api/finance/replenishment-report?warehouse_id=
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -85,6 +86,7 @@ import {
   adjustStock,
   listBalances,
   listMoves,
+  getReplenishmentReport,
 } from './inventory.js';
 import {
   createVendor,
@@ -891,6 +893,28 @@ export function registerFinanceRoutes(app, opts = {}) {
       } else {
         res.status(200).type('text/plain; charset=utf-8').send(body);
       }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ─── Phase 1 ERP: Replenishment report (Wave 18) ───
+  //
+  // GET /api/finance/replenishment-report?warehouse_id=
+  //   Lists every catalog item in the caller's tenant whose total
+  //   stock is below its reorder_point, sorted by shortage desc
+  //   (largest gap first). Optional ?warehouse_id= filter scopes
+  //   the stock aggregation to a single warehouse.
+  //   The report uses finance.stock.read for the perm gate; the
+  //   tenant scope is read from the X-Tenant-Id header or
+  //   req.user.tenant_id (via readTenant).
+  app.get('/api/finance/replenishment-report', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {};
+      if (req.query.warehouse_id) opts.warehouseId = Number(req.query.warehouse_id);
+      const items = await getReplenishmentReport(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
     } catch (err) {
       next(err);
     }

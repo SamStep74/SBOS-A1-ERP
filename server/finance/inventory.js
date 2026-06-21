@@ -122,6 +122,7 @@ export async function createCatalogItem(db, input, tenantId = 0) {
   const standardPrice = input.standard_price != null ? assertNonNegInt(input.standard_price, 'standard_price') : 0;
   const salePrice = input.sale_price != null ? assertNonNegInt(input.sale_price, 'sale_price') : 0;
   const standardCost = input.standard_cost != null ? assertNonNegInt(input.standard_cost, 'standard_cost') : 0;
+  const reorderPoint = input.reorder_point != null ? assertNonNegInt(input.reorder_point, 'reorder_point') : 0;
 
   // UNIQUE (tenant_id, sku)
   const dupe = await runQuery(
@@ -137,8 +138,8 @@ export async function createCatalogItem(db, input, tenantId = 0) {
     db,
     `INSERT INTO finance.catalog_items
        (tenant_id, sku, name, description, type, category_id, uom_id, uom_code,
-        barcode, vat_class, standard_price, sale_price, standard_cost, archived)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0)
+        barcode, vat_class, standard_price, sale_price, standard_cost, reorder_point, archived)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0)
      RETURNING id`,
     [
       tenantId, sku, name, input.description || null, type,
@@ -147,7 +148,7 @@ export async function createCatalogItem(db, input, tenantId = 0) {
       uomCode,
       input.barcode || null,
       vatClass,
-      standardPrice, salePrice, standardCost,
+      standardPrice, salePrice, standardCost, reorderPoint,
     ],
   );
 
@@ -162,6 +163,7 @@ export async function createCatalogItem(db, input, tenantId = 0) {
   return {
     id, sku, name, type, vat_class: vatClass, uom_code: uomCode,
     standard_price: standardPrice, sale_price: salePrice, standard_cost: standardCost,
+    reorder_point: reorderPoint,
     tenant_id: tenantId,
   };
 }
@@ -818,4 +820,106 @@ export async function listMoves(db, tenantId = 0, { itemId, moveType, limit = 10
     delta: r.delta == null ? null : Number(r.delta),
     created_at: r.created_at,
   }));
+}
+
+/**
+ * Replenishment report — list every catalog item in the tenant whose
+ * total stock is below the operator-defined reorder_point, sorted
+ * by shortage (largest gap first). An item with reorder_point=0 is
+ * treated as "no replenishment trigger" and never appears in the
+ * report.
+ *
+ * The total stock is summed across all locations (or filtered to a
+ * single warehouse via opts.warehouseId). Negative on_hand is
+ * clamped to 0 in the shortage math — a customer-delivery that
+ * over-delivered (rare, but possible if a stock_quant went
+ * negative under a previous bug) shouldn't surface as a phantom
+ * positive shortage.
+ *
+ * Returned shape per item:
+ *   {
+ *     item_id, sku, name, uom_code,
+ *     total_stock, reorder_point, shortage,
+ *     by_warehouse: [{ warehouse_id, warehouse_code, warehouse_name, stock }],
+ *   }
+ */
+export async function getReplenishmentReport(db, tenantId = 0, opts = {}) {
+  const warehouseId = opts.warehouseId != null ? Number(opts.warehouseId) : null;
+
+  // 1. All non-archived items in the tenant that have a non-zero
+  //    reorder_point (zero means "no trigger"). The total stock
+  //    is computed in a single LEFT JOIN aggregate so we don't
+  //    do a per-item query.
+  const itemsRes = await runQuery(
+    db,
+    `SELECT ci.id, ci.sku, ci.name, ci.uom_code, ci.reorder_point,
+            COALESCE(SUM(CASE WHEN sq.id IS NOT NULL THEN sq.quantity ELSE 0 END), 0) AS total_stock
+       FROM finance.catalog_items ci
+       LEFT JOIN finance.stock_quants sq
+         ON sq.tenant_id = ci.tenant_id AND sq.catalog_item_id = ci.id
+      WHERE ci.tenant_id = $1
+        AND ci.archived = 0
+        AND ci.reorder_point > 0
+        ${warehouseId == null ? '' : 'AND EXISTS (SELECT 1 FROM finance.stock_locations sl2 WHERE sl2.tenant_id = ci.tenant_id AND sl2.warehouse_id = $2 AND sl2.id = sq.location_id)'}
+      GROUP BY ci.id
+      ORDER BY ci.id`,
+    warehouseId == null ? [tenantId] : [tenantId, warehouseId],
+  );
+  const items = itemsRes.rows || [];
+  if (items.length === 0) return [];
+
+  // 2. Filter to items below their reorder_point.
+  const below = items
+    .map((r) => ({
+      item_id: Number(r.id),
+      sku: r.sku,
+      name: r.name,
+      uom_code: r.uom_code,
+      reorder_point: Number(r.reorder_point),
+      total_stock: Math.max(0, Number(r.total_stock)),
+      shortage: Math.max(0, Number(r.reorder_point) - Math.max(0, Number(r.total_stock))),
+    }))
+    .filter((row) => row.shortage > 0);
+  if (below.length === 0) return [];
+
+  // 3. Per-warehouse breakdown for each below-threshold item. The
+  //    breakdown uses the same LEFT JOIN pattern so a single SQL
+  //    call returns all rows.
+  const itemIds = below.map((r) => r.item_id);
+  const placeholders = itemIds.map((_, i) => `$${i + 1}`).join(',');
+  const breakdownRes = await runQuery(
+    db,
+    `SELECT sq.catalog_item_id, w.id AS warehouse_id, w.code, w.name,
+            COALESCE(SUM(sq.quantity), 0) AS stock
+       FROM finance.warehouses w
+       LEFT JOIN finance.stock_locations sl
+         ON sl.tenant_id = w.tenant_id AND sl.warehouse_id = w.id
+       LEFT JOIN finance.stock_quants sq
+         ON sq.tenant_id = sl.tenant_id AND sq.location_id = sl.id
+            AND sq.catalog_item_id IN (${placeholders})
+      WHERE w.tenant_id = $${itemIds.length + 1} AND w.archived = 0
+      ${warehouseId == null ? '' : `AND w.id = $${itemIds.length + 2}`}
+      GROUP BY w.id, sq.catalog_item_id
+      ORDER BY w.id`,
+    warehouseId == null ? [...itemIds, tenantId] : [...itemIds, tenantId, warehouseId],
+  );
+  const byItem = new Map();
+  for (const r of breakdownRes.rows || []) {
+    const itemId = r.catalog_item_id == null ? null : Number(r.catalog_item_id);
+    if (itemId == null) continue;
+    if (!byItem.has(itemId)) byItem.set(itemId, []);
+    byItem.get(itemId).push({
+      warehouse_id: Number(r.warehouse_id),
+      warehouse_code: r.code,
+      warehouse_name: r.name,
+      stock: Math.max(0, Number(r.stock)),
+    });
+  }
+  // Sort by shortage desc (largest gap first) so the operator
+  // sees the most-urgent item at the top of the list.
+  below.sort((a, b) => b.shortage - a.shortage);
+  for (const row of below) {
+    row.by_warehouse = byItem.get(row.item_id) || [];
+  }
+  return below;
 }

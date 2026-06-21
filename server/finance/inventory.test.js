@@ -24,6 +24,7 @@ import {
   adjustStock,
   listBalances,
   listMoves,
+  getReplenishmentReport,
   ValueError,
 } from './inventory.js';
 
@@ -53,6 +54,7 @@ function makeMemoryDb() {
       standard_price INTEGER NOT NULL DEFAULT 0,
       sale_price INTEGER NOT NULL DEFAULT 0,
       standard_cost INTEGER NOT NULL DEFAULT 0,
+      reorder_point INTEGER NOT NULL DEFAULT 0,
       archived INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -117,6 +119,10 @@ function makeMemoryDb() {
       const info = stmt.run(...(params || []));
       return { rows: [], lastInsertRowid: info.lastInsertRowid };
     },
+    // Raw handle for tests that need to bypass the pg-style adapter
+    // (e.g. verifying persistence of a column the adapter doesn't
+    // expose via a pure function).
+    _raw: db,
   };
 }
 
@@ -492,4 +498,233 @@ test('listBalances: tenant-scoped (tenant 0 cannot see tenant 7 stock)', async (
   assert.equal(t0[0].quantity, 5);
   assert.equal(t7.length, 1);
   assert.equal(t7[0].quantity, 7);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Replenishment report (Wave 18)
+// ────────────────────────────────────────────────────────────────────────
+
+test('getReplenishmentReport: empty DB → empty report', async () => {
+  const db = makeMemoryDb();
+  const rep = await getReplenishmentReport(db, 0);
+  assert.deepEqual(rep, []);
+});
+
+test('getReplenishmentReport: zero reorder_point → item never appears', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  // No reorder_point (defaults to 0) — even with zero stock it should NOT appear.
+  await createCatalogItem(db, { sku: 'Z', name: 'Zero' }, 0);
+  const rep = await getReplenishmentReport(db, 0);
+  assert.deepEqual(rep, []);
+});
+
+test('getReplenishmentReport: item below threshold appears in report', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(
+    db,
+    { sku: 'A', name: 'Item A', reorder_point: 10 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 3, unit_cost: 100 },
+    0,
+  );
+  const rep = await getReplenishmentReport(db, 0);
+  assert.equal(rep.length, 1);
+  assert.equal(rep[0].sku, 'A');
+  assert.equal(rep[0].total_stock, 3);
+  assert.equal(rep[0].reorder_point, 10);
+  assert.equal(rep[0].shortage, 7);
+});
+
+test('getReplenishmentReport: item at or above threshold does NOT appear', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(
+    db,
+    { sku: 'A', name: 'Item A', reorder_point: 10 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 10, unit_cost: 100 },
+    0,
+  );
+  const rep = await getReplenishmentReport(db, 0);
+  assert.deepEqual(rep, []);
+});
+
+test('getReplenishmentReport: sorted by shortage desc (largest gap first)', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  // Two items both below threshold, but with different shortage.
+  const small = await createCatalogItem(
+    db,
+    { sku: 'S', name: 'Small', reorder_point: 5 },
+    0,
+  );
+  const big = await createCatalogItem(
+    db,
+    { sku: 'B', name: 'Big', reorder_point: 20 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: small.id, destination_location_id: stockLoc.id, quantity: 4, unit_cost: 100 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: big.id, destination_location_id: stockLoc.id, quantity: 1, unit_cost: 100 },
+    0,
+  );
+  const rep = await getReplenishmentReport(db, 0);
+  assert.equal(rep.length, 2);
+  assert.equal(rep[0].sku, 'B'); // shortage=19, should be first
+  assert.equal(rep[1].sku, 'S'); // shortage=1, should be second
+});
+
+test('getReplenishmentReport: by_warehouse breakdown included per item', async () => {
+  const db = makeMemoryDb();
+  // Two warehouses, two locations.
+  const w1 = await createWarehouse(db, { code: 'WH1', name: 'WH 1' }, 0);
+  const w2 = await createWarehouse(db, { code: 'WH2', name: 'WH 2' }, 0);
+  const l1 = await createLocation(
+    db,
+    { warehouse_id: w1.id, code: 'A', name: 'A', location_type: 'INTERNAL' },
+    0,
+  );
+  const l2 = await createLocation(
+    db,
+    { warehouse_id: w2.id, code: 'B', name: 'B', location_type: 'INTERNAL' },
+    0,
+  );
+  const item = await createCatalogItem(
+    db,
+    { sku: 'X', name: 'X', reorder_point: 10 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: l1.id, quantity: 3, unit_cost: 100 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: l2.id, quantity: 1, unit_cost: 100 },
+    0,
+  );
+  const rep = await getReplenishmentReport(db, 0);
+  assert.equal(rep.length, 1);
+  assert.equal(rep[0].total_stock, 4);
+  assert.equal(rep[0].by_warehouse.length, 2);
+  // Sum of per-warehouse stock should equal total.
+  const sumWh = rep[0].by_warehouse.reduce((s, w) => s + w.stock, 0);
+  assert.equal(sumWh, 4);
+});
+
+test('getReplenishmentReport: warehouse_id filter scopes to one warehouse', async () => {
+  const db = makeMemoryDb();
+  const w1 = await createWarehouse(db, { code: 'WH1', name: 'WH 1' }, 0);
+  const w2 = await createWarehouse(db, { code: 'WH2', name: 'WH 2' }, 0);
+  const l1 = await createLocation(
+    db,
+    { warehouse_id: w1.id, code: 'A', name: 'A', location_type: 'INTERNAL' },
+    0,
+  );
+  const l2 = await createLocation(
+    db,
+    { warehouse_id: w2.id, code: 'B', name: 'B', location_type: 'INTERNAL' },
+    0,
+  );
+  const item = await createCatalogItem(
+    db,
+    { sku: 'X', name: 'X', reorder_point: 5 },
+    0,
+  );
+  // Stock at WH1 = 4 (below threshold), stock at WH2 = 10 (above).
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: l1.id, quantity: 4, unit_cost: 100 },
+    0,
+  );
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: l2.id, quantity: 10, unit_cost: 100 },
+    0,
+  );
+  const all = await getReplenishmentReport(db, 0);
+  // Total = 14, well above reorder_point=5 → no report.
+  assert.equal(all.length, 0);
+  const wh1Only = await getReplenishmentReport(db, 0, { warehouseId: w1.id });
+  // WH1 only = 4, below threshold → reported.
+  assert.equal(wh1Only.length, 1);
+  assert.equal(wh1Only[0].total_stock, 4);
+  const wh2Only = await getReplenishmentReport(db, 0, { warehouseId: w2.id });
+  // WH2 only = 10, above threshold → not reported.
+  assert.equal(wh2Only.length, 0);
+});
+
+test('getReplenishmentReport: cross-tenant isolation', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item0 = await createCatalogItem(
+    db,
+    { sku: 'T0', name: 'Tenant 0 item', reorder_point: 10 },
+    0,
+  );
+  const item7 = await createCatalogItem(
+    db,
+    { sku: 'T7', name: 'Tenant 7 item', reorder_point: 10 },
+    7,
+  );
+  // Tenant 7 sees its own item (zero stock) but not tenant 0's.
+  const t7 = await getReplenishmentReport(db, 7);
+  assert.equal(t7.length, 1);
+  assert.equal(t7[0].sku, 'T7');
+  // Tenant 0 sees its own item (zero stock) but not tenant 7's.
+  const t0 = await getReplenishmentReport(db, 0);
+  assert.equal(t0.length, 1);
+  assert.equal(t0[0].sku, 'T0');
+});
+
+test('getReplenishmentReport: archived items do not appear', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(
+    db,
+    { sku: 'X', name: 'X', reorder_point: 10 },
+    0,
+  );
+  // The createCatalogItem function doesn't expose archive; we'd need
+  // an SQL update. This test guards the "AND ci.archived = 0" filter.
+  // Run a raw SQL update via the test handle (the inventory harness
+  // exposes the raw DatabaseSync as db._raw).
+  db._raw.prepare('UPDATE catalog_items SET archived = 1 WHERE id = ?').run(item.id);
+  const rep = await getReplenishmentReport(db, 0);
+  assert.deepEqual(rep, []);
+});
+
+test('createCatalogItem: accepts reorder_point and persists it', async () => {
+  const db = makeMemoryDb();
+  const item = await createCatalogItem(
+    db,
+    { sku: 'A', name: 'A', reorder_point: 42 },
+    0,
+  );
+  assert.equal(item.reorder_point, 42);
+  // Re-read via SQL to confirm persistence.
+  const row = db._raw.prepare('SELECT reorder_point FROM catalog_items WHERE id = ?').get(item.id);
+  assert.equal(row.reorder_point, 42);
+});
+
+test('createCatalogItem: rejects negative reorder_point', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    () => createCatalogItem(db, { sku: 'A', name: 'A', reorder_point: -1 }, 0),
+    (err) => err && err.name === 'ValueError' && /reorder_point/.test(err.message),
+  );
 });

@@ -57,6 +57,16 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     routes at `/api/finance/{purchase-orders,receipts}/:id/print?locale=hy&format=html|text`.
   - 1002/1002 tests pass (was 985; +17). Deploy smoke extended to 37
     endpoints with Armenian-text regression guard on the print routes.
+- **Wave 18 (Phase 1 ERP — Replenishment report / low-stock alerts)** — DONE.
+  - `reorder_point INTEGER NOT NULL DEFAULT 0` on catalog_items
+    (migration 0009). `createCatalogItem` accepts it; `listCatalogItems`
+    returns it.
+  - `getReplenishmentReport(db, tenantId, {warehouseId})` — list every
+    item below its reorder_point, sorted by shortage desc, with a
+    per-warehouse breakdown. An item with `reorder_point=0` is treated
+    as "no trigger" and never appears.
+  - Route: `GET /api/finance/replenishment-report?warehouse_id=`.
+  - 1013/1013 tests pass (was 1002; +11). Deploy smoke at 38 endpoints.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -141,6 +151,35 @@ curl -s "http://localhost:3000/api/finance/receipts/1/print?locale=hy&format=htm
   -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0'
 # -> "<html-escaped body with <br> line breaks>"
 ```
+
+### Replenishment report (low-stock alerts)
+
+Each catalog item carries a `reorder_point` (defaults to 0 = "no
+trigger"). The replenishment report lists every item whose total
+stock across all locations is below its reorder_point, sorted by
+shortage desc (largest gap first), with a per-warehouse breakdown.
+
+| Method | Path                                       | Query                 | Returns                                  |
+| ------ | ------------------------------------------ | --------------------- | ---------------------------------------- |
+| GET    | `/api/finance/replenishment-report`        | `?warehouse_id=` (optional) | `{"items":[{item_id, sku, name, uom_code, total_stock, reorder_point, shortage, by_warehouse:[...]}], ...}` |
+
+Example:
+
+```bash
+curl -s "http://localhost:3000/api/finance/replenishment-report" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' | jq
+# -> {
+#      "items": [
+#        { "sku": "WIDGET-1", "total_stock": 3, "reorder_point": 10, "shortage": 7,
+#          "by_warehouse": [{"warehouse_code": "WH-1", "stock": 3}, ...] },
+#        ...
+#      ]
+#    }
+```
+
+Set `reorder_point` at item creation time via `POST /api/finance/catalog/items`
+with `{sku, name, reorder_point: 10}`. The next deployment can wire
+this report to an email/Slack alert (out of Phase 1 scope).
 
 ### Typical end-to-end flow
 
