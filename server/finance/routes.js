@@ -19,6 +19,31 @@
 //   GET    /api/finance/audit
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
+//   GET    /api/finance/catalog/items
+//   POST   /api/finance/catalog/items
+//   GET    /api/finance/warehouses
+//   POST   /api/finance/warehouses
+//   GET    /api/finance/stock/locations
+//   POST   /api/finance/stock/locations
+//   GET    /api/finance/stock/balances
+//   GET    /api/finance/stock/moves
+//   POST   /api/finance/stock/receive
+//   POST   /api/finance/stock/deliver
+//   POST   /api/finance/stock/transfer
+//   POST   /api/finance/stock/adjust
+//   GET    /api/finance/vendors
+//   POST   /api/finance/vendors
+//   GET    /api/finance/purchase-orders
+//   POST   /api/finance/purchase-orders
+//   POST   /api/finance/purchase-orders/:id/confirm
+//   POST   /api/finance/purchase-orders/:id/cancel
+//   POST   /api/finance/purchase-orders/:id/receive
+//   GET    /api/finance/vendor-bills
+//   POST   /api/finance/vendor-bills
+//   POST   /api/finance/vendor-bills/:id/confirm
+//   POST   /api/finance/vendor-bills/:id/post
+//   POST   /api/finance/vendor-bills/:id/pay
+//   POST   /api/finance/vendor-bills/:id/void
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -45,6 +70,35 @@ import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
 import { recordAudit, listAudit } from './audit.js';
+import {
+  createCatalogItem,
+  listCatalogItems,
+  createWarehouse,
+  listWarehouses,
+  createLocation,
+  listLocations,
+  receiveStock,
+  deliverStock,
+  transferStock,
+  adjustStock,
+  listBalances,
+  listMoves,
+} from './inventory.js';
+import {
+  createVendor,
+  listVendors,
+  createPurchaseOrder,
+  confirmPurchaseOrder,
+  cancelPurchaseOrder,
+  receivePurchaseOrder,
+  listPurchaseOrders,
+  createVendorBillFromReceipt,
+  confirmVendorBill,
+  postVendorBill,
+  payVendorBill,
+  voidVendorBill,
+  listVendorBills,
+} from './purchase.js';
 import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -460,4 +514,320 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ─── Phase 1 ERP: Inventory module ───
+  //
+  // The pure functions live in server/finance/inventory.js. They take
+  // the pg-style adapter (which translates pg's $N to sqlite ? for the
+  // memory harness) plus a tenantId. All routes are tenant-scoped.
+
+  // Catalog (product) endpoints.
+  app.get('/api/finance/catalog/items', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const items = await listCatalogItems(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/catalog/items',
+    requireTenant,
+    requirePerm('finance.product.create'),
+    wrapFinanceRoute('product.create', 'product:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createCatalogItem(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // Warehouse endpoints.
+  app.get('/api/finance/warehouses', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const items = await listWarehouses(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/warehouses',
+    requireTenant,
+    requirePerm('finance.warehouse.create'),
+    wrapFinanceRoute('warehouse.create', 'warehouse:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createWarehouse(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // Stock location endpoints.
+  app.get('/api/finance/stock/locations', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : undefined;
+      const items = await listLocations(pgAdapter, tenantId, warehouseId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/stock/locations',
+    requireTenant,
+    requirePerm('finance.warehouse.create'),
+    wrapFinanceRoute('location.create', 'location:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createLocation(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // Stock balance + move endpoints (read-only).
+  app.get('/api/finance/stock/balances', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {};
+      if (req.query.item_id) opts.itemId = Number(req.query.item_id);
+      if (req.query.location_id) opts.locationId = Number(req.query.location_id);
+      const items = await listBalances(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.get('/api/finance/stock/moves', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {};
+      if (req.query.item_id) opts.itemId = Number(req.query.item_id);
+      if (req.query.move_type) opts.moveType = String(req.query.move_type);
+      if (req.query.limit) opts.limit = Number(req.query.limit);
+      const items = await listMoves(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Stock move write endpoints.
+  app.post(
+    '/api/finance/stock/receive',
+    requireTenant,
+    requirePerm('finance.stock.move'),
+    wrapFinanceRoute('stock.receive', 'stock:move:receive', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await receiveStock(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/stock/deliver',
+    requireTenant,
+    requirePerm('finance.stock.move'),
+    wrapFinanceRoute('stock.deliver', 'stock:move:deliver', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await deliverStock(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/stock/transfer',
+    requireTenant,
+    requirePerm('finance.stock.move'),
+    wrapFinanceRoute('stock.transfer', 'stock:move:transfer', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await transferStock(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/stock/adjust',
+    requireTenant,
+    requirePerm('finance.stock.move'),
+    wrapFinanceRoute('stock.adjust', 'stock:move:adjust', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await adjustStock(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // ─── Phase 1 ERP: Purchase module ───
+  //
+  // Vendors — basic CRUD for supplier master.
+  app.get('/api/finance/vendors', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const items = await listVendors(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/vendors',
+    requireTenant,
+    requirePerm('finance.vendor.create'),
+    wrapFinanceRoute('vendor.create', 'vendor:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createVendor(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // Purchase orders.
+  app.get('/api/finance/purchase-orders', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {};
+      if (req.query.vendor_id) opts.vendorId = Number(req.query.vendor_id);
+      if (req.query.status) opts.status = String(req.query.status);
+      const items = await listPurchaseOrders(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/purchase-orders',
+    requireTenant,
+    requirePerm('finance.purchase.create'),
+    wrapFinanceRoute('po.create', 'po:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createPurchaseOrder(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/purchase-orders/:id/confirm',
+    requireTenant,
+    requirePerm('finance.purchase.confirm'),
+    wrapFinanceRoute('po.confirm', 'po:confirm', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await confirmPurchaseOrder(pgAdapter, id, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/purchase-orders/:id/cancel',
+    requireTenant,
+    requirePerm('finance.purchase.cancel'),
+    wrapFinanceRoute('po.cancel', 'po:cancel', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const reason = String((req.body && req.body.reason) || '').trim();
+      const out = await cancelPurchaseOrder(pgAdapter, id, reason, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/purchase-orders/:id/receive',
+    requireTenant,
+    requirePerm('finance.purchase.receive'),
+    wrapFinanceRoute('po.receive', 'po:receive', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await receivePurchaseOrder(pgAdapter, id, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // Vendor bills.
+  app.get('/api/finance/vendor-bills', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {};
+      if (req.query.vendor_id) opts.vendorId = Number(req.query.vendor_id);
+      if (req.query.status) opts.status = String(req.query.status);
+      if (req.query.purchase_order_id) opts.purchaseOrderId = Number(req.query.purchase_order_id);
+      const items = await listVendorBills(pgAdapter, tenantId, opts);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(
+    '/api/finance/vendor-bills',
+    requireTenant,
+    requirePerm('finance.bill.create'),
+    wrapFinanceRoute('bill.create', 'bill:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const body = req.body || {};
+      const orderId = Number(body.purchase_order_id);
+      if (!Number.isInteger(orderId) || orderId <= 0) {
+        return res.status(400).json({ error: 'bad_request', message: 'purchase_order_id must be a positive integer' });
+      }
+      const out = await createVendorBillFromReceipt(pgAdapter, orderId, body, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/vendor-bills/:id/confirm',
+    requireTenant,
+    requirePerm('finance.bill.update'),
+    wrapFinanceRoute('bill.confirm', 'bill:confirm', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await confirmVendorBill(pgAdapter, id, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/vendor-bills/:id/post',
+    requireTenant,
+    requirePerm('finance.bill.approve'),
+    wrapFinanceRoute('bill.post', 'bill:post', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await postVendorBill(pgAdapter, id, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/vendor-bills/:id/pay',
+    requireTenant,
+    requirePerm('finance.bill.pay'),
+    wrapFinanceRoute('bill.pay', 'bill:pay', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const out = await payVendorBill(pgAdapter, id, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+  app.post(
+    '/api/finance/vendor-bills/:id/void',
+    requireTenant,
+    requirePerm('finance.bill.void'),
+    wrapFinanceRoute('bill.void', 'bill:void', async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const reason = String((req.body && req.body.reason) || '').trim();
+      const out = await voidVendorBill(pgAdapter, id, reason, tenantId);
+      res.status(200).json(out);
+    }),
+  );
 }

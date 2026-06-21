@@ -91,6 +91,16 @@ const checks = [
   { path: '/api/finance/einvoice/export/1', headers: { 'X-Tenant-Id': '7' }, expect: 404, name: 'einvoice/export/1 tenant=7 (isolated)' },
   { path: '/api/rbac/approvals', expect: 200, name: 'rbac/approvals' },
   { path: '/api/nonexistent', expect: 404, name: '404 path' },
+  // Phase 1 ERP — inventory reads (empty DB → 200, items: [])
+  { path: '/api/finance/catalog/items', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/items tenant=0' },
+  { path: '/api/finance/warehouses',     headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/warehouses tenant=0' },
+  { path: '/api/finance/stock/locations',headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/stock/locations tenant=0' },
+  { path: '/api/finance/stock/balances', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/stock/balances tenant=0' },
+  { path: '/api/finance/stock/moves',    headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/stock/moves tenant=0' },
+  // Phase 1 ERP — purchase reads (empty DB → 200, items: [])
+  { path: '/api/finance/vendors',           headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/vendors tenant=0' },
+  { path: '/api/finance/purchase-orders',   headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/purchase-orders tenant=0' },
+  { path: '/api/finance/vendor-bills',      headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/vendor-bills tenant=0' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -102,6 +112,17 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/invoices', body: { customer_id: 1, invoice_number: 'INV-SMOKE-1', issue_date: '2026-06-21', due_date: '2026-07-21', lines: [{ description: 'X', quantity: 1, unit_price_amd: 1000 }] }, expect: 201, name: 'POST /api/finance/invoices (returns id > 0)' },
   { method: 'POST', path: '/api/finance/invoices/1/lines', body: { lines: [{ description: 'Replaced', quantity: 1, unit_price_amd: 2000 }] }, expect: 200, name: 'POST /api/finance/invoices/1/lines (replace on draft)' },
   { method: 'GET',  path: '/api/finance/audit?limit=5', expect: 200, name: 'GET /api/finance/audit (returns rows from the writes above)' },
+  // Phase 1 ERP — inventory write flow (warehouse → location → item → receive).
+  { method: 'POST', path: '/api/finance/warehouses', body: { code: 'WH-SMOKE', name: 'Smoke Warehouse' }, expect: 201, name: 'POST /api/finance/warehouses (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/stock/locations', body: { warehouse_id: 1, code: 'BIN-001', name: 'Smoke Bin', location_type: 'INTERNAL' }, expect: 201, name: 'POST /api/finance/stock/locations (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/catalog/items', body: { sku: 'SKU-SMOKE-1', name: 'Smoke Item', unit_of_measure: 'pcs', unit_cost_amd: 500 }, expect: 201, name: 'POST /api/finance/catalog/items (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/stock/receive', body: { catalog_item_id: 1, destination_location_id: 1, quantity: 10, unit_cost: 500 }, expect: 201, name: 'POST /api/finance/stock/receive (returns id > 0)' },
+  // Phase 1 ERP — purchase write flow (vendor → PO → confirm → receive → bill).
+  { method: 'POST', path: '/api/finance/vendors', body: { code: 'V-SMOKE', name: 'Smoke Vendor', hvhh: '12345678' }, expect: 201, name: 'POST /api/finance/vendors (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/purchase-orders', body: { vendor_id: 1, order_number: 'PO-SMOKE-1', order_date: '2026-06-21', lines: [{ catalog_item_id: 1, quantity: 5, unit_cost: 500 }] }, expect: 201, name: 'POST /api/finance/purchase-orders (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/purchase-orders/1/confirm', body: {}, expect: 200, name: 'POST /api/finance/purchase-orders/1/confirm' },
+  { method: 'POST', path: '/api/finance/purchase-orders/1/receive', body: { destination_location_id: 1, lines: [{ order_line_id: 1, received_quantity: 5 }] }, expect: 201, name: 'POST /api/finance/purchase-orders/1/receive' },
+  { method: 'POST', path: '/api/finance/vendor-bills', body: { purchase_order_id: 1, bill_number: 'BILL-SMOKE-1', bill_date: '2026-06-21' }, expect: 201, name: 'POST /api/finance/vendor-bills (returns id > 0)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
@@ -126,9 +147,16 @@ function runCheck(c) {
       if (c.method === 'POST' && got === 201) {
         try {
           const parsed = JSON.parse(body);
-          if (!Number.isInteger(parsed.id) || parsed.id <= 0) {
+          // Different endpoints return different id field names
+          // (e.g. receiveStock returns 'move_id', not 'id'). Accept
+          // any positive numeric id-or-move_id on POST.
+          const hasPositiveId =
+            (Number.isInteger(parsed.id) && parsed.id > 0) ||
+            (Number.isInteger(parsed.move_id) && parsed.move_id > 0) ||
+            (Number.isInteger(parsed.receipt_id) && parsed.receipt_id > 0);
+          if (!hasPositiveId) {
             fail++;
-            console.log('  FAIL POST returned non-positive id:', body.slice(0, 200));
+            console.log('  FAIL POST returned no positive id/move_id:', body.slice(0, 200));
           }
         } catch {}
       }
@@ -159,6 +187,12 @@ const expected = [
   'customers', 'invoices', 'invoice_lines', 'invoice_adjustments',
   'payments', 'vat_carry_forward', 'tenants',
   'users',
+  // Phase 1 ERP — inventory (migration 0007)
+  'catalog_categories', 'unit_of_measures', 'catalog_items', 'catalog_variants',
+  'warehouses', 'stock_locations', 'stock_quants', 'stock_moves',
+  // Phase 1 ERP — purchase (migration 0008)
+  'vendors', 'purchase_orders', 'purchase_order_lines', 'purchase_receipts',
+  'purchase_receipt_lines', 'vendor_bills', 'vendor_bill_lines',
 ];
 const got = new Set(tables.map(t => t.name));
 let missing = expected.filter(t => !got.has(t));
