@@ -92,10 +92,26 @@ const checks = [
   { path: '/api/rbac/approvals', expect: 200, name: 'rbac/approvals' },
   { path: '/api/nonexistent', expect: 404, name: '404 path' },
 ];
+
+// Write-endpoint regression guard: catches the 'production pg adapter
+// drops RETURNING' class of bug (wave-14). The HTTP layer must
+// return a real id on POST, not null.
+const writeChecks = [
+  { method: 'POST', path: '/api/finance/customers', body: { name: 'SmokeCustomer', hvhh: '99887766' }, expect: 201, name: 'POST /api/finance/customers (returns id > 0)' },
+  { method: 'PATCH', path: '/api/finance/customers/1', body: { name: 'SmokeRenamed' }, expect: 200, name: 'PATCH /api/finance/customers/1' },
+  { method: 'POST', path: '/api/finance/invoices', body: { customer_id: 1, invoice_number: 'INV-SMOKE-1', issue_date: '2026-06-21', due_date: '2026-07-21', lines: [{ description: 'X', quantity: 1, unit_price_amd: 1000 }] }, expect: 201, name: 'POST /api/finance/invoices (returns id > 0)' },
+];
+
 let done = 0, pass = 0, fail = 0;
-checks.forEach((c) => {
-  const opts = { host: '127.0.0.1', port: PORT, path: c.path, method: 'GET' };
-  opts.headers = Object.assign({ Authorization: 'Bearer ' + TOKEN }, c.headers || {});
+const createdIds = {};
+
+function runCheck(c) {
+  const opts = { host: '127.0.0.1', port: PORT, path: c.path, method: c.method || 'GET' };
+  const headers = Object.assign({ Authorization: 'Bearer ' + TOKEN, 'X-Tenant-Id': '0', 'content-type': 'application/json' }, c.headers || {});
+  opts.headers = headers;
+  if (c.body && c.method && c.method !== 'GET') {
+    opts.body = JSON.stringify(c.body);
+  }
   const req = http.request(opts, (res) => {
     let body = '';
     res.on('data', d => body += d);
@@ -103,13 +119,26 @@ checks.forEach((c) => {
       const got = res.statusCode;
       const ok = got === c.expect;
       if (ok) { pass++; console.log('  PASS', got, c.name); }
-      else { fail++; console.log('  FAIL', got, '(expected', c.expect + ')', c.name, '|', body.slice(0, 150)); }
-      if (++done === checks.length) { console.log('endpoint smoke:', pass, 'pass,', fail, 'fail'); process.exit(fail > 0 ? 1 : 0); }
+      else { fail++; console.log('  FAIL', got, '(expected', c.expect + ')', c.name, '|', body.slice(0, 200)); }
+      // Wave-14 specific: POST must return a numeric id, not null.
+      if (c.method === 'POST' && got === 201) {
+        try {
+          const parsed = JSON.parse(body);
+          if (!Number.isInteger(parsed.id) || parsed.id <= 0) {
+            fail++;
+            console.log('  FAIL POST returned non-positive id:', body.slice(0, 200));
+          }
+        } catch {}
+      }
+      if (++done === checks.length + writeChecks.length) { console.log('endpoint smoke:', pass, 'pass,', fail, 'fail'); process.exit(fail > 0 ? 1 : 0); }
     });
   });
-  req.on('error', (e) => { fail++; console.log('  ERR', c.name, e.message); if (++done === checks.length) { console.log('endpoint smoke:', pass, 'pass,', fail, 'fail'); process.exit(fail > 0 ? 1 : 0); } });
+  req.on('error', (e) => { fail++; console.log('  ERR', c.name, e.message); if (++done === checks.length + writeChecks.length) { console.log('endpoint smoke:', pass, 'pass,', fail, 'fail'); process.exit(fail > 0 ? 1 : 0); } });
+  if (opts.body) req.write(opts.body);
   req.end();
-});
+}
+checks.forEach(runCheck);
+writeChecks.forEach(runCheck);
 "
 SMOKE_RC=$?
 echo

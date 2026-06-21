@@ -53,6 +53,100 @@ npm run lint
 npm run format:check
 ```
 
+## How to deploy (single-node, self-hosted)
+
+The product is a single Node.js process backed by a sqlite file. There
+is no Docker, no Kubernetes manifest, no cloud account required — the
+deployment is one `npm install` + one `node bin/sbos-server.mjs` on
+any Linux/macOS host with Node 20+.
+
+```bash
+# 1. Install dependencies
+nvm use                 # Node 20
+npm ci                  # exact versions from package-lock.json
+
+# 2. Back up any existing database (idempotent re-boot preserves the DB)
+[ -f .sbos.db ] && cp .sbos.db .sbos.db.bak-$(date +%s)
+
+# 3. Boot the server
+PORT=8080 \
+HOST=0.0.0.0 \
+SBOS_DB=/var/lib/sbos-a1-erp/sbos.db \
+SBOS_LOCALE=en \
+node bin/sbos-server.mjs
+
+# 4. Capture the admin session token from stdout (printed on first
+#    boot; idempotent on restart, so the same token works until the
+#    DB is rebuilt from scratch):
+#
+#    [sbos-server] admin session token: aBcD1234...
+#
+# 5. Verify it works
+curl -s http://127.0.0.1:8080/api/health
+# → {"ok":true,"version":"0.1.0"}
+
+curl -s -H "Authorization: Bearer aBcD1234..." \
+     -H "X-Tenant-Id: 0" \
+     http://127.0.0.1:8080/api/finance/customers
+# → {"items":[]}
+```
+
+### Environment variables
+
+| Var              | Default          | Description                                                  |
+| ---------------- | ---------------- | ------------------------------------------------------------ |
+| `PORT`           | `3000`           | HTTP port the server listens on                              |
+| `HOST`           | `127.0.0.1`      | Bind host. Set to `0.0.0.0` for LAN/remote access             |
+| `SBOS_DB`        | `./.sbos.db`     | Path to the sqlite file. Auto-created on first boot          |
+| `SBOS_LOCALE`    | `en`             | Default locale (`en`, `hy`, `ru` supported)                  |
+| `SBOS_AUTH_MODE` | `real`           | `real` = session-token auth (production), `stub` = dev/test  |
+
+### Production considerations (not in code, deploy-time concerns)
+
+- **Process supervision**: wrap the boot in systemd, pm2, or a
+  Docker restart policy. SIGTERM is handled (clean shutdown).
+- **HTTPS**: not built in. Run behind nginx/Caddy/Traefik with
+  TLS termination.
+- **Backups**: `.sbos.db` is a single file. Snapshot before every
+  deploy (see step 2 above). The file is safe to copy while the
+  server is running (sqlite WAL mode).
+- **Multi-tenancy**: every endpoint except `/api/health` requires
+  an `X-Tenant-Id` header (or `req.user.tenant_id` from the auth
+  layer). Tenant 0 is the bootstrap tenant; new tenants need a
+  row in `finance.tenants` plus a matching `users.tenant_id`.
+- **Auth token storage**: the admin session token is printed to
+  stdout on first boot. For multi-host deploys, persist it to
+  a secret store (Hashicorp Vault, AWS Secrets Manager, k8s
+  Secret) and inject via env at boot. The token is idempotent
+  on restart against the same DB.
+- **Smoke test**: `npm run smoke:deploy` exercises a fresh-install
+  boot end-to-end (13 GET endpoints + 3 write endpoints + DB schema
+  check + graceful shutdown + restart idempotency). Runs in CI on
+  every push and PR.
+
+### Running behind a reverse proxy
+
+```nginx
+# /etc/nginx/sites-available/sbos-a1-erp
+server {
+  listen 443 ssl http2;
+  server_name erp.example.com;
+  ssl_certificate     /etc/letsencrypt/live/erp.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/erp.example.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # Big request bodies (file uploads) need an explicit limit;
+    # the default 1mb on the Node side is the safety net.
+    client_max_body_size 10m;
+  }
+}
+```
+
 ## How to orchestrate a new wave
 
 ```bash

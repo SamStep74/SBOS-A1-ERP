@@ -61,18 +61,22 @@ export function makePgAdapter(sqliteDb) {
         .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '')
         .replace(/(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g, '$1');
       const stmt = sqliteDb.prepare(translated);
-      // SELECTs return rows; non-SELECTs return [] (the production
-      // finance modules own the write-path branches — same rule as
-      // server/finance/reports.js' runQuery).
-      const trimmed = translated.trim().toUpperCase();
-      if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH')) {
-        const rows = stmt.all(...(params || []));
-        return { rows };
-      }
-      const info = stmt.run(...(params || []));
-      // Mirror pg's RETURNING-less result shape: include lastInsertRowid
-      // so callers that use `RETURNING id` can fall back to it.
-      return { rows: [], lastInsertRowid: info.lastInsertRowid, changes: info.changes };
+      // node:sqlite's `Statement.all()` returns the result rows for
+      // SELECTs, INSERT/UPDATE/DELETE-with-RETURNING, and WITH-CTE
+      // queries. For a plain INSERT/UPDATE/DELETE (no RETURNING), it
+      // returns []. This is the right behaviour for the production
+      // finance surface — every write here uses RETURNING and the
+      // pure functions read back the result via `ins.rows[0].id`.
+      //
+      // An earlier version branched on SELECT and called
+      // `stmt.run()` for everything else, which silently dropped the
+      // RETURNING data and forced callers to fall back to
+      // LAST_INSERT_ROWID() (whose column name is literally
+      // "LAST_INSERT_ROWID()" with parens — easy to misread as
+      // `rows[0].id`). That mismatch is what the wave-14 deploy
+      // test caught.
+      const rows = stmt.all(...(params || []));
+      return { rows };
     },
   };
 }
