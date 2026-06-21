@@ -487,6 +487,105 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
   - 1242/1242 tests pass (was 1240; +2 new). Smoke 86
     endpoints + STEP 5b + 5c + 5d + 5e + 5f all pass.
     `npm run check` clean, boundary 0.
+- **Wave 33 (Vendor 360 — pure function + 13 tests)** — DONE.
+  - `server/finance/vendor360.js` exports
+    `getVendor360(db, vendorId, tenantId, opts)` — the
+    purchase-side mirror of the customer 360. Returns:
+    ```json
+    {
+      "vendor": { id, code, name, hvhh, address, email, phone, contact_name, tenant_id },
+      "open_purchase_orders": [{
+        id, order_number, order_date, expected_date, status,
+        total_amd, outstanding_amd, days_overdue
+      }],
+      "recent_receipts": [{
+        id, purchase_order_id, order_number, receipt_number,
+        received_at, notes
+      }],
+      "totals": { open_count, open_total_amd, outstanding_amd },
+      "aging": { current, days_1_30, days_31_60, days_61_90, days_90_plus }
+    }
+    ```
+  - Aging is keyed on `expected_date` (when we expect to
+    receive the goods). POs that are already received fall
+    into the `current` bucket — the operator has the goods,
+    so there's nothing to age. The bill-level outstanding
+    (after billing) is a follow-up.
+  - Added a small `getVendor(db, id, tenantId)` helper to
+    `purchase.js` (the same shape as `getCustomer`) so the
+    360 view can fetch vendor basic info with the same
+    tenant-scoping pattern.
+  - 13 tests cover: missing vendor (404), cross-tenant
+    invisibility, empty vendor, 3 aging-bucket cases
+    (current / 31-60 / 90+), billed PO exclusion, cancelled
+    PO exclusion, due_date sort order, received-PO
+    exclusion from overdue, recent_receipts order, invalid
+    vendorId / tenantId.
+  - 1255/1255 tests pass (was 1242; +13). Lint clean.
+- **Wave 34 (Dashboard 360 — pure function + 13 tests)** — DONE.
+  - `server/finance/dashboard360.js` exports
+    `getDashboard360(db, tenantId, opts)` — the CFO
+    dashboard JSON. Returns:
+    ```json
+    {
+      "today": "YYYY-MM-DD",
+      "ar": { open_count, outstanding_amd, aging: { ... 5 buckets } },
+      "ap": { open_count, outstanding_amd, aging: { ... 5 buckets } },
+      "top_customers": [{ id, name, hvhh, outstanding_amd, open_invoice_count }],
+      "top_vendors":   [{ id, code, name, hvhh, outstanding_amd, open_po_count }]
+    }
+    ```
+  - 4 SQL aggregates run in parallel (Promise.all): AR
+    totals + aging, AP totals + aging, top customers, top
+    vendors. Each query is a single scan regardless of how
+    many customers / vendors exist — the dashboard scales
+    without the per-entity N+1 cost of the customer/vendor
+    360 views.
+  - Aging on the dashboard uses `julianday($today) -
+    julianday(due_date)` for AR and `julianday($today) -
+    julianday(expected_date)` for AP. The query uses
+    distinct placeholders ($1..$7) so the test adapter's
+    pg → sqlite translation preserves parameter identity
+    (a regression I hit during Wave 34 — sqlite silently
+    fills unfilled `?` with NULL, which made every aging
+    bucket return 0 in tests until I switched to distinct
+    placeholders).
+  - 13 tests cover: empty tenant, AR totals + aging,
+    paid-invoice exclusion, top-customers sort, AP totals +
+    aging, billed/cancelled PO exclusion, top-vendors sort,
+    0-outstanding exclusion, partial-payment reduction,
+    cross-tenant isolation, limit cap, invalid tenantId,
+    invalid today format.
+  - 1268/1268 tests pass (was 1255; +13). Lint clean.
+- **Wave 35 (Dashboard 360 — route wiring)** — DONE.
+  - Wires the Wave 34 pure function to
+    `GET /api/finance/360`. Two middlewares:
+    `requireTenant` (Wave 28 defense-in-depth) and
+    `requirePerm('reports.dashboard.read')` (the same perm
+    the HTML `/api/finance/dashboard` view uses).
+  - Optional `?today=YYYY-MM-DD` and `?limit=N` query
+    params. The pure function defaults today to the current
+    date and limit to 10 (max 50).
+  - 2 new integration tests in `server.test.js`:
+    - 36f — `GET /api/finance/360` returns the full
+      dashboard JSON shape (ar / ap / aging / top_customers /
+      top_vendors, all with the expected field types).
+    - 36g — `GET /api/finance/360?today=2026-01-01` returns
+      `body.today === '2026-01-01'` (back-dated dashboard).
+  - 1 new deploy smoke step (STEP 5g): hits the endpoint
+    with the admin token, asserts the response shape
+    (today regex, ar.open_count/outstanding_amd/aging,
+    ap.open_count/outstanding_amd/aging, top_customers +
+    top_vendors as arrays). Sanity: `?today=2026-01-01`
+    override returns `today=2026-01-01`.
+  - **CFO dashboard story complete end-to-end**:
+    - HTML dashboard: `GET /api/finance/dashboard` (Wave 14)
+    - JSON dashboard: `GET /api/finance/360` (Wave 35)
+    - Per-customer drill-down: `GET /api/finance/customers/:id/360` (Wave 32)
+    - Per-vendor drill-down: `GET /api/finance/vendors/:id/360` (defer — pure function shipped Wave 33, route pending)
+  - 1270/1270 tests pass (was 1268; +2). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e + 5f + 5g all pass.
+    `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See

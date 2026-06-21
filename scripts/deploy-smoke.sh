@@ -721,6 +721,88 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5g: Dashboard 360 JSON endpoint (Wave 35) ==="
+# Wave 35 wires the dashboard 360 pure function (Wave 34) to
+# GET /api/finance/360. Smoke: hit the endpoint with the admin
+# token, assert the response shape (ar, ap, top_customers,
+# top_vendors). Sanity: ?today=YYYY-MM-DD override returns the
+# expected today field.
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Hit the dashboard endpoint with default today
+    const r = await call('GET', '/api/finance/360', null, tok);
+    if (r.status !== 200) {
+      console.log('  FAIL get dashboard:', r.status, JSON.stringify(r.body).slice(0, 200));
+      process.exit(1);
+    }
+    const b = r.body;
+    if (typeof b.today !== 'string' || !/^\d{4}-\d{2}-\d{2}\$/.test(b.today)) {
+      console.log('  FAIL today field missing or malformed:', b.today);
+      process.exit(1);
+    }
+    if (!b.ar || typeof b.ar.open_count !== 'number' || typeof b.ar.outstanding_amd !== 'number' || !b.ar.aging) {
+      console.log('  FAIL ar shape:', JSON.stringify(b.ar).slice(0, 200));
+      process.exit(1);
+    }
+    if (!b.ap || typeof b.ap.open_count !== 'number' || typeof b.ap.outstanding_amd !== 'number' || !b.ap.aging) {
+      console.log('  FAIL ap shape:', JSON.stringify(b.ap).slice(0, 200));
+      process.exit(1);
+    }
+    if (!Array.isArray(b.top_customers)) {
+      console.log('  FAIL top_customers not array:', typeof b.top_customers);
+      process.exit(1);
+    }
+    if (!Array.isArray(b.top_vendors)) {
+      console.log('  FAIL top_vendors not array:', typeof b.top_vendors);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/360 returns the full dashboard JSON (ar + ap + top_customers + top_vendors)');
+    // 2) ?today override
+    const r2 = await call('GET', '/api/finance/360?today=2026-01-01', null, tok);
+    if (r2.status !== 200) {
+      console.log('  FAIL get dashboard with override:', r2.status);
+      process.exit(1);
+    }
+    if (r2.body.today !== '2026-01-01') {
+      console.log('  FAIL override today not applied:', r2.body.today);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/360?today=2026-01-01 returns today=' + r2.body.today);
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  dashboard 360 OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")

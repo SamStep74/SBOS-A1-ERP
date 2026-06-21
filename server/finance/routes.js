@@ -103,6 +103,7 @@ import {
 import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
 import { getCustomer360 } from './customer360.js';
+import { getDashboard360 } from './dashboard360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
@@ -365,6 +366,47 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // CFO dashboard JSON — AR + AP totals + top customers + top
+  // vendors. Single round-trip, the whole collections + AP picture.
+  // Wave 34/35. Companion to the existing /api/finance/dashboard
+  // HTML view (above): same data, JSON shape, designed for an
+  // external dashboard client (e.g. a CFO-facing webapp).
+  //
+  // Perm gate: reports.dashboard.read (the same perm the HTML
+  // dashboard uses). Tenant scope: requireTenant middleware.
+  //
+  // Optional ?today=YYYY-MM-DD override (defaults to current
+  // date inside the pure function). Same back-dated-aging pattern
+  // as the customer/vendor 360 endpoints.
+  app.get(
+    '/api/finance/360',
+    requireTenant,
+    requirePerm('reports.dashboard.read'),
+    async (req, res, next) => {
+      try {
+        const today = typeof req.query.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.today)
+          ? req.query.today
+          : undefined;
+        const limit = req.query.limit != null && /^\d+$/.test(String(req.query.limit))
+          ? Number(req.query.limit)
+          : undefined;
+        const opts = {};
+        if (today) opts.today = today;
+        if (limit != null) opts.limit = limit;
+        const out = await getDashboard360(pgAdapter, req.tenantId, opts);
+        res.status(200).json(out);
+      } catch (err) {
+        // The pure function throws ValueError on bad inputs (bad
+        // tenantId, bad today format). Map to 400; everything else
+        // is a real 500.
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
 
   // List invoices — tenant-scoped. The listInvoices pure function already
   // threads tenantId; the route picks it up from req (X-Tenant-Id or

@@ -1058,6 +1058,44 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(body.error, 'not_found');
   });
 
+  // ─── Wave 35: dashboard 360 route ───
+
+  test('36f. GET /api/finance/360 returns the full dashboard JSON (Wave 35)', async () => {
+    // The dashboard endpoint returns the AR + AP totals + top
+    // customers + top vendors in one round-trip. The seed data
+    // from earlier tests (the customer 1 we created in test 22)
+    // means there's at least some data — we assert the shape +
+    // the fields exist. The specific counts depend on the seed;
+    // the structural assertions are the load-bearing ones.
+    const { status, body } = await get(server, '/api/finance/360');
+    assert.equal(status, 200);
+    assert.equal(typeof body.today, 'string');
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(body.today));
+    assert.ok(body.ar, 'response should include ar');
+    assert.ok(body.ap, 'response should include ap');
+    assert.ok(typeof body.ar.open_count === 'number');
+    assert.ok(typeof body.ar.outstanding_amd === 'number');
+    assert.ok(body.ar.aging, 'ar.aging should exist');
+    assert.ok(typeof body.ar.aging.current === 'number');
+    assert.ok(typeof body.ar.aging.days_1_30 === 'number');
+    assert.ok(typeof body.ar.aging.days_31_60 === 'number');
+    assert.ok(typeof body.ar.aging.days_61_90 === 'number');
+    assert.ok(typeof body.ar.aging.days_90_plus === 'number');
+    assert.ok(typeof body.ap.open_count === 'number');
+    assert.ok(typeof body.ap.outstanding_amd === 'number');
+    assert.ok(body.ap.aging, 'ap.aging should exist');
+    assert.ok(Array.isArray(body.top_customers));
+    assert.ok(Array.isArray(body.top_vendors));
+  });
+
+  test('36g. GET /api/finance/360?today=YYYY-MM-DD uses the override (back-dated aging)', async () => {
+    // The ?today query param lets the operator pull a back-dated
+    // dashboard. The response.today should reflect the override.
+    const { status, body } = await get(server, '/api/finance/360?today=2026-01-01');
+    assert.equal(status, 200);
+    assert.equal(body.today, '2026-01-01');
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {
