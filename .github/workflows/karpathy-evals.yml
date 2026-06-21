@@ -1,0 +1,254 @@
+# Karpathy Evals — Weekly Cron
+#
+# Runs every Karpathy keep-or-revert eval contract across the A1
+# portfolio. Each contract lives in `evals/karpathy/*.json` and
+# specifies a command + args + a target branch. The workflow clones
+# each repo at the target branch, runs the eval, and reports
+# success/failure per contract. On any failure: opens a labelled
+# issue with the failing contract's name + log.
+#
+# Coverage matrix (as of 2026-06-21):
+#
+# | Repo                          | Branch                                              | Contract                  |
+# |-------------------------------|-----------------------------------------------------|---------------------------|
+# | SamStep74/A1-Suite-Local-MAX  | main                                                | shell-health              |
+# | SamStep74/A1-Suite-Local-MAX  | karpathy/erp-idempotency                            | erp-idempotency           |
+# | SamStep74/A1-Suite-Local-MAX  | karpathy/workflow-runtime                           | workflow-runtime          |
+# | SamStep74/A1-Suite-Local-MAX  | karpathy/agent-layer                                 | agent-layer               |
+# | SamStep74/A1-Suite-Local-MAX  | karpathy/finance-close                               | finance-close             |
+# | SamStep74/A1-SMB-HH-HY-MAX    | karpathy/hh-rbac-migration                           | hh-rbac-migration         |
+# | SamStep74/A1-ERP-HY           | karpathy/rbac-contract                              | rbac-contract             |
+# | SamStep74/A1-Suite-Local-ANT  | karpathy/egress-policy-contract-default             | egress-policy-contract    |
+# | SamStep74/A1-Suite-Local-ANT  | karpathy/egress-policy-contract-public               | egress-policy-contract    |
+# | Armosphera/autoresearch-sboss | karpathy/invoice-extractor-contract                 | invoice-extractor-contract |
+#
+# Schedule: Mondays 06:00 UTC (early enough to catch drift before
+# the portfolio health check at 08:00 UTC).
+
+name: Karpathy evals
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      only_failed:
+        description: "Only run contracts that previously failed"
+        required: false
+        default: "false"
+  push:
+    paths:
+      - "evals/karpathy/**"
+      - ".github/workflows/karpathy-evals.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  karpathy-evals:
+    if: false  # disabled 2026-06-21 — repo is private, local CI in ~/dev/armosphera/
+    name: Karpathy evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # (repo, ref, contract-file, contract-name)
+          - repo: SamStep74/A1-Suite-Local-MAX
+            ref: main
+            contract: shell-health
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-MAX
+            ref: karpathy/erp-idempotency
+            contract: erp-idempotency
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-MAX
+            ref: karpathy/workflow-runtime
+            contract: workflow-runtime
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-MAX
+            ref: karpathy/agent-layer
+            contract: agent-layer
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-MAX
+            ref: karpathy/finance-close
+            contract: finance-close
+            token: sam
+          - repo: SamStep74/A1-SMB-HH-HY-MAX
+            ref: karpathy/hh-rbac-migration
+            contract: hh-rbac-migration
+            token: sam
+          - repo: SamStep74/A1-ERP-HY
+            ref: karpathy/rbac-contract
+            contract: rbac-contract
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-ANT
+            ref: karpathy/egress-policy-contract-default
+            contract: egress-policy-contract
+            token: sam
+          - repo: SamStep74/A1-Suite-Local-ANT
+            ref: karpathy/egress-policy-contract-public
+            contract: egress-policy-contract
+            token: sam
+          - repo: Armosphera/autoresearch-sboss
+            ref: karpathy/invoice-extractor-contract
+            contract: invoice-extractor-contract
+            token: arm
+          # a1-cross-link-sweep uses a Python CLI, not the JSON contract
+          # envelope; it's already exercised by the portfolio health
+          # check #3. Skip here to keep the matrix homogeneous.
+          # (Re-enable if/when a1-cross-link-sweep grows a JSON contract.)
+    env:
+      GH_TOKEN_SAM: ${{ secrets.GH_TOKEN_SAM || secrets.GITHUB_TOKEN }}
+      GH_TOKEN_ARM: ${{ secrets.GH_TOKEN_ARM || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout A1-portfolio (for runner context)
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Setup Python (for autoresearch-sboss + a1-clx)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve token
+        id: tok
+        run: |
+          if [ "${{ matrix.token }}" = "sam" ]; then
+            echo "token=$GH_TOKEN_SAM" >> "$GITHUB_OUTPUT"
+          else
+            echo "token=$GH_TOKEN_ARM" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch contract + clone repo at ref
+        id: fetch
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          set -e
+          mkdir -p /tmp/eval
+          echo "::group::contract"
+          curl -sSL -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ matrix.repo }}/contents/evals/karpathy/${{ matrix.contract }}.json?ref=${{ matrix.ref }}" \
+            | jq -r '.content' | base64 -d > /tmp/eval/contract.json
+          cat /tmp/eval/contract.json | jq '{id, repo: "${{ matrix.repo }}", ref: "${{ matrix.ref }}", command: .eval.command, args: .eval.args}'
+          echo "::endgroup::"
+          echo "::group::clone"
+          cd /tmp/eval
+          # Shallow clone of the contract's ref. For SamStep74/* we need
+          # the GH_TOKEN to push back if we ever retry — but this workflow
+          # is read-only at the runner level. We just clone.
+          git clone --depth 1 --branch "${{ matrix.ref }}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ matrix.repo }}.git" repo
+          echo "::endgroup::"
+          echo "contract_path=$(pwd)/contract.json" >> "$GITHUB_OUTPUT"
+          echo "repo_path=$(pwd)/repo" >> "$GITHUB_OUTPUT"
+
+      - name: Install deps + run eval
+        id: eval
+        working-directory: ${{ steps.fetch.outputs.repo_path }}
+        env:
+          EXPERIMENT_BUDGET_SEC: "300"
+        run: |
+          set +e
+          cd "${{ steps.fetch.outputs.repo_path }}"
+          # Install only if needed (some contracts need vitest + typescript)
+          if [ -f package.json ]; then
+            echo "::group::npm ci"
+            npm ci --no-audit --no-fund --prefer-offline 2>&1 | tail -5 || npm install --no-audit --no-fund 2>&1 | tail -5
+            echo "::endgroup::"
+          fi
+          # Read command + args from contract
+          cmd=$(jq -r '.eval.command' /tmp/eval/contract.json)
+          args=$(jq -r '.eval.args | join(" ")' /tmp/eval/contract.json)
+          echo "::group::eval: $cmd $args"
+          eval "$cmd $args" 2>&1 | tee /tmp/eval/output.log | tail -40
+          exit_code=$?
+          echo "::endgroup::"
+          # Inspect output for the metric
+          metric_line=$(grep -E "^score=|^failing_checks=" /tmp/eval/output.log | head -1 || echo "")
+          echo "metric_line=$metric_line"
+          echo "metric_value=$metric_line" >> "$GITHUB_OUTPUT"
+          echo "exit-code=$exit_code" >> "$GITHUB_OUTPUT"
+          # Some contracts exit 0 on success + 1 on failure. Others
+          # (like the autoresearch ones) print a score we compare.
+          # The orchestrator decides per contract.
+          if [ $exit_code -eq 0 ]; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+          set -e
+
+      - name: Upload log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: karpathy-${{ matrix.contract }}-${{ matrix.ref }}
+          path: /tmp/eval/output.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "## Karpathy eval summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Repo:** \`${{ matrix.repo }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Ref:** \`${{ matrix.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Contract:** \`${{ matrix.contract }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Result:** ${{ steps.eval.outputs.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Metric:** \`${{ steps.eval.outputs.metric_value }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Exit code:** ${{ steps.eval.outputs.exit-code }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the job if eval failed
+        if: steps.eval.outputs.result == 'fail'
+        run: |
+          echo "Karpathy contract '${{ matrix.contract }}' failed on ${{ matrix.repo }}@${{ matrix.ref }}"
+          exit 1
+
+  # Cross-cutting job: open a single issue summarizing all failures.
+  # Dedupe against existing [karpathy-drift] issues.
+  report-failures:
+    if: false  # disabled 2026-06-21 — repo is private, local CI in ~/dev/armosphera/
+    name: Report Karpathy failures
+    needs: karpathy-evals
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Find failing contracts (via needs context)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          title="[karpathy-drift] Eval contracts failed — $today"
+          # Search for an existing open issue with the same prefix
+          existing=$(gh api -X GET "repos/Armosphera/A1-portfolio/issues?state=open&labels=karpathy-drift&per_page=1" -q '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Existing issue: #$existing — adding a comment"
+            gh issue comment "$existing" --repo Armosphera/A1-portfolio --body "Re-failed at $today (run ${{ github.run_id }}): the karpathy-evals matrix had at least one failing contract. See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            echo "Creating new issue"
+            gh issue create --repo Armosphera/A1-portfolio \
+              --title "$title" \
+              --body "Karpathy eval contracts failed on the weekly cron at $today.
+
+Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+Check the failing matrix entries for the eval output (each contract has its own artifact). The contract tells you which branch to inspect:
+- Failed contracts: see the per-job logs in this run.
+- All contracts: see evals/karpathy/*.json on each branch." \
+              --label karpathy-drift
+          fi
