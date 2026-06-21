@@ -561,6 +561,35 @@ const PERMISSIONS = Object.freeze({
     label: 'Create catalog variant',
     description: 'Add a new variant (SKU + name + attributes) under a catalog item.',
   },
+  // ─────────── Catalog v2 (Phase 2 W78/W79) — bundles ───────────
+  // Bundles: compound catalog items (header + N child
+  // rows referencing catalog_items). The 4 new perm
+  // keys are 2 read + 2 create, split between the
+  // bundle header and the bundle-item children.
+  'finance.bundle.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog bundle',
+    description: 'View catalog bundles (compound items with a fixed price + recipe).',
+  },
+  'finance.bundle.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog bundle',
+    description: 'Add a new catalog bundle (header row).',
+  },
+  'finance.bundle_item.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog bundle item',
+    description: 'View bundle items (the recipe rows that reference catalog items).',
+  },
+  'finance.bundle_item.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog bundle item',
+    description: 'Add a new bundle item (a child row referencing a catalog item + quantity).',
+  },
   'finance.warehouse.read': {
     category: 'finance',
     sensitivity: 'low',

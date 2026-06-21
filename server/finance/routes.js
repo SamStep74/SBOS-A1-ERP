@@ -75,6 +75,11 @@
 //   GET    /api/finance/catalog/items/:itemId/variants
 //   POST   /api/finance/catalog/items/:itemId/variants
 //   GET    /api/finance/catalog/variants/:id
+//   GET    /api/finance/catalog/bundles?archived=
+//   POST   /api/finance/catalog/bundles
+//   GET    /api/finance/catalog/bundles/:id
+//   GET    /api/finance/catalog/bundles/:id/items
+//   POST   /api/finance/catalog/bundles/:id/items
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -160,6 +165,11 @@ import {
   createVariant,
   listVariants,
   getVariant,
+  createBundle,
+  listBundles,
+  getBundle,
+  addBundleItem,
+  listBundleItems,
 } from './catalog.js';
 import {
   listJournalEntries,
@@ -1711,4 +1721,114 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ─────────── Catalog v2 wave 3b (bundles) — Phase 2 (W79) ───────────
+  //
+  // The bundles module extends the catalog with
+  // compound items: a bundle has a header row
+  // (sku + name + bundle_price_amd) + N child rows
+  // referencing catalog_items. Wave 3b wires 5 HTTP
+  // endpoints (consistent with the W70->W71 / W72->W73
+  // / W74->W75 / W76->W77 cadence): 2 reads on bundles
+  // (list + get), 1 write on bundles (create), 1 read
+  // on bundle items (list), 1 write on bundle items
+  // (add). The 5 endpoints map to 4 perm keys (all
+  // NEW in W79-1; added to server/rbac/permissions.js):
+  //   finance.bundle.read        — list + get bundle
+  //   finance.bundle.create      — create bundle
+  //   finance.bundle_item.read   — list bundle items
+  //   finance.bundle_item.create — add bundle item
+  // The new CatalogOperator perm set bundles all 4
+  // keys (now 8 total catalog v2 keys; W76+W77+W78).
+
+  // GET /api/finance/catalog/bundles
+  //   List bundles for the caller's tenant. Default
+  //   (archived=false) returns only non-archived
+  //   bundles. ?archived=true returns all bundles
+  //   (including archived) — useful for cleanup views.
+  app.get('/api/finance/catalog/bundles', requireTenant, requirePerm('finance.bundle.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const archived = req.query.archived === 'true';
+      const items = await listBundles(pgAdapter, tenantId, { archived });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/bundles
+  //   Create a new bundle. Body: { sku, name,
+  //   description?, bundle_price_amd? }. sku + name
+  //   are required. bundle_price_amd is optional
+  //   (null when the bundle's price is computed
+  //   dynamically — future work).
+  app.post(
+    '/api/finance/catalog/bundles',
+    requireTenant,
+    requirePerm('finance.bundle.create'),
+    wrapFinanceRoute('finance.bundle.create', 'catalog_bundle:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createBundle(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/catalog/bundles/:id
+  //   Get a single bundle. Returns 404 if the bundle
+  //   is missing or cross-tenant (the pure getBundle
+  //   function throws ValueError on "not found in
+  //   tenant"; the route handler converts to 404
+  //   inline — the W73-1 pattern).
+  app.get('/api/finance/catalog/bundles/:id', requireTenant, requirePerm('finance.bundle.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const item = await getBundle(pgAdapter, bundleId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/catalog/bundles/:id/items
+  //   List the recipe rows (catalog items +
+  //   quantities) for a bundle. Returns 404 if the
+  //   bundle is missing or cross-tenant (the pure
+  //   listBundleItems function does the existence
+  //   check).
+  app.get('/api/finance/catalog/bundles/:id/items', requireTenant, requirePerm('finance.bundle_item.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const items = await listBundleItems(pgAdapter, bundleId, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/bundles/:id/items
+  //   Add a new recipe row to a bundle. Body: {
+  //   catalog_item_id, quantity }. The bundle_id
+  //   is injected from the URL (the body may also
+  //   include it; the URL value wins — consistent
+  //   with the W75-1 projects pattern).
+  app.post(
+    '/api/finance/catalog/bundles/:id/items',
+    requireTenant,
+    requirePerm('finance.bundle_item.create'),
+    wrapFinanceRoute('finance.bundle_item.create', 'catalog_bundle_item:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const bundleId = Number(req.params.id);
+      const out = await addBundleItem(pgAdapter, bundleId, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
 }

@@ -123,6 +123,12 @@ const checks = [
   { path: '/api/finance/catalog/categories?parent_id=1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/categories?parent_id=1 tenant=0' },
   { path: '/api/finance/catalog/categories/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/categories/1 (404 for missing category)' },
   { path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/variants/1 (404 for missing variant)' },
+  // Phase 2 catalog v2 wave 3b (W79-1) — bundles reads
+  // (empty DB → 200, items: []; 404 for missing bundle)
+  { path: '/api/finance/catalog/bundles', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles tenant=0' },
+  { path: '/api/finance/catalog/bundles?archived=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles?archived=true tenant=0' },
+  { path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1 (404 for missing bundle)' },
+  { path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1/items (404 for missing bundle)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -200,6 +206,17 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/catalog/categories/1/path', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/categories/1/path (returns the breadcrumb path)' },
   { method: 'GET', path: '/api/finance/catalog/items/1/variants', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/items/1/variants (returns the variant created above)' },
   { method: 'GET', path: '/api/finance/catalog/variants/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/variants/1 (returns the variant created above)' },
+  // Phase 2 catalog v2 wave 3b (W79-1) — bundles +
+  // bundle items writes. The bundle smoke check
+  // returns id > 0 (the wave-14 production pg
+  // adapter regression guard). The bundle item
+  // smoke check depends on the bundle + the
+  // catalog item (id=1, created by the earlier
+  // catalog item smoke check) being present.
+  { method: 'POST', path: '/api/finance/catalog/bundles', body: { sku: 'SMOKE-BUN-1', name: 'Smoke Bundle', bundle_price_amd: 25000 }, expect: 201, name: 'POST /api/finance/catalog/bundles (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/catalog/bundles/1/items', body: { catalog_item_id: 1, quantity: 2 }, expect: 201, name: 'POST /api/finance/catalog/bundles/1/items (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1 (returns the bundle created above)' },
+  { method: 'GET', path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/catalog/bundles/1/items (returns the recipe item created above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
