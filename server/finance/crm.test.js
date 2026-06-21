@@ -13,7 +13,7 @@ import {
 } from './crm.js';
 
 // ────────────────────────────────────────────────────────────────────────
-// Test harness
+// Test harness — production-shaped db adapter (db.query returns { rows })
 // ────────────────────────────────────────────────────────────────────────
 
 function makeMemoryDb() {
@@ -52,9 +52,11 @@ function makeMemoryDb() {
   `);
   return {
     _db: db,
+    // Production shape: db.query(sql, params) returns { rows: [...] }
+    // for SELECT; for INSERT/UPDATE the { rows: [] } fallback is
+    // used (the CRM module falls back to LAST_INSERT_ROWID()).
     async query(sql, params = []) {
-      // Mimic realDb.js' pg adapter (returns { rows } shape, uses
-      // positional $N params). Translate $N → ? for sqlite.
+      // Translate pg-style $N → sqlite ? placeholder.
       const pgStyle = sql.replace(/\$\d+/g, '?');
       const stmt = db.prepare(pgStyle);
       const upper = sql.trim().toUpperCase();
@@ -69,20 +71,6 @@ function makeMemoryDb() {
         lastInsertRowid: info.lastInsertRowid,
         changes: info.changes,
       };
-    },
-    async run(sql, params = []) {
-      // Production-style: db.run(sql, params) — used by the CRM
-      // pure functions. The CRM module uses positional $N params;
-      // we translate to ? for sqlite.
-      const pgStyle = sql.replace(/\$\d+/g, '?');
-      const stmt = db.prepare(pgStyle);
-      const info = stmt.run(...params);
-      return { lastInsertRowid: info.lastInsertRowid, changes: info.changes };
-    },
-    async all(sql, params = []) {
-      const pgStyle = sql.replace(/\$\d+/g, '?');
-      const stmt = db.prepare(pgStyle);
-      return stmt.all(...params);
     },
   };
 }
@@ -183,11 +171,11 @@ test('crm: createLead inserts a row with default status=new', async () => {
   const out = await createLead(db, { name: 'New prospect' }, 0);
   assert.ok(out.id > 0);
   // The default status is 'new' — verify via the db adapter.
-  const rows = await db.all(
-    'SELECT status FROM finance.crm_leads WHERE id = ?',
+  const rows = await db.query(
+    'SELECT status FROM finance.crm_leads WHERE id = $1',
     [out.id],
   );
-  assert.equal(rows[0].status, 'new');
+  assert.equal(rows.rows[0].status, 'new');
 });
 
 test('crm: createLead accepts all status values', async () => {

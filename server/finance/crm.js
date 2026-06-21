@@ -1,4 +1,4 @@
-// CRM (customer relationship management) — Phase 2 wave 1.
+// CRM (customer relationship management) — Phase 2 wave 1 + wave 2.
 //
 // Ported from packages/erp/src/crm/*.ts in A1-Suite-Local
 // (the user's private R&D monorepo). The pure-function
@@ -9,10 +9,25 @@
 //   - crm_leads: potential customers / sales pipeline
 //
 // Phase 2 wave 1 (W70-2): schema + pure functions + tests.
-// Phase 2 wave 2 (future): route wiring + permission keys
-// + smoke check + audit log integration.
+// Phase 2 wave 2 (W71-1): route wiring (4 endpoints).
+// Future waves: update + archive endpoints, deal/pipeline
+// tracking, activity log.
 
 export class ValueError extends Error {}
+
+// ────────────────────────────────────────────────────────────────────────
+// DB adapter helper (matches the pattern in customer.js / inventory.js)
+// ────────────────────────────────────────────────────────────────────────
+
+async function runQuery(db, sql, params) {
+  // The production adapter is a pg-style adapter (rows property,
+  // $N placeholders). The test adapter uses $N too (the test
+  // helper translates $N → ?). The CRM pure functions speak
+  // the production shape.
+  const result = await db.query(sql, params || []);
+  if (result && Array.isArray(result.rows)) return result;
+  return { rows: [] };
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Validation
@@ -99,10 +114,12 @@ function validateLeadInput(input) {
 
 export async function createContact(db, input, tenantId = 0) {
   validateContactInput(input);
-  const result = await db.run(
+  const ins = await runQuery(
+    db,
     `INSERT INTO finance.crm_contacts
-        (tenant_id, customer_id, name, email, phone, role, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (tenant_id, customer_id, name, email, phone, role, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id`,
     [
       tenantId,
       input.customer_id ?? null,
@@ -113,19 +130,32 @@ export async function createContact(db, input, tenantId = 0) {
       input.notes ?? null,
     ],
   );
-  return { id: Number(result.lastInsertRowid ?? result.lastID) };
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    // Fallback for adapters that don't support RETURNING
+    const lastId = await runQuery(
+      db,
+      'SELECT LAST_INSERT_ROWID()',
+      [],
+    );
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
 }
 
 export async function listContacts(db, tenantId = 0) {
-  const rows = await db.all(
+  const result = await runQuery(
+    db,
     `SELECT id, customer_id, name, email, phone, role, notes,
             created_at, updated_at
        FROM finance.crm_contacts
-      WHERE tenant_id = ? AND archived = 0
+      WHERE tenant_id = $1 AND archived = 0
       ORDER BY name`,
     [tenantId],
   );
-  return rows;
+  return result.rows;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -134,11 +164,13 @@ export async function listContacts(db, tenantId = 0) {
 
 export async function createLead(db, input, tenantId = 0) {
   validateLeadInput(input);
-  const result = await db.run(
+  const ins = await runQuery(
+    db,
     `INSERT INTO finance.crm_leads
-        (tenant_id, name, company, email, phone, source,
-         status, estimated_value_amd, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (tenant_id, name, company, email, phone, source,
+        status, estimated_value_amd, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
     [
       tenantId,
       input.name,
@@ -151,7 +183,18 @@ export async function createLead(db, input, tenantId = 0) {
       input.notes ?? null,
     ],
   );
-  return { id: Number(result.lastInsertRowid ?? result.lastID) };
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(
+      db,
+      'SELECT LAST_INSERT_ROWID()',
+      [],
+    );
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
 }
 
 export async function listLeads(db, tenantId = 0, status = null) {
@@ -159,23 +202,29 @@ export async function listLeads(db, tenantId = 0, status = null) {
   // datetime('now') is second-precision; multiple inserts in
   // the same second share the same created_at, but the
   // auto-incrementing id is unique and reflects insertion order.
-  let sql, params;
+  let result;
   if (status !== null) {
-    sql = `SELECT id, name, company, email, phone, source,
-                  status, estimated_value_amd, notes,
-                  created_at, updated_at
-             FROM finance.crm_leads
-            WHERE tenant_id = ? AND status = ?
-            ORDER BY id DESC`;
-    params = [tenantId, status];
+    result = await runQuery(
+      db,
+      `SELECT id, name, company, email, phone, source,
+              status, estimated_value_amd, notes,
+              created_at, updated_at
+         FROM finance.crm_leads
+        WHERE tenant_id = $1 AND status = $2
+        ORDER BY id DESC`,
+      [tenantId, status],
+    );
   } else {
-    sql = `SELECT id, name, company, email, phone, source,
-                  status, estimated_value_amd, notes,
-                  created_at, updated_at
-             FROM finance.crm_leads
-            WHERE tenant_id = ?
-            ORDER BY id DESC`;
-    params = [tenantId];
+    result = await runQuery(
+      db,
+      `SELECT id, name, company, email, phone, source,
+              status, estimated_value_amd, notes,
+              created_at, updated_at
+         FROM finance.crm_leads
+        WHERE tenant_id = $1
+        ORDER BY id DESC`,
+      [tenantId],
+    );
   }
-  return db.all(sql, params);
+  return result.rows;
 }

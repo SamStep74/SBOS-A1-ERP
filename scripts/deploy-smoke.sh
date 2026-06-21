@@ -101,6 +101,10 @@ const checks = [
   { path: '/api/finance/vendors',           headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/vendors tenant=0' },
   { path: '/api/finance/purchase-orders',   headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/purchase-orders tenant=0' },
   { path: '/api/finance/vendor-bills',      headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/vendor-bills tenant=0' },
+  // Phase 2 CRM (W71-1) — contacts + leads reads (empty DB → 200, items: [])
+  { path: '/api/finance/crm/contacts',      headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/contacts tenant=0' },
+  { path: '/api/finance/crm/leads',         headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/leads tenant=0' },
+  { path: '/api/finance/crm/leads?status=qualified', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/leads?status=qualified tenant=0' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -132,6 +136,9 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/journal-entries', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/journal-entries (Wave 19 — populated by the e2e flow above)' },
   { method: 'GET', path: '/api/finance/account-balances', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/account-balances (Wave 19 — 216 + 521 populated by the receive above)' },
   { method: 'GET', path: '/api/finance/account-balances/216', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/account-balances/216 (Wave 19 — single account)' },
+  // Phase 2 CRM (W71-2) — contacts + leads writes.
+  { method: 'POST', path: '/api/finance/crm/contacts', body: { name: 'Smoke Contact', email: 'smoke@example.com', role: 'CEO' }, expect: 201, name: 'POST /api/finance/crm/contacts (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/crm/leads', body: { name: 'Smoke Lead', company: 'Smoke Corp', source: 'website', status: 'qualified', estimated_value_amd: 1000000 }, expect: 201, name: 'POST /api/finance/crm/leads (returns id > 0)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
