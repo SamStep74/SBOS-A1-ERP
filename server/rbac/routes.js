@@ -562,7 +562,11 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/field-policies/:path(*)',
     { preHandler: requirePermFastify('security.permission_set.update') },
     async (request, reply) => {
-      const path = String(request.params.path || '');
+      // request.params.path is set by Express 5 / path-to-regexp v8+
+      // (named wildcard `*path`). Express 4 / path-to-regexp 0.1.13
+      // uses the unnamed splat `*` which lands in params[0]. Fall back
+      // so the route works in BOTH environments.
+      const path = String(request.params.path || request.params[0] || '');
       const body = request.body || {};
       if (!body.minPermission || !PERMISSIONS[body.minPermission]) {
         return reply.code(400).send({ error: 'invalid_min_permission' });
@@ -611,7 +615,9 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/record-rules/:resource(*)',
     { preHandler: requirePermFastify('security.permission_set.update') },
     async (request, reply) => {
-      const resource = String(request.params.resource || '');
+      // See field-policies route for why this fallback exists
+      // (Express 4 splat at params[0], Express 5 named at params.resource).
+      const resource = String(request.params.resource || request.params[0] || '');
       const body = request.body || {};
       const validScopes = ['own', 'team', 'org', 'custom'];
       if (!validScopes.includes(body.scope))
