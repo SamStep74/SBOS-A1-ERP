@@ -105,6 +105,29 @@ function makeMemoryDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );
+    -- Phase 1 ERP — GL journal (migration 0010)
+    CREATE TABLE journal_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      entry_date TEXT NOT NULL,
+      source TEXT NOT NULL,
+      source_id INTEGER,
+      description TEXT,
+      currency TEXT NOT NULL DEFAULT 'AMD',
+      status TEXT NOT NULL DEFAULT 'posted',
+      book_date TEXT NOT NULL DEFAULT (datetime('now')),
+      created_by INTEGER
+    );
+    CREATE TABLE journal_entry_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      entry_id INTEGER NOT NULL,
+      line_order INTEGER NOT NULL DEFAULT 0,
+      account_code TEXT NOT NULL,
+      debit INTEGER NOT NULL DEFAULT 0,
+      credit INTEGER NOT NULL DEFAULT 0,
+      description TEXT
+    );
   `);
   // pg-style adapter wrapper. We translate $N → ? on the way down.
   return {
