@@ -1431,6 +1431,82 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(r.body.error, 'not_found');
   });
 
+  // ─── Wave 42: user-facing session management ───
+
+  // Helper: insert a session row for a user. Mirrors the production
+  // schema (permission_set_ids_json + effective_permissions_json are
+  // NOT NULL — the boot-minted admin token row has them as '[]').
+  function seedSession(db, { id, userId, roleId = 'Admin', expiresAt }) {
+    db.prepare(
+      `INSERT INTO sbos_rbac_sessions
+         (id, user_id, tenant_id, role_id,
+          permission_set_ids_json, effective_permissions_json,
+          created_at, last_seen_at, expires_at)
+       VALUES (?, ?, 0, ?, '[]', '[]', datetime('now'), datetime('now'), ?)`,
+    ).run(id, userId, roleId, expiresAt);
+  }
+
+  test('42a. GET /api/auth/sessions returns the user\'s active sessions', async () => {
+    // Stub auth mode sets req.user.id = 1 (the admin). Insert a
+    // session row directly so listMySessions returns something.
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    full.db.prepare('DELETE FROM sbos_rbac_sessions WHERE user_id = 1 AND id LIKE ?').run('W42-%');
+    seedSession(full.db, { id: 'W42-my-current', userId: 1, expiresAt: future });
+    const { status, body } = await get(server, '/api/auth/sessions');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.items));
+    assert.ok(body.items.length >= 1);
+    // The session we just inserted must be in the list.
+    const found = body.items.find((s) => s.id === 'W42-my-current');
+    assert.ok(found, `expected to find W42-my-current in ${JSON.stringify(body.items)}`);
+  });
+
+  test('42b. POST /api/auth/sessions/:id/revoke revokes a session the user owns', async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    full.db.prepare('DELETE FROM sbos_rbac_sessions WHERE user_id = 1 AND id LIKE ?').run('W42-%');
+    seedSession(full.db, { id: 'W42-revoke-me', userId: 1, expiresAt: future });
+    const r = await postJson(server, '/api/auth/sessions/W42-revoke-me/revoke', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.revoked, 'W42-revoke-me');
+    // Verify the row is marked revoked.
+    const row = full.db.prepare('SELECT revoked_at FROM sbos_rbac_sessions WHERE id = ?').get('W42-revoke-me');
+    assert.ok(row.revoked_at, 'session should be marked revoked');
+  });
+
+  test('42c. POST /api/auth/sessions/:id/revoke returns 404 for cross-user session (scope check)', async () => {
+    // Insert a session for user 2 (bob). Stub auth mode uses user 1
+    // (admin). The endpoint must reject with 404 — not silently succeed.
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    full.db.prepare('DELETE FROM sbos_rbac_sessions WHERE id LIKE ?').run('W42-other-%');
+    full.db.prepare('DELETE FROM users WHERE id = ?').run(2);
+    full.db.prepare('INSERT INTO users (id, username, email, role, tenant_id) VALUES (?, ?, ?, ?, 0)').run(2, 'bob', 'bob@example.com', 'Operator');
+    seedSession(full.db, { id: 'W42-other-bobs', userId: 2, roleId: 'Operator', expiresAt: future });
+    const r = await postJson(server, '/api/auth/sessions/W42-other-bobs/revoke', {});
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'not_found');
+    // Verify bob's session is NOT revoked.
+    const row = full.db.prepare('SELECT revoked_at FROM sbos_rbac_sessions WHERE id = ?').get('W42-other-bobs');
+    assert.equal(row.revoked_at, null);
+  });
+
+  test('42d. POST /api/auth/sessions/revoke-all revokes every active session for the user', async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    full.db.prepare('DELETE FROM sbos_rbac_sessions WHERE user_id = 1 AND id LIKE ?').run('W42-%');
+    full.db.prepare('DELETE FROM sbos_rbac_sessions WHERE user_id = 2 AND id LIKE ?').run('W42-%');
+    seedSession(full.db, { id: 'W42-all-1', userId: 1, expiresAt: future });
+    seedSession(full.db, { id: 'W42-all-2', userId: 1, expiresAt: future });
+    // Add a session for bob (must NOT be touched).
+    seedSession(full.db, { id: 'W42-all-bobs', userId: 2, roleId: 'Operator', expiresAt: future });
+    const r = await postJson(server, '/api/auth/sessions/revoke-all', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.revoked_count, 2);
+    // Bob's session is untouched.
+    const bob = full.db.prepare('SELECT revoked_at FROM sbos_rbac_sessions WHERE id = ?').get('W42-all-bobs');
+    assert.equal(bob.revoked_at, null);
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {

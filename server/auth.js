@@ -49,7 +49,7 @@ export function seedSessionForAdmin(db, { ttlSeconds = 60 * 60 * 24 * 30 } = {})
       `SELECT id FROM sbos_rbac_sessions
         WHERE user_id = 1 AND role_id = 'Admin'
           AND revoked_at IS NULL
-          AND expires_at > datetime('now')
+          AND strftime('%s', expires_at) > strftime('%s', 'now')
         ORDER BY created_at DESC
         LIMIT 1`,
     )
@@ -140,11 +140,11 @@ export function makeAuthMiddleware({ db, authMode = process.env.SBOS_AUTH_MODE |
                   u.username, u.email, u.role AS user_role,
                   u.org_id, u.mfa_required, u.mfa_verified
              FROM sbos_rbac_sessions s
-             JOIN users u ON u.id = s.user_id
-            WHERE s.id = ?
-              AND s.revoked_at IS NULL
-              AND s.expires_at > datetime('now')
-            LIMIT 1`,
+JOIN users u ON u.id = s.user_id
+             WHERE s.id = ?
+               AND s.revoked_at IS NULL
+               AND strftime('%s', s.expires_at) > strftime('%s', 'now')
+             LIMIT 1`,
         )
         .get(token);
     } catch (_err) {

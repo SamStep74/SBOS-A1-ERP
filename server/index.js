@@ -365,6 +365,71 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
     res.status(200).json({ ok: true });
   });
 
+  // ──────────────────────────────────────────────────────────────────
+  // Wave 42 — user-facing session management
+  //
+  // The /api/rbac/sessions endpoints (in server/rbac/routes.js) are
+  // the admin/auditor view (list ALL sessions in a tenant, revoke
+  // ANY session, gated by security.session.list / .revoke).
+  //
+  // The endpoints below are the USER-facing view: any logged-in user
+  // can list THEIR OWN active sessions, revoke a session they own
+  // (e.g. "log me out of my old phone"), and revoke all of their
+  // sessions including the current one ("logout-everywhere"). No
+  // extra perm gate beyond authentication — these are self-service.
+  //
+  // The scope check (session.user_id === req.user.id) is enforced
+  // at the SQL boundary in the pure functions (server/auth-sessions.js),
+  // not at the route layer, so a malicious request body can't
+  // escape the scope.
+  // ──────────────────────────────────────────────────────────────────
+
+  // GET /api/auth/sessions — list the current user's active sessions.
+  app.get('/api/auth/sessions', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+    try {
+      const { listMySessions } = await import('./auth-sessions.js');
+      const sessions = listMySessions(db, req.user.id);
+      // Mark which one is the current session (the one issuing this request).
+      const items = sessions.map((s) => ({
+        ...s,
+        is_current: req.session && req.session.id === s.id,
+      }));
+      res.status(200).json({ items });
+    } catch (err) {
+      res.status(500).json({ error: 'internal_error', message: err && err.message });
+    }
+  });
+
+  // POST /api/auth/sessions/:id/revoke — revoke one of the current
+  // user's sessions (must be owned by them; cross-user is rejected
+  // at the SQL boundary).
+  app.post('/api/auth/sessions/:id/revoke', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+    try {
+      const { revokeMySession } = await import('./auth-sessions.js');
+      const ok = revokeMySession(db, req.user.id, req.params.id);
+      if (!ok) {
+        return res.status(404).json({ error: 'not_found', message: 'session not found or not yours' });
+      }
+      res.status(200).json({ ok: true, revoked: req.params.id });
+    } catch (err) {
+      res.status(500).json({ error: 'internal_error', message: err && err.message });
+    }
+  });
+
+  // POST /api/auth/sessions/revoke-all — revoke ALL of the current
+  // user's sessions, including the current one (logout-everywhere).
+  // The current session is also revoked; the caller will need to
+  // log in again on the next request.
+  app.post('/api/auth/sessions/revoke-all', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+    try {
+      const { revokeAllMySessions } = await import('./auth-sessions.js');
+      const count = revokeAllMySessions(db, req.user.id);
+      res.status(200).json({ ok: true, revoked_count: count });
+    } catch (err) {
+      res.status(500).json({ error: 'internal_error', message: err && err.message });
+    }
+  });
+
   // Generic 404.
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', path: req.path });

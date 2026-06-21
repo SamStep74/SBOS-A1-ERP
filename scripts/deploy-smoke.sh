@@ -1353,6 +1353,105 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5m: Session management (Wave 42) ==="
+# Smoke coverage for the user-facing session management endpoints:
+#   GET /api/auth/sessions (list MY sessions)
+#   POST /api/auth/sessions/:id/revoke (revoke one of MY sessions)
+#   POST /api/auth/sessions/revoke-all (logout-everywhere)
+# Also verifies the boot-time session janitor log line.
+#
+# The boot log should contain `session-janitor: expired_revoked=N deleted=N`.
+if grep -q "session-janitor:" "$LOG"; then
+  echo "  PASS boot-time session janitor log line present"
+  grep "session-janitor:" "$LOG" | head -1
+else
+  echo "  FAIL boot-time session janitor log line missing"
+  SMOKE_RC=1
+fi
+
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+
+  function call(method, path, body) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const headers = { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN };
+      if (data) {
+        headers['content-type'] = 'application/json';
+        headers['content-length'] = Buffer.byteLength(data);
+      }
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method, headers,
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+
+  (async () => {
+    // 1. GET /api/auth/sessions — list the admin's active sessions.
+    const list1 = await call('GET', '/api/auth/sessions');
+    if (list1.status !== 200) {
+      console.log('  FAIL GET /api/auth/sessions: status=' + list1.status + ' body=' + JSON.stringify(list1.body).slice(0, 120));
+      process.exit(1);
+    }
+    if (!Array.isArray(list1.body.items) || list1.body.items.length === 0) {
+      console.log('  FAIL expected at least 1 active session (the admin token), got ' + JSON.stringify(list1.body).slice(0, 120));
+      process.exit(1);
+    }
+    // The current admin session is in the list and marked is_current.
+    const current = list1.body.items.find(s => s.is_current);
+    if (!current) {
+      console.log('  FAIL no session marked is_current=true in ' + JSON.stringify(list1.body.items));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/auth/sessions returns the admin session (is_current=true)');
+
+    // 2. POST /api/auth/sessions/FAKE/revoke — unknown session returns 404.
+    const fake = await call('POST', '/api/auth/sessions/FAKE-TOKEN-ID/revoke', {});
+    if (fake.status !== 404) {
+      console.log('  FAIL revoke fake session: expected 404, got ' + fake.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 POST /api/auth/sessions/FAKE/revoke (unknown session)');
+
+    // 3. GET /api/auth/sessions without auth — 401.
+    const unauth = await new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path: '/api/auth/sessions', method: 'GET',
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+      });
+      req.end();
+    });
+    if (unauth.status !== 401) {
+      console.log('  FAIL GET /api/auth/sessions (no auth): expected 401, got ' + unauth.status);
+      process.exit(1);
+    }
+    console.log('  PASS 401 GET /api/auth/sessions without auth (no session leak)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  session management OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

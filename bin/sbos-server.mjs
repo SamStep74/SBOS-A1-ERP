@@ -236,6 +236,20 @@ async function main() {
       `[sbos-server] reconciliation: skipped (${err && err.message ? err.message : err})`,
     );
   }
+  // Boot-time session janitor (Wave 42). Marks expired-but-active
+  // sessions as revoked + deletes very-old revoked sessions. Idempotent
+  // and best-effort (failure logs but does NOT block boot).
+  try {
+    const { pruneExpiredSessions } = await import('../server/auth-sessions.js');
+    const sessResult = pruneExpiredSessions(sqliteDb);
+    console.warn(
+      `[sbos-server] session-janitor: expired_revoked=${sessResult.expired_revoked} deleted=${sessResult.deleted}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[sbos-server] session-janitor: skipped (${err && err.message ? err.message : err})`,
+    );
+  }
   console.warn(`[sbos-server] listening on http://${host}:${port}`);
   const server = await start({
     db: sqliteDb,
