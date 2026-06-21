@@ -850,6 +850,139 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5i: Auth login hardening (Wave 38) ==="
+# Smoke coverage for the auth login flow's hardening:
+#   1. Wrong password → 401
+#   2. Unknown username → 401 with the same error message
+#      (no enumeration leak — operators can't probe for valid usernames)
+#   3. failed_logins counter increments per failed attempt
+#   4. 5 failed attempts → 6th attempt is rejected (account locked
+#      for 15 minutes by the lockout policy)
+# Uses a dedicated test user so the admin isn't locked out (which
+# would block the rest of the smoke).
+DB_PATH="$DB" PORT="$PORT" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const { hashPassword } = require('$REPO_ROOT/server/auth-login.js');
+  const http = require('node:http');
+
+  // Seed a fresh test user. Idempotent (DELETE-then-INSERT).
+  const db = new DatabaseSync(process.env.DB_PATH);
+  const { hash, salt } = hashPassword('goodpass!');
+  db.prepare('DELETE FROM users WHERE username = ?').run('wavetester');
+  db.prepare(\`INSERT INTO users
+    (id, username, email, role, tenant_id, password_hash, password_salt, failed_logins)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)\`).run(
+      99, 'wavetester', 'wave@example.com', 'Admin', 0, hash, salt, 0,
+    );
+
+  function login(username, password) {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({ username, password });
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path: '/api/auth/login', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  function failedLogins(username) {
+    const row = db.prepare('SELECT failed_logins, locked_until FROM users WHERE username = ?').get(username);
+    return row ? { failed_logins: row.failed_logins, locked_until: row.locked_until } : null;
+  }
+
+  (async () => {
+    // 1. Wrong password → 401 with error='unauthorized'
+    const r1 = await login('wavetester', 'wrongpass');
+    if (r1.status !== 401) {
+      console.log('  FAIL wrong password: expected 401, got', r1.status, JSON.stringify(r1.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (r1.body.error !== 'unauthorized') {
+      console.log('  FAIL wrong password short error code:', r1.body.error);
+      process.exit(1);
+    }
+    if (r1.body.message !== 'invalid username or password') {
+      console.log('  FAIL wrong password detailed message:', r1.body.message);
+      process.exit(1);
+    }
+    // failed_logins should now be 1
+    const f1 = failedLogins('wavetester');
+    if (!f1 || f1.failed_logins !== 1) {
+      console.log('  FAIL failed_logins counter after 1 attempt:', JSON.stringify(f1));
+      process.exit(1);
+    }
+    console.log('  PASS 401 POST /api/auth/login (wrong password increments failed_logins to 1)');
+
+    // 2. Unknown username → 401 with the same error code + message
+    // (no enumeration leak — operators can't probe for valid usernames)
+    const r2 = await login('nobody', 'whatever');
+    if (r2.status !== 401) {
+      console.log('  FAIL unknown user: expected 401, got', r2.status);
+      process.exit(1);
+    }
+    if (r2.body.error !== r1.body.error || r2.body.message !== r1.body.message) {
+      console.log('  FAIL unknown user error differs from wrong password (enumeration leak):');
+      console.log('    wrong password: error=' + r1.body.error + ', message=' + r1.body.message);
+      console.log('    unknown user:   error=' + r2.body.error + ', message=' + r2.body.message);
+      process.exit(1);
+    }
+    console.log('  PASS 401 POST /api/auth/login (unknown username returns identical error — no enumeration)');
+
+    // 3. Burn the remaining 4 attempts (counter is at 1, need to
+    // reach 5+ to trigger the lockout). 4 more wrong attempts.
+    for (let i = 0; i < 4; i++) {
+      await login('wavetester', 'wrongpass');
+    }
+    // After 5 total attempts, the user should be locked.
+    const f5 = failedLogins('wavetester');
+    if (!f5 || f5.failed_logins < 5) {
+      console.log('  FAIL failed_logins counter after 5 attempts:', JSON.stringify(f5));
+      process.exit(1);
+    }
+    if (!f5.locked_until) {
+      console.log('  FAIL locked_until not set after 5 attempts:', JSON.stringify(f5));
+      process.exit(1);
+    }
+    console.log('  PASS 5 failed attempts → failed_logins=' + f5.failed_logins + ', locked_until=' + f5.locked_until);
+
+    // 4. Even with the CORRECT password, the user is locked.
+    // This proves the lockout blocks valid credentials too
+    // (preventing brute-force). The route returns 423 (Locked)
+    // with error='locked' for the locked-out state — distinct
+    // from 401 (invalid creds) so clients can render a different
+    // UX ('try again in 15 minutes' vs 'wrong password').
+    const r6 = await login('wavetester', 'goodpass!');
+    if (r6.status !== 423) {
+      console.log('  FAIL locked-out user with correct password: expected 423, got', r6.status, JSON.stringify(r6.body));
+      process.exit(1);
+    }
+    if (r6.body.error !== 'locked') {
+      console.log('  FAIL locked-out error code:', r6.body.error);
+      process.exit(1);
+    }
+    console.log('  PASS 423 POST /api/auth/login (locked user blocked even with correct password — error=locked, anti-brute-force)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  auth login hardening OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
