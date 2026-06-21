@@ -169,9 +169,34 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     on every fresh install. Catches accidental removal of
     the hook.
   - 1130/1130 tests pass. Deploy smoke at 57 endpoints.
+- **Wave 25 (Phase 2 Projects — route wiring)** — DONE.
+  - Wires the projects + tasks + time-entries entities (from
+    W74-1's schema + pure functions + 29 tests) into the HTTP
+    layer with perm gates.
+  - 8 new routes in server/finance/routes.js (list/create/get
+    for projects, list/create for tasks under a project, and
+    list/create for time-entries under a task). All gated by
+    `projects.project.{read,create}` / `projects.task.{read,
+    create,update}` (the 17 project perms were seeded in W74-1).
+  - The two nested POSTs (`/projects/:id/tasks` and
+    `/tasks/:id/time-entries`) inject the URL param into the
+    body as `project_id` / `task_id` before calling the pure
+    function — same pattern as the CRM and desk nested
+    resources.
+  - The single-entity GETs (`getProject`, `getTask`) catch the
+    pure function's `ValueError("X N not found in tenant T")`
+    and map it to 404 — same pattern as customer / inventory /
+    purchase / desk / crm.
+  - 5 new deploy smoke checks (list + status filter + 404 on
+    missing project + 404 on missing tasks list + 404 on the
+    nested projects/:id/tasks). Smoke at 68 endpoints
+    (was 57; +5 for projects, +6 for desk that landed just
+    before this wave).
+  - 1159/1159 tests pass (was 1130; +29 from W74-1's
+    pre-existing project tests). `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
-to GL, customer 360 + vendor 360 panels). See
+to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
 
 ## How to run
