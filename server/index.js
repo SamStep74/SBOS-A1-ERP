@@ -59,12 +59,12 @@ async function getPackageVersion() {
 }
 
 function toExpressRoute(url) {
-  // Express's path-to-regexp (v6+) supports the `:name(*)` wildcard
-  // syntax natively — same as Fastify — so no translation is needed.
-  // (Earlier draft translated `:path(*)` → `*path`, but Express's
-  // `*path` only matches a single segment, not multi-segment paths
-  // like `customer/contact/ssn`. This bit Wave 7's PUT routes.)
-  return String(url);
+  // Fastify's `:name(*)` wildcard syntax translates to Express's
+  // `*name` wildcard syntax (Express path-to-regexp v6+ accepts this
+  // natively and matches multi-segment paths). The translation
+  // preserves the parameter name so handlers can read `req.params.<name>`
+  // as an array (joined with / via normalizeRouteParams).
+  return String(url).replace(/\/:([A-Za-z_][A-Za-z0-9_]*)\(\*\)/g, '/*$1');
 }
 
 function normalizeRouteParams(params = {}) {
