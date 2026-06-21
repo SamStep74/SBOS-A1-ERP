@@ -149,10 +149,29 @@ async function main() {
   const sqliteDb = new DatabaseSync(dbPath);
   await applySchemas(sqliteDb);
 
-  // Seed + print the admin session token (real-auth path). The
+  // Seed + persist the admin session token (real-auth path). The
   // legacy "Bearer dev" stub is gone — every request needs a real
-  // token minted from the rbac seed.
+  // token minted from the rbac seed. We persist the token to a
+  // file (SBOS_ADMIN_TOKEN_FILE) so the operator can `cat` it
+  // instead of grepping the boot log, and so a `docker exec` /
+  // `journalctl` roundtrip isn't required for multi-host deploys.
+  // The token is also printed to stdout for the operator who is
+  // already watching the boot log.
   const adminToken = seedAdminSession(sqliteDb);
+  if (process.env.SBOS_ADMIN_TOKEN_FILE) {
+    const { writeFileSync, mkdirSync, chmodSync } = await import('node:fs');
+    const { dirname } = await import('node:path');
+    const tokenFile = process.env.SBOS_ADMIN_TOKEN_FILE;
+    mkdirSync(dirname(tokenFile), { recursive: true });
+    writeFileSync(tokenFile, adminToken + '\n', { mode: 0o600 });
+    try {
+      chmodSync(tokenFile, 0o600);
+    } catch (_e) {
+      // best-effort: chmod might fail on some FSes (e.g. FAT32 in
+      // a bind-mount); the file content is still set correctly
+    }
+    console.warn(`[sbos-server] admin session token written to ${tokenFile} (mode 0600)`);
+  }
   console.warn(`[sbos-server] admin session token: ${adminToken}`);
   console.warn(`[sbos-server] use: curl -H "Authorization: Bearer ${adminToken}" http://${host}:${port}/api/health`);
 

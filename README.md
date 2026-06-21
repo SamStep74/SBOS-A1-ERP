@@ -147,6 +147,116 @@ server {
 }
 ```
 
+### Containerized deploy (Docker)
+
+```bash
+docker build -t sbos-a1-erp:dev .
+docker run --rm -d \
+  --name sbos-a1-erp \
+  -p 8080:3000 \
+  -v sbos-data:/var/lib/sbos-a1-erp \
+  -e PORT=3000 \
+  -e HOST=0.0.0.0 \
+  sbos-a1-erp:dev
+
+# Grab the admin token from the container's logs:
+docker logs sbos-a1-erp 2>&1 | grep "admin session token"
+# Or read the token file directly (it's at the data volume path):
+docker exec sbos-a1-erp cat /var/lib/sbos-a1-erp/admin-token
+```
+
+The image is multi-stage (Node 20 alpine, ~80MB), runs as a
+non-root `sbos` user, exposes a `HEALTHCHECK` on `/api/health`, and
+persists the sqlite file + admin token in a mounted volume at
+`/var/lib/sbos-a1-erp`.
+
+### Process supervision
+
+**systemd** (Linux, preferred for production):
+
+```bash
+# 1. Copy the unit file and edit the User/Environment/ExecStart paths
+sudo cp scripts/sbos-a1-erp.service /etc/systemd/system/
+sudo systemctl edit sbos-a1-erp  # optional: drop-in overrides
+
+# 2. Enable + start
+sudo systemctl daemon-reload
+sudo systemctl enable --now sbos-a1-erp
+
+# 3. Watch the boot log (admin token appears here on first boot)
+sudo journalctl -u sbos-a1-erp -f
+
+# 4. Read the token from the file
+sudo cat /var/lib/sbos-a1-erp/admin-token
+
+# 5. Backup
+sudo /opt/sbos-a1-erp/scripts/backup-sbos.sh
+```
+
+**pm2** (cross-platform alternative):
+
+```bash
+npm i -g pm2
+pm2 start scripts/ecosystem.config.cjs
+pm2 startup     # generate the boot-time pm2 daemon
+pm2 save        # save the process list for the daemon
+pm2 logs        # tail stdout (admin token here on first boot)
+pm2 monit       # live resource view
+```
+
+The systemd unit hardens the process with `NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+`MemoryDenyWriteExecute`, `RestrictAddressFamilies`, and
+`ReadWritePaths=/var/lib/sbos-a1-erp`. The pm2 config is the
+cross-platform fallback for hosts without systemd (macOS dev
+boxes, some cloud VMs).
+
+### Admin token storage
+
+The admin session token is printed to stdout on first boot AND
+persisted to `SBOS_ADMIN_TOKEN_FILE` (default:
+`<dir-of-SBOS_DB>/admin-token`, mode 0600). To grab the token:
+
+```bash
+# From the file (canonical):
+sudo cat /var/lib/sbos-a1-erp/admin-token
+
+# Or via the helper:
+npm run token:print
+
+# Or from journalctl (last 50 lines):
+sudo journalctl -u sbos-a1-erp -n 50 | grep "admin session token"
+```
+
+The token is idempotent on restart against the same DB — only a
+fresh DB or a `DELETE FROM sbos_rbac_sessions` rotates it. For
+multi-host deploys, persist the file to a shared secret store
+(Hashicorp Vault, AWS Secrets Manager, k8s Secret) and inject
+via env at boot.
+
+### Database backups
+
+```bash
+# One-shot (online-safe, WAL-friendly, retention=7 by default):
+npm run backup
+
+# Or directly:
+SBOS_DB=/var/lib/sbos-a1-erp/sbos.db \
+  BACKUP_DIR=/var/backups/sbos \
+  KEEP=30 \
+  scripts/backup-sbos.sh
+
+# Cron (daily at 02:00):
+echo '0 2 * * * root /opt/sbos-a1-erp/scripts/backup-sbos.sh' \
+  | sudo tee /etc/cron.d/sbos-backup
+```
+
+The script uses `sqlite3 .backup` (online-safe via the WAL
+journal) and falls back to `cp` if the `sqlite3` CLI is missing.
+`KEEP` controls how many backups to retain; older files are
+pruned. Restore is `cp <backup> /var/lib/sbos-a1-erp/sbos.db`
+while the service is stopped.
+
 ## How to orchestrate a new wave
 
 ```bash

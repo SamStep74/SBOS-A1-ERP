@@ -1,0 +1,85 @@
+# SBOS-A1-ERP systemd unit file.
+#
+# Install:
+#   1. Copy this file to /etc/systemd/system/sbos-a1-erp.service
+#   2. Edit the `User`, `WorkingDirectory`, and the Environment lines
+#      to match your deploy.
+#   3. Copy the repo to /opt/sbos-a1-erp (or wherever the path points).
+#   4. `systemctl daemon-reload && systemctl enable --now sbos-a1-erp`
+#   5. `journalctl -u sbos-a1-erp -f` to watch the boot logs
+#      (the admin session token is printed here on first boot).
+#
+# The unit hardens the process with:
+#   - NoNewPrivileges (no setuid abuse)
+#   - ProtectSystem=strict (only /var/lib/sbos-a1-erp is writable)
+#   - ProtectHome (no access to /home, /root, /run/user)
+#   - PrivateTmp (separate /tmp)
+#   - MemoryDenyWriteExecute (no W^X pages in the address space)
+#   - RestrictAddressFamilies (only AF_INET, AF_INET6, AF_UNIX)
+#
+# Adjust `User=`, `WorkingDirectory=`, and the `Environment=` values
+# for your deploy.
+
+[Unit]
+Description=SBOS-A1-ERP bootable HTTP server
+Documentation=https://github.com/Armosphera/SBOS-A1-ERP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sbos
+Group=sbos
+WorkingDirectory=/opt/sbos-a1-erp
+
+# Adjust the values below to match your deploy. The admin session
+# token is printed to stdout on first boot — read it from journalctl:
+#   journalctl -u sbos-a1-erp -n 50 | grep "admin session token"
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+Environment=SBOS_DB=/var/lib/sbos-a1-erp/sbos.db
+Environment=SBOS_LOCALE=en
+Environment=SBOS_AUTH_MODE=real
+Environment=SBOS_ADMIN_TOKEN_FILE=/var/lib/sbos-a1-erp/admin-token
+
+ExecStart=/usr/bin/node /opt/sbos-a1-erp/bin/sbos-server.mjs
+
+# Restart policy. The node process traps SIGTERM and shuts down
+# cleanly; systemd's Restart=on-failure covers crashes. The
+# StartLimitBurst guards against a crash loop filling the journal.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging — pipe stdout/stderr to the journal so `journalctl` sees
+# the admin session token on first boot. Set RateLimitIntervalSec
+# low so the operator catches the token before it scrolls off.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sbos-a1-erp
+RateLimitIntervalSec=0
+
+# Hardening (systemd v240+; ignored on older systems with a warning).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/sbos-a1-erp
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Graceful shutdown. SIGTERM is handled by the node process; this
+# TimeoutStopSec is the upper bound before systemd sends SIGKILL.
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target

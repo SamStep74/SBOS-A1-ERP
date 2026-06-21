@@ -1,0 +1,43 @@
+# SBOS-A1-ERP Docker build context excludes. The full source tree
+# is small, so this is mostly to keep the build context tight and
+# prevent accidentally copying secrets or large data files.
+
+# Don't ship the runtime database or admin token into the image.
+# (The data dir at /var/lib/sbos-a1-erp is the runtime target, not
+# part of the image.)
+*.db
+*.db-*
+*.db.bak*
+.sbos.db*
+.sbos-admin-token
+
+# Don't ship node_modules — the deps stage installs them fresh.
+node_modules
+
+# Don't ship the integration worktrees, plan outputs, or scratch.
+.orchestration/
+.plans/
+.orchestrate/
+
+# Don't ship coverage or build output.
+coverage/
+dist/
+.nyc_output/
+
+# Don't ship the other session's product tree.
+A1-*
+
+# Don't ship secrets, .env files, or local config.
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Don't ship the worker's local scratch + ad-hoc files.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.log
