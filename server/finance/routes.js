@@ -872,6 +872,74 @@ export function registerFinanceRoutes(app, opts = {}) {
     },
   );
 
+  // POST /api/finance/lots/:id/recall — flag a lot as recalled
+  // and cascade status='recalled' to every serial in it.
+  //
+  // Wave 41 (regulatory compliance). Body: { reason, force? }.
+  // Perm gate: inventory.lot.recall (high-sensitivity action —
+  // the cascade is irreversible without {force: true}).
+  app.post(
+    '/api/finance/lots/:id/recall',
+    requireTenant,
+    requirePerm('inventory.lot.recall'),
+    async (req, res, next) => {
+      try {
+        const lotId = Number(req.params.id);
+        if (!Number.isInteger(lotId) || lotId <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'lots module not available (run migration 0016)' });
+        }
+        const body = req.body || {};
+        const opts = {
+          reason: body.reason,
+          user_id: req.user && req.user.id ? Number(req.user.id) : null,
+          force: body.force === true,
+        };
+        const out = await lotsApi.recallLot(pgAdapter, req.tenantId, lotId, opts);
+        res.status(200).json(out);
+      } catch (err) {
+        if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/lots/:id/recalled-serials — list the serials
+  // that were flagged recalled for a specific lot. Useful for
+  // customer service to find unit numbers to reach out about.
+  app.get(
+    '/api/finance/lots/:id/recalled-serials',
+    requireTenant,
+    requirePerm('inventory.lot.read'),
+    async (req, res, next) => {
+      try {
+        const lotId = Number(req.params.id);
+        if (!Number.isInteger(lotId) || lotId <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const lotsApi = await getLotsModule();
+        if (!lotsApi) {
+          return res.status(501).json({ error: 'not_supported', message: 'lots module not available (run migration 0016)' });
+        }
+        const out = await lotsApi.listRecalledSerials(pgAdapter, req.tenantId, lotId);
+        res.status(200).json({ items: out });
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
   // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
   app.post(
     '/api/finance/customers',

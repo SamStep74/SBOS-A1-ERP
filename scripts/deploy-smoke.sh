@@ -1220,6 +1220,139 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5l: Lot recall (Wave 41) ==="
+# Smoke coverage for the new POST /api/finance/lots/:id/recall
+# endpoint. Seeds a catalog item + lot + 2 serials, calls recall,
+# then verifies every serial in the lot got status='recalled'
+# (via the GET /api/finance/lots/:id/recalled-serials endpoint).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const http = require('node:http');
+
+  function call(method, path, body) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const headers = { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN };
+      if (data) {
+        headers['content-type'] = 'application/json';
+        headers['content-length'] = Buffer.byteLength(data);
+      }
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method, headers,
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+
+  (async () => {
+    // 1. Create a catalog item for the lot.
+    const item = await call('POST', '/api/finance/catalog/items', {
+      sku: 'W41-SMOKE', name: 'W41 smoke item',
+    });
+    if (item.status !== 201) {
+      console.log('  FAIL create catalog item: status=' + item.status, JSON.stringify(item.body).slice(0, 120));
+      process.exit(1);
+    }
+
+    // 2. Seed a lot + 2 serials directly via DB write.
+    const db = new DatabaseSync(process.env.DB_PATH);
+    db.prepare('DELETE FROM serials WHERE serial_number LIKE ?').run('SN-W41-%');
+    db.prepare('DELETE FROM lots WHERE code = ?').run('LOT-W41-SMOKE');
+    db.prepare(\`INSERT INTO lots
+      (tenant_id, code, catalog_item_id, received_at)
+      VALUES (?, ?, ?, ?)\`).run(0, 'LOT-W41-SMOKE', item.body.id, '2026-06-21');
+    const lotRow = db.prepare('SELECT id FROM lots WHERE code = ?').get('LOT-W41-SMOKE');
+    db.prepare(\`INSERT INTO serials
+      (tenant_id, serial_number, catalog_item_id, lot_id, status, current_location_id, received_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)\`).run(0, 'SN-W41-1', item.body.id, lotRow.id, 'in_stock', 5, '2026-06-21');
+    db.prepare(\`INSERT INTO serials
+      (tenant_id, serial_number, catalog_item_id, lot_id, status, current_location_id, received_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)\`).run(0, 'SN-W41-2', item.body.id, lotRow.id, 'in_stock', 7, '2026-06-21');
+
+    // 3. POST recall.
+    const recall = await call('POST', '/api/finance/lots/' + lotRow.id + '/recall', {
+      reason: 'Supplier flagged contamination — lot XYZ may be unsafe',
+    });
+    if (recall.status !== 200) {
+      console.log('  FAIL POST recall: status=' + recall.status, JSON.stringify(recall.body).slice(0, 120));
+      process.exit(1);
+    }
+    if (recall.body.already_recalled !== false) {
+      console.log('  FAIL already_recalled:', recall.body.already_recalled);
+      process.exit(1);
+    }
+    if (recall.body.recalled_serials !== 2) {
+      console.log('  FAIL recalled_serials:', recall.body.recalled_serials);
+      process.exit(1);
+    }
+    if (!recall.body.lot.recalled_at) {
+      console.log('  FAIL lot.recalled_at not stamped:', JSON.stringify(recall.body.lot).slice(0, 120));
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST /api/finance/lots/' + lotRow.id + '/recall cascades to 2 serials');
+
+    // 4. Verify the recalled serials endpoint.
+    const recalled = await call('GET', '/api/finance/lots/' + lotRow.id + '/recalled-serials');
+    if (recalled.status !== 200) {
+      console.log('  FAIL GET recalled-serials: status=' + recalled.status);
+      process.exit(1);
+    }
+    if (!Array.isArray(recalled.body.items) || recalled.body.items.length !== 2) {
+      console.log('  FAIL GET recalled-serials: expected 2 items, got', JSON.stringify(recalled.body).slice(0, 120));
+      process.exit(1);
+    }
+    if (!recalled.body.items.every(s => s.status === 'recalled' && s.current_location_id === null)) {
+      console.log('  FAIL recalled serials have wrong status/location:', JSON.stringify(recalled.body.items));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/lots/' + lotRow.id + '/recalled-serials returns the 2 serials (status=recalled, location=null)');
+
+    // 5. POST a second recall — must be idempotent (already_recalled=true).
+    const second = await call('POST', '/api/finance/lots/' + lotRow.id + '/recall', {
+      reason: 'second recall — should be a no-op',
+    });
+    if (second.status !== 200 || second.body.already_recalled !== true) {
+      console.log('  FAIL idempotent recall: status=' + second.status + ' already_recalled=' + second.body.already_recalled);
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST recall is idempotent (already_recalled=true on 2nd call)');
+
+    // 6. POST recall without a reason returns 400.
+    const noReason = await call('POST', '/api/finance/lots/' + lotRow.id + '/recall', {});
+    if (noReason.status !== 400) {
+      console.log('  FAIL POST recall no reason: expected 400, got', noReason.status);
+      process.exit(1);
+    }
+    console.log('  PASS 400 POST recall with missing reason');
+
+    // 7. POST recall for an unknown lot returns 404.
+    const missing = await call('POST', '/api/finance/lots/999999/recall', { reason: 'no such lot' });
+    if (missing.status !== 404) {
+      console.log('  FAIL POST recall unknown lot: expected 404, got', missing.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 POST recall for unknown lot');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  lot recall OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
@@ -1803,7 +1936,7 @@ echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
   echo "  - DB schema correct: 36 expected tables present"
-  echo "  - 17 finance migrations applied via applyMigrations"
+  echo "  - 20 finance migrations applied via applyMigrations"
   echo "  - RBAC seed populated on fresh boot"
   echo "  - vat_carry_forward PK is composite"
   echo "  - Admin user linked to Admin rbac role"

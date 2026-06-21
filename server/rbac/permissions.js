@@ -626,6 +626,12 @@ const PERMISSIONS = Object.freeze({
     label: 'Read serials',
     description: 'View unit-level serials (location, status, lot binding).',
   },
+  'inventory.lot.recall': {
+    category: 'inv',
+    sensitivity: 'high',
+    label: 'Recall a lot',
+    description: 'Flag a lot as recalled and cascade status=recalled to every serial in it. Regulatory compliance action; high-sensitivity because the cascade is irreversible without {force: true}.',
+  },
   'finance.stock.move': {
     category: 'finance',
     sensitivity: 'high',

@@ -117,9 +117,11 @@ export async function getLot(db, id, tenantId = 0) {
   const result = await runQuery(
     db,
     `SELECT id, tenant_id, code, supplier_lot_number, catalog_item_id,
-            expiry_date, received_at, notes, created_at, updated_at
+            expiry_date, received_at, notes,
+            recalled_at, recall_reason, recalled_by,
+            created_at, updated_at
        FROM finance.lots
-      WHERE tenant_id = $1 AND id = $2`,
+       WHERE tenant_id = $1 AND id = $2`,
     [tenantId, id],
   );
   if (!result.rows || result.rows.length === 0) return null;
@@ -156,7 +158,7 @@ export async function listLotsForItem(db, catalogItemId, tenantId = 0) {
 // Serials
 // ────────────────────────────────────────────────────────────────────────
 
-const VALID_SERIAL_STATUSES = new Set(['in_stock', 'sold', 'returned', 'lost', 'scrap']);
+const VALID_SERIAL_STATUSES = new Set(['in_stock', 'sold', 'returned', 'lost', 'scrap', 'recalled']);
 
 /**
  * Create a serial-numbered unit. Each unit has its own row in the
@@ -638,6 +640,159 @@ export async function assignSerialLocation(db, tenantId, serialId, locationId, s
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Product recall (Wave 41)
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Recall a lot and cascade the recall to every serial in that lot.
+ *
+ * This is the regulatory-compliance action for batch-tracked goods
+ * (food, pharma, electronics with a defect): when the supplier or
+ * the manufacturer flags a lot as unsafe, the operator recalls it.
+ * Every unit-serial that was ever bound to that lot gets its
+ * status flipped to 'recalled' (so it's no longer sellable) and its
+ * current_location_id is cleared (so the picker can't accidentally
+ * ship it out).
+ *
+ * The lot itself gets audit-trail columns stamped:
+ *   - recalled_at   (datetime('now'))
+ *   - recall_reason (the operator's note, 1-512 chars)
+ *   - recalled_by   (the user_id who triggered the recall)
+ *
+ * Idempotent: recalling an already-recalled lot returns the
+ * existing recall info without cascading again (the serials are
+ * already status='recalled'). The caller can pass {force: true}
+ * to re-cascade (e.g. if some serials were marked 'returned'
+ * in the interim and need to be re-flagged).
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} lotId
+ * @param {object} opts
+ * @param {string} opts.reason       required, 1-512 chars
+ * @param {number} opts.user_id      optional, recorded as recalled_by
+ * @param {boolean} [opts.force]     re-cascade even if already recalled
+ * @returns {Promise<{lot: object, recalled_serials: number, already_recalled: boolean}>}
+ */
+export async function recallLot(db, tenantId, lotId, opts = {}) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(lotId) || lotId <= 0) {
+    throw new ValueError('lotId must be a positive integer');
+  }
+  const reason = opts.reason == null ? null : String(opts.reason).trim();
+  if (!reason || reason.length === 0) {
+    throw new ValueError('opts.reason is required (1-512 chars)');
+  }
+  if (reason.length > 512) {
+    throw new ValueError('opts.reason must be 1-512 chars');
+  }
+  const userId = opts.user_id == null ? null : Number(opts.user_id);
+  if (userId != null && (!Number.isInteger(userId) || userId < 0)) {
+    throw new ValueError('opts.user_id must be a non-negative integer or null');
+  }
+  const force = opts.force === true;
+
+  // Validate the lot exists + belongs to the tenant.
+  const lot = await runQuery(
+    db,
+    `SELECT id, recalled_at FROM finance.lots WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, lotId],
+  );
+  if (!lot.rows || lot.rows.length === 0) {
+    throw new ValueError(`lot ${lotId} not found in tenant ${tenantId}`);
+  }
+  const alreadyRecalled = lot.rows[0].recalled_at != null;
+  if (alreadyRecalled && !force) {
+    // Idempotent: don't re-cascade, just return the existing info.
+    const updatedLot = await getLot(db, lotId, tenantId);
+    const recalledSerials = await runQuery(
+      db,
+      `SELECT id FROM finance.serials
+        WHERE tenant_id = $1 AND lot_id = $2 AND status = 'recalled'`,
+      [tenantId, lotId],
+    );
+    return {
+      lot: updatedLot,
+      recalled_serials: (recalledSerials.rows || []).length,
+      already_recalled: true,
+    };
+  }
+
+  // Cascade: set status='recalled' + clear current_location_id on
+  // every serial in this lot (tenant-scoped). The lot_id guard
+  // ensures we don't touch serials that were reassigned to a
+  // different lot (the schema allows lot_id changes via
+  // assignSerialLocation).
+  await runQuery(
+    db,
+    `UPDATE finance.serials
+        SET status = 'recalled',
+            current_location_id = NULL,
+            updated_at = datetime('now')
+      WHERE tenant_id = $1 AND lot_id = $2`,
+    [tenantId, lotId],
+  );
+
+  // Stamp the lot itself with the audit trail.
+  await runQuery(
+    db,
+    `UPDATE finance.lots
+        SET recalled_at = datetime('now'),
+            recall_reason = $1,
+            recalled_by = $2,
+            updated_at = datetime('now')
+      WHERE tenant_id = $3 AND id = $4`,
+    [reason, userId, tenantId, lotId],
+  );
+
+  // Return the post-recall view.
+  const updatedLot = await getLot(db, lotId, tenantId);
+  const recalledSerials = await runQuery(
+    db,
+    `SELECT id FROM finance.serials
+      WHERE tenant_id = $1 AND lot_id = $2 AND status = 'recalled'`,
+    [tenantId, lotId],
+  );
+  return {
+    lot: updatedLot,
+    recalled_serials: (recalledSerials.rows || []).length,
+    already_recalled: false,
+  };
+}
+
+/**
+ * List the serials in a lot that are currently flagged 'recalled'.
+ * Convenience helper for customer service to find units that
+ * were shipped out to customers and need to be returned.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} lotId
+ * @returns {Promise<Array<object>>}  the recalled serials
+ */
+export async function listRecalledSerials(db, tenantId, lotId) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(lotId) || lotId <= 0) {
+    throw new ValueError('lotId must be a positive integer');
+  }
+  const rows = await runQuery(
+    db,
+    `SELECT id, tenant_id, serial_number, catalog_item_id, lot_id, status,
+            current_location_id, received_at, sold_at, notes,
+            created_at, updated_at
+       FROM finance.serials
+      WHERE tenant_id = $1 AND lot_id = $2 AND status = 'recalled'
+      ORDER BY id ASC`,
+    [tenantId, lotId],
+  );
+  return (rows.rows || []).map(normalizeSerial);
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
 
@@ -651,6 +806,9 @@ function normalizeLot(r) {
     expiry_date: r.expiry_date || null,
     received_at: r.received_at,
     notes: r.notes || null,
+    recalled_at: r.recalled_at || null,
+    recall_reason: r.recall_reason || null,
+    recalled_by: r.recalled_by == null ? null : Number(r.recalled_by),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };

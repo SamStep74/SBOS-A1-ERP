@@ -23,6 +23,8 @@ import {
   receiveIntoLot,
   consumeFromLotsFEFO,
   assignSerialLocation,
+  recallLot,
+  listRecalledSerials,
   ValueError,
 } from './lots.js';
 import { createCatalogItem } from './inventory.js';
@@ -61,6 +63,9 @@ function makeDb() {
       expiry_date         TEXT,
       received_at         TEXT NOT NULL,
       notes               TEXT,
+      recalled_at         TEXT,
+      recall_reason       TEXT,
+      recalled_by         INTEGER,
       created_at          TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -572,5 +577,169 @@ describe('finance/lots — Wave 37 lot + serial tracking', () => {
       assignSerialLocation(db, 0, serial.id, 5, 'frobbed', null),
       /status must be one of/,
     );
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Wave 41 — product recall
+  // ──────────────────────────────────────────────────────────────────────
+
+  test('29. recallLot: cascades status=recalled to all serials in the lot + stamps the lot', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-RECALL-1', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    const s1 = await createSerial(db, {
+      serial_number: 'SN-RECALL-1', catalog_item_id: item.id, lot_id: lot.id,
+      current_location_id: 5, received_at: '2026-06-21',
+    }, 0);
+    const s2 = await createSerial(db, {
+      serial_number: 'SN-RECALL-2', catalog_item_id: item.id, lot_id: lot.id,
+      current_location_id: 7, received_at: '2026-06-21',
+    }, 0);
+    // Sanity check: serials start with status='in_stock'.
+    assert.equal(s1.status, 'in_stock');
+    assert.equal(s2.status, 'in_stock');
+    // Recall.
+    const out = await recallLot(db, 0, lot.id, {
+      reason: 'Supplier flagged contamination — lot XYZ may be unsafe',
+      user_id: 1,
+    });
+    assert.equal(out.already_recalled, false);
+    assert.equal(out.recalled_serials, 2);
+    assert.ok(out.lot.recalled_at, 'lot should have recalled_at stamped');
+    assert.equal(out.lot.recall_reason, 'Supplier flagged contamination — lot XYZ may be unsafe');
+    assert.equal(out.lot.recalled_by, 1);
+    // Both serials now have status='recalled' AND current_location_id=null.
+    const updated1 = await getSerial(db, s1.id, 0);
+    const updated2 = await getSerial(db, s2.id, 0);
+    assert.equal(updated1.status, 'recalled');
+    assert.equal(updated1.current_location_id, null);
+    assert.equal(updated2.status, 'recalled');
+    assert.equal(updated2.current_location_id, null);
+  });
+
+  test('30. recallLot: ignores serials in other lots (tenant-scoped cascade)', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lotA = await createLot(db, {
+      code: 'LOT-A', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    const lotB = await createLot(db, {
+      code: 'LOT-B', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    const sA = await createSerial(db, {
+      serial_number: 'SN-A', catalog_item_id: item.id, lot_id: lotA.id,
+      received_at: '2026-06-21',
+    }, 0);
+    const sB = await createSerial(db, {
+      serial_number: 'SN-B', catalog_item_id: item.id, lot_id: lotB.id,
+      received_at: '2026-06-21',
+    }, 0);
+    await recallLot(db, 0, lotA.id, { reason: 'Recall lot A only', user_id: 1 });
+    const updatedA = await getSerial(db, sA.id, 0);
+    const updatedB = await getSerial(db, sB.id, 0);
+    assert.equal(updatedA.status, 'recalled');
+    assert.equal(updatedB.status, 'in_stock'); // lot B untouched
+  });
+
+  test('31. recallLot: idempotent — second recall returns already_recalled=true without re-cascading', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-IDEMP', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    await createSerial(db, {
+      serial_number: 'SN-IDEMP', catalog_item_id: item.id, lot_id: lot.id,
+      received_at: '2026-06-21',
+    }, 0);
+    const first = await recallLot(db, 0, lot.id, { reason: 'first', user_id: 1 });
+    assert.equal(first.already_recalled, false);
+    // Operator notes a serial was reassigned to 'returned' in the interim
+    // (e.g. customer returned a unit after the recall notice). Without
+    // force, the second recall is a no-op.
+    const second = await recallLot(db, 0, lot.id, { reason: 'second', user_id: 1 });
+    assert.equal(second.already_recalled, true);
+    assert.equal(second.recalled_serials, 1);
+    // The recall_reason is NOT overwritten (idempotent path preserves it).
+    assert.equal(second.lot.recall_reason, 'first');
+  });
+
+  test('32. recallLot: {force: true} re-cascades and updates recall_reason', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-FORCE', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    const s = await createSerial(db, {
+      serial_number: 'SN-FORCE', catalog_item_id: item.id, lot_id: lot.id,
+      current_location_id: 5, received_at: '2026-06-21',
+    }, 0);
+    await recallLot(db, 0, lot.id, { reason: 'first reason', user_id: 1 });
+    // Manually flip the serial back to 'returned' (simulating a return
+    // happening after the recall notice).
+    await assignSerialLocation(db, 0, s.id, 5, 'returned', null);
+    // Re-recall with force.
+    const out = await recallLot(db, 0, lot.id, {
+      reason: 're-cascade', user_id: 1, force: true,
+    });
+    assert.equal(out.already_recalled, false);
+    assert.equal(out.recalled_serials, 1);
+    assert.equal(out.lot.recall_reason, 're-cascade');
+    const updated = await getSerial(db, s.id, 0);
+    assert.equal(updated.status, 'recalled');
+  });
+
+  test('33. recallLot: rejects empty reason', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-NORSN', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    await assert.rejects(
+      recallLot(db, 0, lot.id, { reason: '   ' }),
+      /opts\.reason is required/,
+    );
+  });
+
+  test('34. recallLot: rejects unknown lot', async () => {
+    const db = makeDb();
+    await assert.rejects(
+      recallLot(db, 0, 999999, { reason: 'no such lot', user_id: 1 }),
+      /lot 999999 not found/,
+    );
+  });
+
+  test('35. recallLot: tenant-scoped (tenant 7 cannot recall tenant 0\'s lot)', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-T0', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    await assert.rejects(
+      recallLot(db, 7, lot.id, { reason: 'cross-tenant attempt', user_id: 1 }),
+      /lot \d+ not found in tenant 7/,
+    );
+  });
+
+  test('36. listRecalledSerials: returns the recalled serials in the lot', async () => {
+    const db = makeDb();
+    const item = await seedItem(db);
+    const lot = await createLot(db, {
+      code: 'LOT-LRS', catalog_item_id: item.id, received_at: '2026-06-21',
+    }, 0);
+    const s1 = await createSerial(db, {
+      serial_number: 'SN-LRS-1', catalog_item_id: item.id, lot_id: lot.id,
+      received_at: '2026-06-21',
+    }, 0);
+    const s2 = await createSerial(db, {
+      serial_number: 'SN-LRS-2', catalog_item_id: item.id, lot_id: lot.id,
+      received_at: '2026-06-21',
+    }, 0);
+    await recallLot(db, 0, lot.id, { reason: 'cascade test', user_id: 1 });
+    const recalled = await listRecalledSerials(db, 0, lot.id);
+    assert.equal(recalled.length, 2);
+    const ids = recalled.map(s => s.id).sort();
+    assert.deepEqual(ids, [s1.id, s2.id].sort());
   });
 });

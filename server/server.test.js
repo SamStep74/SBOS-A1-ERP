@@ -362,6 +362,9 @@ function makeFinanceDb() {
       expiry_date         TEXT,
       received_at         TEXT NOT NULL,
       notes               TEXT,
+      recalled_at         TEXT,
+      recall_reason       TEXT,
+      recalled_by         INTEGER,
       created_at          TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -1312,6 +1315,120 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(a.status, 200);
     assert.equal(b.status, 200);
     assert.equal(b.body.items.length, a.body.items.length);
+  });
+
+  // ─── Wave 41: product recall ───
+
+  test('41a. POST /api/finance/lots/:id/recall cascades status=recalled to all serials', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W41-RECALL', name: 'W41 recall item',
+    });
+    const { createLot, createSerial } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-RECALL-1', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const s1 = await createSerial(full.pgAdapter, {
+      serial_number: 'SN-RECALL-1', catalog_item_id: item.body.id,
+      lot_id: lot.id, current_location_id: 5, received_at: '2026-06-21',
+    }, 0);
+    const s2 = await createSerial(full.pgAdapter, {
+      serial_number: 'SN-RECALL-2', catalog_item_id: item.body.id,
+      lot_id: lot.id, current_location_id: 7, received_at: '2026-06-21',
+    }, 0);
+    // Trigger the recall.
+    const r = await postJson(server, `/api/finance/lots/${lot.id}/recall`, {
+      reason: 'Supplier flagged contamination — lot XYZ may be unsafe',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.already_recalled, false);
+    assert.equal(r.body.recalled_serials, 2);
+    assert.ok(r.body.lot.recalled_at, 'lot should have recalled_at stamped');
+    assert.equal(r.body.lot.recall_reason, 'Supplier flagged contamination — lot XYZ may be unsafe');
+    // Verify serials are now recalled via the GET endpoint.
+    const recalled = await get(server, `/api/finance/lots/${lot.id}/recalled-serials`);
+    assert.equal(recalled.status, 200);
+    assert.equal(recalled.body.items.length, 2);
+    const ids = recalled.body.items.map(s => s.id).sort();
+    assert.deepEqual(ids, [s1.id, s2.id].sort());
+  });
+
+  test('41b. POST /api/finance/lots/:id/recall with missing reason returns 400', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W41-NORSN', name: 'W41 no-reason item',
+    });
+    const { createLot } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-NORSN', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const r = await postJson(server, `/api/finance/lots/${lot.id}/recall`, {});
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'bad_request');
+    assert.match(r.body.message, /reason is required/);
+  });
+
+  test('41c. POST /api/finance/lots/:id/recall is idempotent — second call returns already_recalled=true', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W41-IDEMP', name: 'W41 idempotent item',
+    });
+    const { createLot, createSerial } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-IDEMP', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    await createSerial(full.pgAdapter, {
+      serial_number: 'SN-IDEMP', catalog_item_id: item.body.id,
+      lot_id: lot.id, received_at: '2026-06-21',
+    }, 0);
+    const first = await postJson(server, `/api/finance/lots/${lot.id}/recall`, {
+      reason: 'first recall',
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.already_recalled, false);
+    const second = await postJson(server, `/api/finance/lots/${lot.id}/recall`, {
+      reason: 'second recall',
+    });
+    assert.equal(second.status, 200);
+    assert.equal(second.body.already_recalled, true);
+    // The recall_reason is preserved from the first call.
+    assert.equal(second.body.lot.recall_reason, 'first recall');
+  });
+
+  test('41d. POST /api/finance/lots/:id/recall with force=true re-cascades and updates the reason', async () => {
+    const item = await postJson(server, '/api/finance/catalog/items', {
+      sku: 'W41-FORCE', name: 'W41 force-recall item',
+    });
+    const { createLot, createSerial, getSerial } = await import('./finance/lots.js');
+    const lot = await createLot(full.pgAdapter, {
+      code: 'LOT-FORCE', catalog_item_id: item.body.id, received_at: '2026-06-21',
+    }, 0);
+    const s = await createSerial(full.pgAdapter, {
+      serial_number: 'SN-FORCE', catalog_item_id: item.body.id,
+      lot_id: lot.id, current_location_id: 5, received_at: '2026-06-21',
+    }, 0);
+    await postJson(server, `/api/finance/lots/${lot.id}/recall`, {
+      reason: 'first reason',
+    });
+    // Simulate: customer returns the unit after the recall notice.
+    await import('./finance/lots.js').then(m => m.assignSerialLocation(
+      full.pgAdapter, 0, s.id, 5, 'returned', null,
+    ));
+    // Re-recall with force.
+    const out = await postJson(server, `/api/finance/lots/${lot.id}/recall`, {
+      reason: 're-cascade with extra serials',
+      force: true,
+    });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.already_recalled, false);
+    assert.equal(out.body.lot.recall_reason, 're-cascade with extra serials');
+    const updated = await getSerial(full.pgAdapter, s.id, 0);
+    assert.equal(updated.status, 'recalled');
+  });
+
+  test('41e. POST /api/finance/lots/999999/recall returns 404 for missing lot', async () => {
+    const r = await postJson(server, '/api/finance/lots/999999/recall', {
+      reason: 'no such lot',
+    });
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'not_found');
   });
 
   // ─── Deferred item: per-permission endpoint guards ───

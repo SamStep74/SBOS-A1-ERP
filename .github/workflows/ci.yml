@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   build-and-test:
-    if: false  # disabled 2026-06-21 — repo is private, local CI in the dev tools dir/
+    if: false  # disabled 2026-06-21 — repo is private, local CI only
     name: lint, typecheck, format, test, boundary (node ${{ matrix.node }})
     # `runs-on` is a list — GitHub picks the first available match.
     # The self-hosted runner takes priority when registered; otherwise
