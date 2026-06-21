@@ -622,6 +622,44 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(body.scope, 'custom');
   });
 
+  // ─── Wave 47: database backup ───
+
+  test('47a. POST /api/rbac/backup returns the database as application/octet-stream', async () => {
+    const port = server.address().port;
+    const res = await globalThis.fetch('http://127.0.0.1:' + port + '/api/rbac/backup', {
+      method: 'POST',
+    });
+    assert.equal(res.status, 200);
+    const ct = res.headers.get('content-type') || '';
+    assert.match(ct, /application\/octet-stream/);
+    const cd = res.headers.get('content-disposition') || '';
+    assert.match(cd, /^attachment; filename="sbos-backup-\d{4}-\d{2}-\d{2}\.db"$/);
+    const buf = Buffer.from(await res.arrayBuffer());
+    // The response is a valid sqlite file: starts with the magic
+    // string "SQLite format 3\000".
+    assert.equal(buf.slice(0, 16).toString('utf8'), 'SQLite format 3\u0000');
+  });
+
+  test('47b. POST /api/rbac/backup writes an audit row before the snapshot', async () => {
+    const beforeCount = full.db.prepare(
+      `SELECT COUNT(*) AS n FROM audit WHERE action = 'backup.run'`,
+    ).get().n;
+    const port = server.address().port;
+    await globalThis.fetch('http://127.0.0.1:' + port + '/api/rbac/backup', {
+      method: 'POST',
+    });
+    const afterCount = full.db.prepare(
+      `SELECT COUNT(*) AS n FROM audit WHERE action = 'backup.run'`,
+    ).get().n;
+    assert.equal(afterCount, beforeCount + 1, 'expected a new audit row for the backup');
+    // The audit row references the database resource + the right user.
+    const row = full.db.prepare(
+      `SELECT resource, user_id FROM audit WHERE action = 'backup.run' ORDER BY id DESC LIMIT 1`,
+    ).get();
+    assert.equal(row.resource, 'database');
+    assert.equal(row.user_id, 1); // stub auth mode admin
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

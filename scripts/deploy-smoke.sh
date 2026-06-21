@@ -1568,6 +1568,93 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5o: Database backup (Wave 47) ==="
+# Smoke coverage for the POST /api/rbac/backup endpoint:
+#   1. 200 + application/octet-stream + Content-Disposition attachment
+#   2. Response body starts with the SQLite magic string
+#   3. An audit row was recorded with action='backup.run'
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" DB_PATH="$DB" node -e "
+  const http = require('node:http');
+
+  function call(method, path, body) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const headers = { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN };
+      if (data) {
+        headers['content-type'] = 'application/json';
+        headers['content-length'] = Buffer.byteLength(data);
+      }
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method, headers,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+
+  (async () => {
+    // 1. POST /api/rbac/backup
+    const r = await call('POST', '/api/rbac/backup', null);
+    if (r.status !== 200) {
+      console.log('  FAIL POST /api/rbac/backup: status=' + r.status);
+      process.exit(1);
+    }
+    const ct = r.headers['content-type'] || '';
+    if (!/application\/octet-stream/.test(ct)) {
+      console.log('  FAIL content-type:', ct);
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST /api/rbac/backup returns application/octet-stream');
+
+    // 2. Content-Disposition attachment with sbos-backup-YYYY-MM-DD.db
+    const cd = r.headers['content-disposition'] || '';
+    if (!/^attachment; filename=\"sbos-backup-\\d{4}-\\d{2}-\\d{2}\\.db\"$/.test(cd)) {
+      console.log('  FAIL content-disposition:', cd);
+      process.exit(1);
+    }
+    console.log('  PASS content-disposition: ' + cd);
+
+    // 3. Body is a valid sqlite file (starts with the magic string)
+    const magic = r.body.slice(0, 16).toString('utf8');
+    if (magic !== 'SQLite format 3\u0000') {
+      console.log('  FAIL body magic: ' + JSON.stringify(magic));
+      process.exit(1);
+    }
+    console.log('  PASS response body is a valid SQLite database (magic = \"SQLite format 3\")');
+
+    // 4. Audit row was written
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.env.DB_PATH);
+    const row = db.prepare(
+      \"SELECT action, resource FROM audit WHERE action = 'backup.run' ORDER BY id DESC LIMIT 1\"
+    ).get();
+    if (!row || row.resource !== 'database') {
+      console.log('  FAIL no audit row for backup.run, got:', JSON.stringify(row));
+      process.exit(1);
+    }
+    console.log('  PASS audit row recorded (action=backup.run, resource=database)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  database backup OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

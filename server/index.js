@@ -161,12 +161,23 @@ function makeFastifyFacade(expressApp, { db }) {
             statusCode = c;
             return fastifyReply;
           },
+          // Fastify's reply.header(name, value) sets a response header.
+          // Maps to res.setHeader(name, value). Returns the reply for
+          // chaining (Fastify convention).
+          header(name, value) {
+            res.setHeader(name, value);
+            return fastifyReply;
+          },
           send(payload) {
             if (sent) return fastifyReply;
             sent = true;
             res.status(statusCode);
-            // JSON if payload is an object; raw text otherwise.
-            if (payload === null || payload === undefined) {
+            // Buffer payloads (binary downloads like /api/rbac/backup)
+            // get sent raw. String payloads get the text/html vs
+            // text/plain sniff. Everything else gets JSON.
+            if (Buffer.isBuffer(payload)) {
+              res.send(payload);
+            } else if (payload === null || payload === undefined) {
               res.end();
             } else if (typeof payload === 'string') {
               res.type(
@@ -211,11 +222,17 @@ function makeFastifyFacade(expressApp, { db }) {
           statusCode = c;
           return fastifyReply;
         },
+        header(name, value) {
+          res.setHeader(name, value);
+          return fastifyReply;
+        },
         send(payload) {
           if (sent) return fastifyReply;
           sent = true;
           res.status(statusCode);
-          if (payload === null || payload === undefined) {
+          if (Buffer.isBuffer(payload)) {
+            res.send(payload);
+          } else if (payload === null || payload === undefined) {
             res.end();
           } else if (typeof payload === 'string') {
             res.type(payload.startsWith('<') ? 'text/html' : 'text/plain');

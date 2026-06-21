@@ -36,6 +36,7 @@
 //   POST   /api/rbac/approvals/:id/approve            (security.approval.decide)
 //   POST   /api/rbac/approvals/:id/reject             (security.approval.decide)
 //   GET    /api/rbac/me/permissions                   (auth required) — return effective set
+//   POST   /api/rbac/backup                          (system.backup.run) — DR snapshot
 //
 // The router expects to be registered with a Fastify app that has:
 //   - app.authenticate preHandler in place (sets request.user)
@@ -50,6 +51,10 @@ import {
   getParentChain,
 } from './roleMatrix.js';
 import { requirePermFastify, requireAnyPerm, resolveEffectivePermissions } from './guards.js';
+import { unlinkSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import {
   createProfile,
   getProfile,
@@ -681,6 +686,71 @@ function registerRbacRoutes(app, opts = {}) {
         request.params.id,
       );
       return reply.code(204).send();
+    },
+  );
+
+  // ───── Backup ─────
+
+  // POST /api/rbac/backup — disaster-recovery snapshot. Uses
+  // SQLite's VACUUM INTO to write a consistent point-in-time copy
+  // of the entire database to a tmp file, then streams it to the
+  // client with Content-Disposition: attachment. The tmp file is
+  // unlinked after streaming completes (or errors out).
+  //
+  // Returns 501 if the database is in-memory (no file to read) —
+  // production deploys always use a file-backed DB.
+  //
+  // Perm gate: system.backup.run (high sensitivity — the response
+  // contains every row in every table, including hashed passwords,
+  // sessions, and customer data). Audited under resource='database'.
+  app.post(
+    '/api/rbac/backup',
+    { preHandler: requirePermFastify('system.backup.run') },
+    async (request, reply) => {
+      const row = db.prepare('PRAGMA database_list').get();
+      const dbFile = row && row.file;
+      if (!dbFile) {
+        return reply
+          .code(501)
+          .send({ error: 'not_supported', message: 'in-memory database cannot be backed up' });
+      }
+      // Audit BEFORE the snapshot (so the audit log entry is in
+      // the snapshot itself — important for forensics).
+      try {
+        db.prepare(
+          `INSERT INTO audit (tenant_id, user_id, username, action, resource, method, path, status_code, payload_json, request_id)
+           VALUES (?, ?, ?, 'backup.run', 'database', 'POST', '/api/rbac/backup', 200, '{}', ?)`,
+        ).run(
+          request.user.tenant_id || 0,
+          request.user.id,
+          request.user.username,
+          request.headers['x-request-id'] || null,
+        );
+      } catch (_e) {
+        // best-effort; don't fail the backup if the audit table
+        // isn't writable
+      }
+      // Write a consistent snapshot via VACUUM INTO.
+      const tmpPath = join(tmpdir(), `sbos-backup-${randomBytes(8).toString('hex')}.db`);
+      try {
+        db.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+      } catch (err) {
+        return reply.code(500).send({
+          error: 'backup_failed',
+          message: err && err.message ? err.message : 'VACUUM INTO failed',
+        });
+      }
+      try {
+        const snapshot = readFileSync(tmpPath);
+        const filename = `sbos-backup-${new Date().toISOString().slice(0, 10)}.db`;
+        reply
+          .header('Content-Type', 'application/octet-stream')
+          .header('Content-Disposition', `attachment; filename="${filename}"`)
+          .header('Content-Length', String(snapshot.length))
+          .send(snapshot);
+      } finally {
+        try { unlinkSync(tmpPath); } catch (_e) { /* best-effort */ }
+      }
     },
   );
 
