@@ -110,6 +110,12 @@ const checks = [
   { path: '/api/finance/desk/cases?status=open', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/desk/cases?status=open tenant=0' },
   { path: '/api/finance/desk/cases/1',      headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1 (404 for missing case)' },
   { path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1/replies (404 for missing case)' },
+  // Phase 2 projects (W75-1) — projects + tasks reads
+  // (empty DB → 200, items: []; 404 for missing project/task)
+  { path: '/api/finance/projects',          headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/projects tenant=0' },
+  { path: '/api/finance/projects?status=active', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/projects?status=active tenant=0' },
+  { path: '/api/finance/projects/1',        headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1 (404 for missing project)' },
+  { path: '/api/finance/projects/1/tasks',  headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/projects/1/tasks (404 for missing project)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -161,6 +167,19 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/desk/cases/1/replies', body: { body: 'smoke reply', author: 'agent' }, expect: 201, name: 'POST /api/finance/desk/cases/1/replies (returns id > 0)' },
   { method: 'GET', path: '/api/finance/desk/cases/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1 (returns the case created above)' },
   { method: 'GET', path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1/replies (returns the reply created above)' },
+  // Phase 2 projects (W75-1) — projects + tasks + time
+  // entries writes. The project smoke check returns id > 0
+  // (the wave-14 production pg adapter regression guard).
+  // The task + time-entry smoke checks depend on the
+  // project + task being created first, so they must come
+  // AFTER the project POST.
+  { method: 'POST', path: '/api/finance/projects', body: { name: 'Smoke Project', code: 'PROJ-SMOKE-1', start_date: '2026-06-21' }, expect: 201, name: 'POST /api/finance/projects (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/projects/1/tasks', body: { name: 'Smoke Task', priority: 'high' }, expect: 201, name: 'POST /api/finance/projects/1/tasks (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/projects/1/tasks/1/time-entries', body: { user_id: 1, work_date: '2026-06-21', hours: 1.5, billable: true }, expect: 201, name: 'POST /api/finance/projects/1/tasks/1/time-entries (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/projects/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1 (returns the project created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks (returns the task created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1 (returns the task created above)' },
+  { method: 'GET', path: '/api/finance/projects/1/tasks/1/time-entries', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/projects/1/tasks/1/time-entries (returns the entry created above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

@@ -60,6 +60,14 @@
 //   POST   /api/finance/desk/cases
 //   GET    /api/finance/desk/cases/:id/replies
 //   POST   /api/finance/desk/cases/:id/replies
+//   GET    /api/finance/projects?status=
+//   GET    /api/finance/projects/:id
+//   POST   /api/finance/projects
+//   GET    /api/finance/projects/:id/tasks?status=
+//   POST   /api/finance/projects/:id/tasks
+//   GET    /api/finance/projects/:id/tasks/:taskId
+//   GET    /api/finance/projects/:id/tasks/:taskId/time-entries
+//   POST   /api/finance/projects/:id/tasks/:taskId/time-entries
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -127,6 +135,16 @@ import {
   createReply,
   listReplies,
 } from './desk.js';
+import {
+  createProject,
+  listProjects,
+  getProject,
+  createTask,
+  listTasks,
+  getTask,
+  createTimeEntry,
+  listTimeEntries,
+} from './projects.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -1302,6 +1320,193 @@ export function registerFinanceRoutes(app, opts = {}) {
         const tenantId = req.tenantId;
         const caseId = Number(req.params.id);
         const out = await createReply(pgAdapter, caseId, req.body || {}, tenantId);
+        res.status(201).json(out);
+      },
+    ),
+  );
+
+  // ─────────── Projects (project management) — Phase 2 wave 2 (W75) ───────────
+  //
+  // The projects module is a 3-table hierarchical structure:
+  //   projects (id, tenant_id, code, name, description, customer_id,
+  //     status, start_date, end_date, owner_id, ...)
+  //   project_tasks (id, tenant_id, project_id, name, description,
+  //     status, priority, assignee_id, due_date, ...)
+  //   project_time_entries (id, tenant_id, task_id, user_id, work_date,
+  //     hours, billable, description, ...)
+  //
+  // Project statuses: active / on_hold / completed / cancelled.
+  // Task statuses: todo / in_progress / done / blocked.
+  // Task priorities: low / normal / high / urgent.
+  //
+  // Wave 2 wires 8 HTTP endpoints (matches the W70->W71 cadence for
+  // CRM and the W72->W73 cadence for desk): 2 reads on projects
+  // (list + get), 1 write on projects (create), 2 reads on tasks
+  // (list + get), 1 write on tasks (create), 1 read on time entries
+  // (list), 1 write on time entries (create). The 8 endpoints map
+  // to 6 perm keys:
+  //   projects.project.read    — list + get project
+  //   projects.project.create  — create project
+  //   projects.task.read       — list + get task
+  //   projects.task.create     — create task
+  //   projects.time.read       — list time entries
+  //   projects.time.create     — create time entry
+  // The ProjectsOperator perm set in server/rbac/matrix.js
+  // already includes all 6 keys (no perm changes needed for W75-1).
+
+  // GET /api/finance/projects
+  //   List projects for the caller's tenant. Optional ?status=
+  //   filter (active / on_hold / completed / cancelled). Ordered
+  //   by id DESC (most recent first).
+  app.get('/api/finance/projects', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const status = req.query.status ?? null;
+      const items = await listProjects(pgAdapter, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/projects
+  //   Create a new project. Body: { name, code?, description?,
+  //   customer_id?, status?, start_date?, end_date?, owner_id? }.
+  //   name is required. status defaults to 'active'.
+  app.post(
+    '/api/finance/projects',
+    requireTenant,
+    requirePerm('projects.project.create'),
+    wrapFinanceRoute('projects.project.create', 'project:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createProject(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/projects/:id
+  //   Get a single project. Returns 404 if the project is missing
+  //   or cross-tenant (the pure function throws ValueError on
+  //   "not found in tenant"; the route handler converts to 404
+  //   inline, consistent with the desk /cases/:id pattern).
+  app.get('/api/finance/projects/:id', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const projectId = Number(req.params.id);
+      const item = await getProject(pgAdapter, projectId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/projects/:id/tasks
+  //   List tasks for a project. Optional ?status= filter
+  //   (todo / in_progress / done / blocked). Ordered by id ASC
+  //   (chronological; tasks are added in order). Returns 404
+  //   if the project is missing or cross-tenant.
+  app.get('/api/finance/projects/:id/tasks', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const projectId = Number(req.params.id);
+      const status = req.query.status ?? null;
+      // The pure listTasks function does the project existence
+      // check; the inline ValueError → 404 conversion is the
+      // same pattern as /cases/:id/replies in the desk module.
+      const items = await listTasks(pgAdapter, projectId, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/projects/:id/tasks
+  //   Create a new task under a project. Body: { name,
+  //   description?, status?, priority?, assignee_id?, due_date? }.
+  //   name is required. The project_id is injected from the URL
+  //   (the body may also include it; the URL value wins).
+  app.post(
+    '/api/finance/projects/:id/tasks',
+    requireTenant,
+    requirePerm('projects.task.create'),
+    wrapFinanceRoute('projects.task.create', 'project_task:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const projectId = Number(req.params.id);
+      // Inject the project_id from the URL into the input
+      // (the pure function validates it via its project
+      // existence check, so a wrong project_id returns 404
+      // not 500).
+      const input = { ...(req.body || {}), project_id: projectId };
+      const out = await createTask(pgAdapter, input, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/projects/:id/tasks/:taskId
+  //   Get a single task. Returns 404 if the task is missing or
+  //   cross-tenant. The project_id in the URL is for URL
+  //   consistency only; the pure getTask function does the
+  //   existence check on the task, not the project.
+  app.get('/api/finance/projects/:id/tasks/:taskId', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const taskId = Number(req.params.taskId);
+      const item = await getTask(pgAdapter, taskId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/projects/:id/tasks/:taskId/time-entries
+  //   List time entries for a task (chronological by work_date).
+  //   Returns 404 if the task is missing or cross-tenant (the
+  //   pure listTimeEntries function does the existence check).
+  app.get(
+    '/api/finance/projects/:id/tasks/:taskId/time-entries',
+    async (req, res, next) => {
+      try {
+        const tenantId = readTenant(req);
+        const taskId = Number(req.params.taskId);
+        const items = await listTimeEntries(pgAdapter, taskId, tenantId);
+        res.status(200).json({ items });
+      } catch (err) {
+        if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/projects/:id/tasks/:taskId/time-entries
+  //   Add a time entry to a task. Body: { user_id, work_date,
+  //   hours, billable?, description? }. user_id, work_date, and
+  //   hours are required. The task_id is injected from the URL.
+  app.post(
+    '/api/finance/projects/:id/tasks/:taskId/time-entries',
+    requireTenant,
+    requirePerm('projects.time.create'),
+    wrapFinanceRoute(
+      'projects.time.create',
+      'project_time:new',
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const taskId = Number(req.params.taskId);
+        // Inject the task_id from the URL into the input
+        // (the pure function validates it via its task
+        // existence check).
+        const input = { ...(req.body || {}), task_id: taskId };
+        const out = await createTimeEntry(pgAdapter, input, tenantId);
         res.status(201).json(out);
       },
     ),
