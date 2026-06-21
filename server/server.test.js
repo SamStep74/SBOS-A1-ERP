@@ -445,6 +445,27 @@ async function postJson(server, path, payload, extraHeaders = {}) {
   return { status: res.status, body, contentType, headers: res.headers };
 }
 
+async function putJson(server, path, payload, extraHeaders = {}) {
+  const port = server.address().port;
+  const url = `http://127.0.0.1:${port}${path}`;
+  const res = await globalThis.fetch(url, {
+    method: 'PUT',
+    headers: Object.assign({ 'content-type': 'application/json' }, extraHeaders),
+    body: JSON.stringify(payload || {}),
+  });
+  const text = await res.text();
+  let body = text;
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  return { status: res.status, body, contentType, headers: res.headers };
+}
+
 async function patchJson(server, path, payload, extraHeaders = {}) {
   const port = server.address().port;
   const url = `http://127.0.0.1:${port}${path}`;
@@ -534,6 +555,28 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(status, 200);
     assert.ok(Array.isArray(body.items), `expected items array, got ${JSON.stringify(body)}`);
     assert.ok(body.items.length > 0, 'expected at least the system roles');
+  });
+
+  test('5b. PUT /api/rbac/field-policies/*path preserves slash wildcard params', async () => {
+    const { status, body } = await putJson(
+      server,
+      '/api/rbac/field-policies/customer/contact/ssn',
+      { minPermission: 'crm.lead.read', isVisible: false, label: 'Customer SSN' },
+    );
+    assert.equal(status, 200);
+    assert.equal(body.fieldPath, 'customer/contact/ssn');
+    assert.equal(body.minPermission, 'crm.lead.read');
+  });
+
+  test('5c. PUT /api/rbac/record-rules/*resource preserves slash wildcard params', async () => {
+    const { status, body } = await putJson(server, '/api/rbac/record-rules/crm/lead', {
+      scope: 'custom',
+      predicate: 'owner_id = $userId',
+      description: 'owner-only',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.resource, 'crm/lead');
+    assert.equal(body.scope, 'custom');
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {

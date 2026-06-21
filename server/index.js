@@ -58,6 +58,18 @@ async function getPackageVersion() {
   return cachedVersion;
 }
 
+function toExpressRoute(url) {
+  return String(url).replace(/\/:([A-Za-z_][A-Za-z0-9_]*)\(\*\)/g, '/*$1');
+}
+
+function normalizeRouteParams(params = {}) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(params)) {
+    normalized[key] = Array.isArray(value) ? value.join('/') : value;
+  }
+  return normalized;
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Fastify-compatible facade that wraps an Express app.
 //
@@ -119,7 +131,7 @@ function makeFastifyFacade(expressApp, { db }) {
           user: req.user,
           session: req.session,
           impersonator: req.impersonator,
-          params: req.params,
+          params: normalizeRouteParams(req.params),
           query: req.query,
           body: req.body,
           headers: req.headers,
@@ -170,7 +182,7 @@ function makeFastifyFacade(expressApp, { db }) {
         user: req.user,
         session: req.session,
         impersonator: req.impersonator,
-        params: req.params,
+        params: normalizeRouteParams(req.params),
         query: req.query,
         body: req.body,
         headers: req.headers,
@@ -216,7 +228,7 @@ function makeFastifyFacade(expressApp, { db }) {
         next(err);
       }
     });
-    expressApp[method](url, ...middlewares);
+    expressApp[method](toExpressRoute(url), ...middlewares);
   }
 
   function mountAll() {

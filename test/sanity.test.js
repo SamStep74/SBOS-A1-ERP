@@ -30,9 +30,8 @@ test('engine contract: .nvmrc pins Node 20', () => {
 });
 
 test('runtime: current Node satisfies engines >=20 (informational)', () => {
-  // CI uses setup-node@v4 with node-version: '20', so the supported
-  // production runtime is Node 20. Locally an engineer may be on 22+ for
-  // tooling; this test only asserts the runtime is >=20, not that it equals 20.
+  // CI uses setup-node with node-version: '20.19.0', while local engineers may
+  // be on 22+ for tooling. This test only asserts the runtime is >=20.
   const major = Number.parseInt(process.version.slice(1).split('.')[0] ?? '', 10);
   assert.ok(Number.isFinite(major) && major >= 20, `expected Node >=20, got ${process.version}`);
 });
