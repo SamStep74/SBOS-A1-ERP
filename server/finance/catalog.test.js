@@ -28,6 +28,11 @@ import {
   createVariant,
   listVariants,
   getVariant,
+  createBundle,
+  listBundles,
+  getBundle,
+  addBundleItem,
+  listBundleItems,
   ValueError,
 } from './catalog.js';
 
@@ -79,6 +84,35 @@ function makeMemoryDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE catalog_bundles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      sku TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      bundle_price_amd INTEGER,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE catalog_bundle_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      bundle_id INTEGER NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- The catalog_variants_sku_idx is needed for the
+    -- createVariant unique-sku test (which asserts a
+    -- UNIQUE constraint error). The test harness uses
+    -- the main schema (no finance. prefix), so this
+    -- CREATE INDEX works. The catalog_categories_slug_idx
+    -- + catalog_bundles_sku_idx are NOT created here
+    -- (the unique-sku + unique-slug tests for those
+    -- are deferred to the production layer; the tests
+    -- for catalog bundles below exercise the happy
+    -- path only).
     CREATE UNIQUE INDEX catalog_variants_sku_idx
         ON catalog_variants (tenant_id, sku);
   `);
@@ -479,4 +513,209 @@ test('catalog: getVariant is tenant-scoped', async () => {
     getVariant(db, out.id, 1),
     /variant.*not found in tenant/,
   );
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Bundles (catalog v2 wave 3 / W78-1)
+// ────────────────────────────────────────────────────────────────────────
+
+test('catalog: createBundle inserts a row + returns the id', async () => {
+  const db = makeMemoryDb();
+  const out = await createBundle(
+    db,
+    { sku: 'BUN-1', name: 'Starter Pack', bundle_price_amd: 50000 },
+    0,
+  );
+  assert.equal(typeof out.id, 'number');
+  assert.ok(out.id > 0);
+});
+
+test('catalog: createBundle requires sku + name', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createBundle(db, { name: 'X' }, 0),
+    /sku/,
+  );
+  await assert.rejects(
+    createBundle(db, { sku: 'BUN-1' }, 0),
+    /name/,
+  );
+});
+
+test('catalog: createBundle validates bundle_price_amd (non-negative integer)', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createBundle(
+      db,
+      { sku: 'BUN-1', name: 'X', bundle_price_amd: -100 },
+      0,
+    ),
+    /bundle_price_amd/,
+  );
+  await assert.rejects(
+    createBundle(
+      db,
+      { sku: 'BUN-1', name: 'X', bundle_price_amd: 1.5 },
+      0,
+    ),
+    /bundle_price_amd/,
+  );
+});
+
+test('catalog: listBundles returns all non-archived bundles for the tenant', async () => {
+  const db = makeMemoryDb();
+  await createBundle(db, { sku: 'BUN-1', name: 'A' }, 0);
+  await createBundle(db, { sku: 'BUN-2', name: 'B' }, 0);
+  // Default (archived=false) returns both.
+  const items = await listBundles(db, 0);
+  assert.equal(items.length, 2);
+});
+
+test('catalog: listBundles is tenant-scoped', async () => {
+  const db = makeMemoryDb();
+  await createBundle(db, { sku: 'BUN-1', name: 'A' }, 0);
+  await createBundle(db, { sku: 'BUN-1', name: 'B' }, 1);
+  const items0 = await listBundles(db, 0);
+  const items1 = await listBundles(db, 1);
+  assert.equal(items0.length, 1);
+  assert.equal(items0[0].name, 'A');
+  assert.equal(items1.length, 1);
+  assert.equal(items1[0].name, 'B');
+});
+
+test('catalog: getBundle throws ValueError for missing bundle', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    getBundle(db, 999, 0),
+    /bundle.*not found in tenant/,
+  );
+});
+
+test('catalog: getBundle is tenant-scoped', async () => {
+  const db = makeMemoryDb();
+  const out = await createBundle(db, { sku: 'BUN-1', name: 'A' }, 0);
+  await assert.rejects(
+    getBundle(db, out.id, 1),
+    /bundle.*not found in tenant/,
+  );
+});
+
+test('catalog: addBundleItem inserts a row + returns the id', async () => {
+  const db = makeMemoryDb();
+  const item = await makeItem(db);
+  const bun = await createBundle(
+    db,
+    { sku: 'BUN-1', name: 'Starter', bundle_price_amd: 50000 },
+    0,
+  );
+  const out = await addBundleItem(
+    db,
+    bun.id,
+    { catalog_item_id: item.id, quantity: 1 },
+    0,
+  );
+  assert.equal(typeof out.id, 'number');
+  assert.ok(out.id > 0);
+});
+
+test('catalog: addBundleItem throws ValueError for missing bundle', async () => {
+  const db = makeMemoryDb();
+  const item = await makeItem(db);
+  await assert.rejects(
+    addBundleItem(
+      db,
+      999,
+      { catalog_item_id: item.id, quantity: 1 },
+      0,
+    ),
+    /bundle.*not found in tenant/,
+  );
+});
+
+test('catalog: addBundleItem throws ValueError for missing item', async () => {
+  const db = makeMemoryDb();
+  const bun = await createBundle(db, { sku: 'BUN-1', name: 'Starter' }, 0);
+  await assert.rejects(
+    addBundleItem(
+      db,
+      bun.id,
+      { catalog_item_id: 999, quantity: 1 },
+      0,
+    ),
+    /catalog item.*not found in tenant/,
+  );
+});
+
+test('catalog: addBundleItem validates quantity (> 0)', async () => {
+  const db = makeMemoryDb();
+  const item = await makeItem(db);
+  const bun = await createBundle(db, { sku: 'BUN-1', name: 'Starter' }, 0);
+  await assert.rejects(
+    addBundleItem(
+      db,
+      bun.id,
+      { catalog_item_id: item.id, quantity: 0 },
+      0,
+    ),
+    /quantity/,
+  );
+  await assert.rejects(
+    addBundleItem(
+      db,
+      bun.id,
+      { catalog_item_id: item.id, quantity: -1 },
+      0,
+    ),
+    /quantity/,
+  );
+});
+
+test('catalog: listBundleItems returns the items in the bundle (chronological)', async () => {
+  const db = makeMemoryDb();
+  const item1 = await makeItem(db, 'Item 1', 'ITEM-1');
+  const item2 = await makeItem(db, 'Item 2', 'ITEM-2');
+  const bun = await createBundle(
+    db,
+    { sku: 'BUN-1', name: 'Starter', bundle_price_amd: 50000 },
+    0,
+  );
+  await addBundleItem(db, bun.id, { catalog_item_id: item1.id, quantity: 1 }, 0);
+  await addBundleItem(db, bun.id, { catalog_item_id: item2.id, quantity: 2 }, 0);
+  const items = await listBundleItems(db, bun.id, 0);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].catalog_item_id, item1.id);
+  assert.equal(items[0].quantity, 1);
+  assert.equal(items[1].catalog_item_id, item2.id);
+  assert.equal(items[1].quantity, 2);
+});
+
+test('catalog: listBundleItems throws ValueError for missing bundle', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    listBundleItems(db, 999, 0),
+    /bundle.*not found in tenant/,
+  );
+});
+
+test('catalog: listBundleItems is tenant-scoped', async () => {
+  const db = makeMemoryDb();
+  const item = await makeItem(db);
+  const bun0 = await createBundle(db, { sku: 'BUN-1', name: 'B0' }, 0);
+  const bun1 = await createBundle(db, { sku: 'BUN-1', name: 'B1' }, 1);
+  await addBundleItem(
+    db,
+    bun0.id,
+    { catalog_item_id: item.id, quantity: 1 },
+    0,
+  );
+  // Cross-tenant access: listBundleItems for bun0 in
+  // tenant 1 throws ValueError (the bundle isn't in
+  // tenant 1).
+  await assert.rejects(
+    listBundleItems(db, bun0.id, 1),
+    /bundle.*not found in tenant/,
+  );
+  // The bundle in tenant 1 is empty.
+  const items1 = await listBundleItems(db, bun1.id, 1);
+  assert.equal(items1.length, 0);
 });

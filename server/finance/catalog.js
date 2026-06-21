@@ -340,3 +340,217 @@ export async function getVariant(db, variantId, tenantId = 0) {
   }
   return result.rows[0];
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Bundles (catalog v2 wave 3 / W78-1)
+// ────────────────────────────────────────────────────────────────────────
+//
+// Bundles are compound catalog items: a bundle has a
+// header row (sku + name + description +
+// bundle_price_amd) + N child rows (one per
+// catalog_item with a quantity). The total cost of
+// the bundle is the bundle_price_amd (a single
+// integer); the child rows are the recipe (e.g.
+// "1x Chair + 1x Desk + 1x Lamp").
+//
+// This module ships the minimum-viable bundles:
+//   - createBundle / listBundles / getBundle
+//   - addBundleItem / listBundleItems
+// (removeBundleItem + updateBundle are deferred
+// to a future wave — the operator can soft-archive
+// the bundle via the archived flag for now.)
+//
+// Phase 2 catalog v2 wave 3a (W78-1): schema +
+// pure functions + tests. Wave 3b (future): route
+// wiring + perm keys + smoke check.
+
+function assertBundlePrice(value) {
+  if (value === null || value === undefined) return;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ValueError('bundle_price_amd must be a non-negative integer');
+  }
+}
+
+function assertQuantity(value) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new ValueError('quantity must be a positive integer');
+  }
+}
+
+function validateCreateBundleInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('bundle input is required');
+  }
+  assertString(input.sku, 'sku', { min: 1, max: 64 });
+  assertString(input.name, 'name', { min: 1, max: 255 });
+  assertOptionalString(input.description, 'description', { max: 8192 });
+  assertBundlePrice(input.bundle_price_amd);
+}
+
+function validateAddBundleItemInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('bundle item input is required');
+  }
+  assertPositiveInt(input.catalog_item_id, 'catalog_item_id');
+  assertQuantity(input.quantity);
+}
+
+export async function createBundle(db, input, tenantId = 0) {
+  validateCreateBundleInput(input);
+  const ins = await runQuery(
+    db,
+    `INSERT INTO finance.catalog_bundles
+       (tenant_id, sku, name, description, bundle_price_amd)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [
+      tenantId,
+      input.sku,
+      input.name,
+      input.description ?? null,
+      input.bundle_price_amd ?? null,
+    ],
+  );
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(
+      db,
+      'SELECT LAST_INSERT_ROWID()',
+      [],
+    );
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
+}
+
+export async function listBundles(db, tenantId = 0, { archived = false } = {}) {
+  // Order by id DESC (most recent first; consistent
+  // with listProjects / listCases). When
+  // archived=false (default), only non-archived
+  // bundles are returned. When archived=true, all
+  // bundles (including archived) are returned —
+  // useful for cleanup views.
+  let result;
+  if (archived) {
+    result = await runQuery(
+      db,
+      `SELECT id, sku, name, description, bundle_price_amd,
+              archived, created_at, updated_at
+         FROM finance.catalog_bundles
+        WHERE tenant_id = $1
+        ORDER BY id DESC`,
+      [tenantId],
+    );
+  } else {
+    result = await runQuery(
+      db,
+      `SELECT id, sku, name, description, bundle_price_amd,
+              archived, created_at, updated_at
+         FROM finance.catalog_bundles
+        WHERE tenant_id = $1 AND archived = 0
+        ORDER BY id DESC`,
+      [tenantId],
+    );
+  }
+  return result.rows;
+}
+
+export async function getBundle(db, bundleId, tenantId = 0) {
+  assertPositiveInt(bundleId, 'bundleId');
+  const result = await runQuery(
+    db,
+    `SELECT id, sku, name, description, bundle_price_amd,
+            archived, created_at, updated_at
+       FROM finance.catalog_bundles
+      WHERE id = $1 AND tenant_id = $2`,
+    [bundleId, tenantId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    throw new ValueError(`bundle ${bundleId} not found in tenant ${tenantId}`);
+  }
+  return result.rows[0];
+}
+
+export async function addBundleItem(db, bundleId, input, tenantId = 0) {
+  assertPositiveInt(bundleId, 'bundleId');
+  validateAddBundleItemInput(input);
+  // Verify the bundle exists in the tenant.
+  const bundleExisting = await runQuery(
+    db,
+    `SELECT id FROM finance.catalog_bundles
+      WHERE id = $1 AND tenant_id = $2`,
+    [bundleId, tenantId],
+  );
+  if (!bundleExisting.rows || bundleExisting.rows.length === 0) {
+    throw new ValueError(`bundle ${bundleId} not found in tenant ${tenantId}`);
+  }
+  // Verify the catalog item exists in the tenant
+  // (the bundle item references the catalog item;
+  // we don't have a real FK because the items are
+  // in a different migration).
+  const itemExisting = await runQuery(
+    db,
+    `SELECT id FROM finance.catalog_items
+      WHERE id = $1 AND tenant_id = $2`,
+    [input.catalog_item_id, tenantId],
+  );
+  if (!itemExisting.rows || itemExisting.rows.length === 0) {
+    throw new ValueError(
+      `catalog item ${input.catalog_item_id} not found in tenant ${tenantId}`,
+    );
+  }
+  const ins = await runQuery(
+    db,
+    `INSERT INTO finance.catalog_bundle_items
+       (tenant_id, bundle_id, catalog_item_id, quantity)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id`,
+    [
+      tenantId,
+      bundleId,
+      input.catalog_item_id,
+      input.quantity,
+    ],
+  );
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(
+      db,
+      'SELECT LAST_INSERT_ROWID()',
+      [],
+    );
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
+}
+
+export async function listBundleItems(db, bundleId, tenantId = 0) {
+  assertPositiveInt(bundleId, 'bundleId');
+  // Verify the bundle exists in the tenant
+  // (consistent with the listReplies /
+  // listProjectTasks pattern; existence check
+  // prevents an empty-array response on a missing
+  // bundle from masking a real client bug).
+  const bundleExisting = await runQuery(
+    db,
+    `SELECT id FROM finance.catalog_bundles
+      WHERE id = $1 AND tenant_id = $2`,
+    [bundleId, tenantId],
+  );
+  if (!bundleExisting.rows || bundleExisting.rows.length === 0) {
+    throw new ValueError(`bundle ${bundleId} not found in tenant ${tenantId}`);
+  }
+  const result = await runQuery(
+    db,
+    `SELECT id, bundle_id, catalog_item_id, quantity, created_at
+       FROM finance.catalog_bundle_items
+      WHERE bundle_id = $1 AND tenant_id = $2
+      ORDER BY id ASC`,
+    [bundleId, tenantId],
+  );
+  return result.rows;
+}
