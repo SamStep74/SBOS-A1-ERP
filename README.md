@@ -582,9 +582,33 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     - HTML dashboard: `GET /api/finance/dashboard` (Wave 14)
     - JSON dashboard: `GET /api/finance/360` (Wave 35)
     - Per-customer drill-down: `GET /api/finance/customers/:id/360` (Wave 32)
-    - Per-vendor drill-down: `GET /api/finance/vendors/:id/360` (defer — pure function shipped Wave 33, route pending)
+    - Per-vendor drill-down: `GET /api/finance/vendors/:id/360` (Wave 36)
   - 1270/1270 tests pass (was 1268; +2). Smoke 86
     endpoints + STEP 5b + 5c + 5d + 5e + 5f + 5g all pass.
+    `npm run check` clean, boundary 0.
+- **Wave 36 (Vendor 360 — route wiring)** — DONE.
+  - Wires the Wave 33 pure function to
+    `GET /api/finance/vendors/:id/360`. Two middlewares:
+    `requireTenant` (Wave 28 defense-in-depth) and
+    `requirePerm('finance.vendor.read')` (the same perm
+    the vendor list / get uses).
+  - Optional `?today=YYYY-MM-DD` query param for
+    back-dated aging (defaults to current date).
+  - 404 on missing or cross-tenant vendor (no
+    existence-oracle leak between tenants).
+  - 1 new integration test in `server.test.js`:
+    - 36h — `GET /api/finance/vendors/999998/360` returns
+      404 with `error: 'not_found'`. (The 200-shape path
+      is covered by the 13 unit tests in `vendor360.test.js`.)
+  - 1 new deploy smoke step (STEP 5h): hits a
+    non-existent vendor, asserts 404 + `error: 'not_found'`.
+  - **CFO dashboard story finally closed**: all 4 endpoints
+    are now live (HTML dashboard, JSON dashboard, per-customer
+    drill-down, per-vendor drill-down). Phase 1 ERP is now
+    end-to-end CFO-grade + perm-gated + tenant-scoped +
+    audit-logged.
+  - 1287/1287 tests pass (was 1286; +1). Smoke 86 endpoints
+    + STEP 5b + 5c + 5d + 5e + 5f + 5g + 5h all pass.
     `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff

@@ -103,6 +103,7 @@ import {
 import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
 import { getCustomer360 } from './customer360.js';
+import { getVendor360 } from './vendor360.js';
 import { getDashboard360 } from './dashboard360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
@@ -577,6 +578,38 @@ export function registerFinanceRoutes(app, opts = {}) {
         // cross-tenant customer; map both to 404 (no
         // existence-oracle leak between tenants — same pattern
         // as getProject / getTask / getInvoice).
+        if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // Vendor 360 — CFO-facing full view: vendor info + every open
+  // PO (with total + outstanding) + recent receipts + totals +
+  // aging buckets. Wave 33/36. Mirror of the customer 360
+  // (above) for the supply side.
+  //
+  // Perm gate: finance.vendor.read (the same perm the vendor
+  // list / get uses). Tenant scope: requireTenant middleware.
+  app.get(
+    '/api/finance/vendors/:id/360',
+    requireTenant,
+    requirePerm('finance.vendor.read'),
+    async (req, res, next) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const tenantId = req.tenantId;
+        const today = typeof req.query.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.today)
+          ? req.query.today
+          : undefined;
+        const out = await getVendor360(pgAdapter, id, tenantId, today ? { today } : {});
+        res.status(200).json(out);
+      } catch (err) {
         if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
           return res.status(404).json({ error: 'not_found', message: err.message });
         }

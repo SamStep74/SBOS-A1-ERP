@@ -803,6 +803,53 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5h: Vendor 360 endpoint (Wave 36) ==="
+# Wave 36 wires the vendor 360 pure function (Wave 33) to
+# GET /api/finance/vendors/:id/360. Smoke: hit a non-existent
+# vendor, assert 404 (the route is wired + perm gate works +
+# 404 mapping works). The 200-shape path is exercised by
+# vendor360.test.js unit tests.
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: token ? { 'authorization': 'Bearer ' + token } : {},
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    const r = await call('GET', '/api/finance/vendors/999999/360', null, tok);
+    if (r.status !== 404) {
+      console.log('  FAIL missing vendor: expected 404, got', r.status, JSON.stringify(r.body).slice(0, 200));
+      process.exit(1);
+    }
+    if (r.body.error !== 'not_found') {
+      console.log('  FAIL error code:', r.body.error);
+      process.exit(1);
+    }
+    console.log('  PASS 404 GET /api/finance/vendors/999999/360 (missing vendor returns 404, no existence-oracle leak)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  vendor 360 OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")

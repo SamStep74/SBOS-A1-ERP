@@ -1096,6 +1096,17 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(body.today, '2026-01-01');
   });
 
+  // ─── Wave 36: vendor 360 route ───
+
+  test('36h. GET /api/finance/vendors/:id/360 returns the full 360 view (Wave 36)', async () => {
+    // Vendor 360 was shipped as a pure function in Wave 33;
+    // this wave wires the route. Empty vendor (no POs yet)
+    // returns the expected shape with zero totals + empty arrays.
+    const { status, body } = await get(server, '/api/finance/vendors/999998/360');
+    assert.equal(status, 404, 'vendor 999998 should not exist in this tenant');
+    assert.equal(body.error, 'not_found');
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {
