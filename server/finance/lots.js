@@ -2,15 +2,22 @@
 //
 // Phase 2 ERP — lot + serial tracking for inventory.
 //
-// Wave 37. Scope (this file):
+// Wave 37. Scope:
 //   - Lot CRUD: createLot, getLot, listLotsForItem
 //   - Serial CRUD: createSerial, getSerial, listSerialsForItem
 //
-// Out of scope (Wave 38):
-//   - Stock-move integration: receiveStock(deliverStock, transfer)
-//     that accepts lot_id + serial_ids
-//   - FEFO (first-expiry-first-out) picking logic on deliver
-//   - Recall support (find all serials in a lot → flag them)
+// Wave 39. Scope (this wave):
+//   - listLotsForLocation — join lots + stock_lots to get per-location
+//     quantities (and FEFO expiry ordering)
+//   - listSerialsForLocation — list serials currently at a location,
+//     optionally filtered by status
+//   - receiveIntoLot — increment stock_lots.quantity at a (lot, location)
+//     (called by receiveStock when lot_id is given)
+//   - consumeFromLotsFEFO — first-expiry-first-out picking, used by
+//     deliverStock when the item has stock_lots rows
+//   - assignSerialLocation — set current_location_id + status on a
+//     serial (used by receiveStock + deliverStock when serial_ids is
+//     given)
 //
 // All SQL stays in here — no string-concat, no eval, every query
 // uses parameterized placeholders. The pure functions work against
@@ -299,6 +306,335 @@ export async function listSerialsForItem(db, catalogItemId, tenantId = 0, opts =
     params,
   );
   return (result.rows || []).map(normalizeSerial);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Stock-move integration helpers (Wave 39)
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * List lots that have quantity at a given location, joined with
+ * stock_lots to get the per-location quantity. Returns a list of
+ * objects: { id, code, supplier_lot_number, catalog_item_id,
+ * expiry_date, quantity }.
+ *
+ * Ordered FEFO (expiry ASC NULLS LAST, then id ASC) so the picker
+ * can iterate the result directly without re-sorting.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} locationId
+ * @param {object} [opts]
+ * @param {boolean} [opts.include_zero=false]  include rows with quantity=0
+ *                                              (default: hide them)
+ */
+export async function listLotsForLocation(db, tenantId, locationId, opts = {}) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw new ValueError('locationId must be a positive integer');
+  }
+  const includeZero = opts.include_zero === true;
+  const rows = await runQuery(
+    db,
+    `SELECT l.id, l.tenant_id, l.code, l.supplier_lot_number,
+            l.catalog_item_id, l.expiry_date, l.received_at,
+            sl.quantity
+       FROM finance.lots l
+       JOIN finance.stock_lots sl
+         ON sl.tenant_id = l.tenant_id AND sl.lot_id = l.id
+      WHERE l.tenant_id = $1 AND sl.location_id = $2
+        ${includeZero ? '' : 'AND sl.quantity > 0'}
+      ORDER BY CASE WHEN l.expiry_date IS NULL THEN 1 ELSE 0 END,
+               l.expiry_date ASC,
+               l.id ASC`,
+    [tenantId, locationId],
+  );
+  return (rows.rows || []).map((r) => ({
+    id: Number(r.id),
+    tenant_id: Number(r.tenant_id),
+    code: r.code,
+    supplier_lot_number: r.supplier_lot_number || null,
+    catalog_item_id: Number(r.catalog_item_id),
+    expiry_date: r.expiry_date || null,
+    received_at: r.received_at,
+    quantity: Number(r.quantity),
+  }));
+}
+
+/**
+ * List serials currently at a given location. A serial is "at" a
+ * location when serials.current_location_id = location_id AND
+ * serials.status = 'in_stock' (sold/returned/lost/scrap serials
+ * are filtered out by default).
+ *
+ * Ordered by id ASC so the picker can iterate deterministically.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} locationId
+ * @param {object} [opts]
+ * @param {string} [opts.status]  override the default 'in_stock' filter
+ *                                (e.g. 'returned' to list serials that
+ *                                came back)
+ */
+export async function listSerialsForLocation(db, tenantId, locationId, opts = {}) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw new ValueError('locationId must be a positive integer');
+  }
+  const status = opts.status != null ? String(opts.status) : 'in_stock';
+  if (!VALID_SERIAL_STATUSES.has(status)) {
+    throw new ValueError(`status must be one of: ${[...VALID_SERIAL_STATUSES].join(', ')}`);
+  }
+  const rows = await runQuery(
+    db,
+    `SELECT id, tenant_id, serial_number, catalog_item_id, lot_id, status,
+            current_location_id, received_at, sold_at, notes,
+            created_at, updated_at
+       FROM finance.serials
+      WHERE tenant_id = $1
+        AND current_location_id = $2
+        AND status = $3
+      ORDER BY id ASC`,
+    [tenantId, locationId, status],
+  );
+  return (rows.rows || []).map(normalizeSerial);
+}
+
+/**
+ * Receive quantity into a lot at a location. Upserts the stock_lots
+ * row: if (lot, location) doesn't exist, inserts; otherwise
+ * increments quantity. Returns the new quantity.
+ *
+ * Validates that the lot exists + belongs to the tenant +
+ * matches the catalog_item_id.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} lotId
+ * @param {number} locationId
+ * @param {number} catalogItemId
+ * @param {number} quantity       positive integer
+ * @returns {Promise<{lot_id: number, location_id: number, quantity: number}>}
+ */
+export async function receiveIntoLot(db, tenantId, lotId, locationId, catalogItemId, quantity) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(lotId) || lotId <= 0) {
+    throw new ValueError('lotId must be a positive integer');
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw new ValueError('locationId must be a positive integer');
+  }
+  if (!Number.isInteger(catalogItemId) || catalogItemId <= 0) {
+    throw new ValueError('catalogItemId must be a positive integer');
+  }
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new ValueError('quantity must be a positive integer');
+  }
+  // Validate the lot exists + belongs to tenant + matches catalog_item.
+  const lot = await runQuery(
+    db,
+    'SELECT id, catalog_item_id FROM finance.lots WHERE tenant_id = $1 AND id = $2',
+    [tenantId, lotId],
+  );
+  if (!lot.rows || lot.rows.length === 0) {
+    throw new ValueError(`lot ${lotId} not found in tenant ${tenantId}`);
+  }
+  if (Number(lot.rows[0].catalog_item_id) !== catalogItemId) {
+    throw new ValueError(
+      `lot ${lotId} is for catalog_item ${lot.rows[0].catalog_item_id}, not ${catalogItemId}`,
+    );
+  }
+  // Upsert stock_lots. If the row exists, increment; else insert.
+  const existing = await runQuery(
+    db,
+    `SELECT id, quantity FROM finance.stock_lots
+      WHERE tenant_id = $1 AND lot_id = $2 AND location_id = $3`,
+    [tenantId, lotId, locationId],
+  );
+  let newQty;
+  if (existing.rows && existing.rows.length > 0) {
+    newQty = Number(existing.rows[0].quantity) + quantity;
+    await runQuery(
+      db,
+      `UPDATE finance.stock_lots
+          SET quantity = $1, updated_at = datetime('now')
+        WHERE tenant_id = $2 AND lot_id = $3 AND location_id = $4`,
+      [newQty, tenantId, lotId, locationId],
+    );
+  } else {
+    newQty = quantity;
+    await runQuery(
+      db,
+      `INSERT INTO finance.stock_lots
+         (tenant_id, lot_id, location_id, catalog_item_id, quantity)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [tenantId, lotId, locationId, catalogItemId, quantity],
+    );
+  }
+  return { lot_id: lotId, location_id: locationId, quantity: newQty };
+}
+
+/**
+ * Consume quantity from an item's lots at a source location, using
+ * FEFO (first-expiry-first-out) order. Returns an array of
+ * {lot_id, quantity_consumed} showing where the quantity came from.
+ *
+ * Stops once the requested quantity is satisfied (greedy). Throws
+ * ValueError if the sum of stock_lots.quantity for the (item,
+ * location) is less than the requested quantity.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} itemId
+ * @param {number} sourceLocationId
+ * @param {number} quantity       positive integer
+ * @returns {Promise<Array<{lot_id: number, quantity_consumed: number}>>}
+ */
+export async function consumeFromLotsFEFO(db, tenantId, itemId, sourceLocationId, quantity) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    throw new ValueError('itemId must be a positive integer');
+  }
+  if (!Number.isInteger(sourceLocationId) || sourceLocationId <= 0) {
+    throw new ValueError('sourceLocationId must be a positive integer');
+  }
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new ValueError('quantity must be a positive integer');
+  }
+  // Fetch stock_lots for (item, location) JOIN lots, ordered FEFO.
+  const lots = await runQuery(
+    db,
+    `SELECT sl.lot_id, sl.quantity, l.expiry_date
+       FROM finance.stock_lots sl
+       JOIN finance.lots l
+         ON l.tenant_id = sl.tenant_id AND l.id = sl.lot_id
+      WHERE sl.tenant_id = $1 AND sl.catalog_item_id = $2 AND sl.location_id = $3
+        AND sl.quantity > 0
+      ORDER BY CASE WHEN l.expiry_date IS NULL THEN 1 ELSE 0 END,
+               l.expiry_date ASC,
+               l.id ASC`,
+    [tenantId, itemId, sourceLocationId],
+  );
+  const available = (lots.rows || []).reduce((acc, r) => acc + Number(r.quantity), 0);
+  if (available < quantity) {
+    throw new ValueError(
+      `insufficient lot-tracked stock at source: have ${available} across ${(lots.rows || []).length} lots, requested ${quantity}`,
+    );
+  }
+  // Greedy consumption: take from the earliest-expiry lot first.
+  const consumption = [];
+  let remaining = quantity;
+  for (const row of lots.rows || []) {
+    if (remaining <= 0) break;
+    const lotId = Number(row.lot_id);
+    const lotQty = Number(row.quantity);
+    const take = Math.min(remaining, lotQty);
+    const newQty = lotQty - take;
+    // Always UPDATE, never DELETE. Preserves the audit trail at the
+    // row level (listLotsForLocation with include_zero=true can show
+    // depleted lots that were once at this location). If the lot
+    // ever gets re-received, receiveIntoLot will increment this row.
+    await runQuery(
+      db,
+      `UPDATE finance.stock_lots
+          SET quantity = $1, updated_at = datetime('now')
+        WHERE tenant_id = $2 AND lot_id = $3 AND location_id = $4`,
+      [newQty, tenantId, lotId, sourceLocationId],
+    );
+    consumption.push({ lot_id: lotId, quantity_consumed: take });
+    remaining -= take;
+  }
+  return consumption;
+}
+
+/**
+ * Assign a serial to a location + status. Used by receiveStock
+ * (status='in_stock') and deliverStock (status='sold' for external,
+ * or 'in_stock' at a different location for transfer).
+ *
+ * If `lotId` is provided, also sets serials.lot_id (must match the
+ * serial's catalog_item_id — that's already guaranteed by the
+ * lot itself). If `lotId` is null, leaves serials.lot_id alone
+ * (callers that want to clear it should pass a sentinel — not
+ * needed for Wave 39).
+ *
+ * Returns the normalized serial row.
+ *
+ * @param {object} db
+ * @param {number} tenantId
+ * @param {number} serialId
+ * @param {number|null} locationId  null if the serial is leaving stock
+ * @param {string} status          must be in VALID_SERIAL_STATUSES
+ * @param {number|null} [lotId]    optional: pin the serial to a lot
+ */
+export async function assignSerialLocation(db, tenantId, serialId, locationId, status, lotId = null) {
+  if (!Number.isInteger(tenantId) || tenantId < 0) {
+    throw new ValueError('tenantId must be a non-negative integer');
+  }
+  if (!Number.isInteger(serialId) || serialId <= 0) {
+    throw new ValueError('serialId must be a positive integer');
+  }
+  if (locationId != null && (!Number.isInteger(locationId) || locationId <= 0)) {
+    throw new ValueError('locationId must be a positive integer or null');
+  }
+  if (typeof status !== 'string' || !VALID_SERIAL_STATUSES.has(status)) {
+    throw new ValueError(`status must be one of: ${[...VALID_SERIAL_STATUSES].join(', ')}`);
+  }
+  if (lotId != null && (!Number.isInteger(lotId) || lotId <= 0)) {
+    throw new ValueError('lotId must be a positive integer or null');
+  }
+  // Validate the serial exists + belongs to tenant.
+  const existing = await runQuery(
+    db,
+    'SELECT id, catalog_item_id, status FROM finance.serials WHERE tenant_id = $1 AND id = $2',
+    [tenantId, serialId],
+  );
+  if (!existing.rows || existing.rows.length === 0) {
+    throw new ValueError(`serial ${serialId} not found in tenant ${tenantId}`);
+  }
+  // If lotId is provided, validate the lot is for the same catalog_item.
+  if (lotId != null) {
+    const lot = await runQuery(
+      db,
+      'SELECT catalog_item_id FROM finance.lots WHERE tenant_id = $1 AND id = $2',
+      [tenantId, lotId],
+    );
+    if (!lot.rows || lot.rows.length === 0) {
+      throw new ValueError(`lot ${lotId} not found in tenant ${tenantId}`);
+    }
+    if (Number(lot.rows[0].catalog_item_id) !== Number(existing.rows[0].catalog_item_id)) {
+      throw new ValueError(
+        `lot ${lotId} is for catalog_item ${lot.rows[0].catalog_item_id}, not ${existing.rows[0].catalog_item_id}`,
+      );
+    }
+  }
+  const soldAt = status === 'sold' ? new Date().toISOString() : null;
+  // Always pass the same 6 placeholders so the SQL is stable.
+  // Use COALESCE for lot_id + sold_at so passing null preserves the
+  // existing value (callers that don't want to touch lot_id pass
+  // null and the column stays put).
+  await runQuery(
+    db,
+    `UPDATE finance.serials
+        SET current_location_id = $1,
+            status = $2,
+            lot_id = COALESCE($3, lot_id),
+            sold_at = COALESCE($4, sold_at),
+            updated_at = datetime('now')
+      WHERE tenant_id = $5 AND id = $6`,
+    [locationId, status, lotId, soldAt, tenantId, serialId],
+  );
+  // Return the updated row.
+  return getSerial(db, serialId, tenantId);
 }
 
 // ────────────────────────────────────────────────────────────────────────
