@@ -275,6 +275,11 @@ const writeChecks = [
   // listMonthlyRevenueTrend / getCustomerRevenueBreakdown).
   { method: 'GET', path: '/api/finance/reports/ar-aging-bucket?asOfDate=2026-06-21&bucket=0_30', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ar-aging-bucket (empty DB → 200, items: [])' },
   { method: 'GET', path: '/api/finance/reports/revenue-trend?months=12', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET revenue-trend (empty DB → 200, 12 empty months)' },
+  // Phase 3 AI agents (W93-1) — data quality + reconciliation
+  // reads (empty DB → 200, no issues).
+  { method: 'GET', path: '/api/finance/ai/duplicates', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/duplicates (empty DB → 200, items: [])' },
+  { method: 'GET', path: '/api/finance/ai/hvhh-drift', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/hvhh-drift (empty DB → 200, items: [])' },
+  { method: 'GET', path: '/api/finance/ai/data-quality', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/data-quality (empty DB → 200, score: 100)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

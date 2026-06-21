@@ -227,6 +227,11 @@ import {
   listPayrollRuns,
 } from './hr.js';
 import {
+  findDuplicateCustomers,
+  findHvhhDrift,
+  getDataQualitySummary,
+} from './dataQuality.js';
+import {
   listJournalEntries,
   getJournalEntry,
   listAccountBalances,
@@ -2872,7 +2877,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     }),
   );
 
-  // POST /api/finance/hr/payroll-runs/:id/lines
+//   POST   /api/finance/hr/payroll-runs/:id/lines
+//   GET    /api/finance/ai/duplicates               (Phase 3 W93-1)
+//   GET    /api/finance/ai/hvhh-drift
+//   GET    /api/finance/ai/data-quality
   //   Add a per-employee pay line to a draft payroll run.
   //   Body: { employee_id, contract_id, base_salary_amd,
   //   bonus_amd?, deductions_amd?, tax_amd?, worked_days?,
@@ -2952,6 +2960,63 @@ export function registerFinanceRoutes(app, opts = {}) {
       if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
         return res.status(404).json({ error: 'not_found', message: err.message });
       }
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 AI agents — data quality (W93-1) — read-only
+  // tenant-scoped scans that surface data hygiene issues.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/ai/duplicates
+  //   Find potential duplicate customers in the tenant
+  //   (same hvhh OR same normalized name). Sorted by
+  //   match_type (hvhh first, more severe) then by
+  //   match_value ASC.
+  app.get('/api/finance/ai/duplicates', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const items = await findDuplicateCustomers(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/ai/hvhh-drift
+  //   Find invoices where the customer_hvhh snapshotted on
+  //   the invoice differs from the live customer.hvhh.
+  //   Sorted by invoice_id DESC (most recent first).
+  app.get('/api/finance/ai/hvhh-drift', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const items = await findHvhhDrift(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/ai/data-quality
+  //   Overall data quality summary for the tenant: per-
+  //   module scores (customers/vendors/employees/invoices)
+  //   + issue counts (duplicates, drift, missing hvhh).
+  app.get('/api/finance/ai/data-quality', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const out = await getDataQualitySummary(pgAdapter, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
       if (err && err.name === 'ValueError') {
         return res.status(400).json({ error: 'bad_request', message: err.message });
       }
