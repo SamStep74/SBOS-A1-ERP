@@ -194,6 +194,34 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     before this wave).
   - 1159/1159 tests pass (was 1130; +29 from W74-1's
     pre-existing project tests). `npm run check` clean, boundary 0.
+- **Wave 26 (Audit endpoint — perm gate + 403 smoke)** — DONE.
+  - The `GET /api/finance/audit` endpoint (shipped in `7cda79b`
+    "the 4 deferred items") had no perm gate. For a compliance
+    endpoint that's a real hole: any authenticated user could
+    read the full audit log. Closed by:
+    1. Adding `requireTenant` + `requirePerm('security.audit.read')`
+       middleware. The perm key exists in the catalog and is
+       bound to the `AuditReader` perm set, which `Owner / Admin /
+       Auditor` all hold via the role matrix.
+    2. Switching the route from `readTenant(req)` (silent fallback
+       to 0) to `req.tenantId` (set by the `requireTenant`
+       middleware, 400 on missing).
+  - 2 new unit tests in `server/rbac/rbac.test.js`:
+    - `requirePerm('security.audit.read')` returns false for a
+      Bookkeeper (no AuditReader perm set) with `outcome.reason =
+      'no_permission'`.
+    - `requirePerm('security.audit.read')` returns true for an
+      Admin (AuditReader inherited via role matrix).
+  - 1 new deploy smoke step (STEP 5b): seeds a Bookkeeper
+    user in the running DB, mints a session via
+    `server/auth-login.js#login`, hits `/api/finance/audit`
+    with the Bookkeeper token, asserts 403. This is the only
+    test path that exercises the real-auth + perm-gate wire
+    end-to-end (the unit tests in server.test.js run in
+    `SBOS_AUTH_MODE=stub` which bypasses real auth and binds
+    every request to a stub Admin).
+  - 1161/1161 tests pass (was 1159; +2). Smoke 68 endpoints
+    + 1 new 403 check. `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See

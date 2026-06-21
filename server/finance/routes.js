@@ -548,26 +548,36 @@ export function registerFinanceRoutes(app, opts = {}) {
   // user_id, action, resource prefix, since/until, and limit.
   // Uses the raw sqlite handle (not the pg adapter) because the
   // audit table is application infrastructure, not a domain table.
-  app.get('/api/finance/audit', async (req, res, next) => {
-    try {
-      const tenantId = readTenant(req);
-      const filters = {
-        tenant_id: tenantId,
-        user_id: req.query.user_id,
-        action: req.query.action,
-        resource_prefix: req.query.resource,
-        since: req.query.since,
-        until: req.query.until,
-        limit: req.query.limit,
-        offset: req.query.offset,
-      };
-      const rawDb = req.app && req.app.locals && req.app.locals.db;
-      const items = await listAudit(rawDb, filters);
-      res.status(200).json({ items });
-    } catch (err) {
-      next(err);
-    }
-  });
+  //
+  // Perm gate: `security.audit.read` (bound to the AuditReader
+  // perm set, which Owner / Admin / Auditor all hold). Without
+  // the perm, the response is 403. The audit log is compliance
+  // data — only readers with the audit permission can see it.
+  app.get(
+    '/api/finance/audit',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const filters = {
+          tenant_id: tenantId,
+          user_id: req.query.user_id,
+          action: req.query.action,
+          resource_prefix: req.query.resource,
+          since: req.query.since,
+          until: req.query.until,
+          limit: req.query.limit,
+          offset: req.query.offset,
+        };
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        const items = await listAudit(rawDb, filters);
+        res.status(200).json({ items });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ─── Phase 1 ERP: Inventory module ───
   //

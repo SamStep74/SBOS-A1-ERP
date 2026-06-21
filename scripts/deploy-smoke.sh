@@ -334,6 +334,64 @@ else
 fi
 echo
 
+echo "=== STEP 5b: Audit endpoint perm gate (Bookkeeper → 403) ==="
+# Wave 26: GET /api/finance/audit is gated by security.audit.read.
+# A Bookkeeper doesn't hold that perm (Bookkeeper's role matrix
+# has FinanceOperator + CRMOperator + DocsOperator + StandardUser
+# but NOT AuditReader). Insert a Bookkeeper user + mint a session
+# + hit the endpoint; expect 403. Sanity-check that the admin
+# session still gets 200.
+DB_PATH="$DB" PORT="$PORT" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const { login, hashPassword } = require('$REPO_ROOT/server/auth-login.js');
+  const db = new DatabaseSync(process.env.DB_PATH);
+
+  // Seed a Bookkeeper user (id=2; the admin is already id=1).
+  const { hash, salt } = hashPassword('bk-pass');
+  db.prepare(\`INSERT OR REPLACE INTO users
+    (id, username, email, role, tenant_id, password_hash, password_salt)
+    VALUES (2, 'bookkeeper', 'bookkeeper@example.com', 'Bookkeeper', 0, ?, ?)\`)
+    .run(hash, salt);
+
+  const session = login(db, 'bookkeeper', 'bk-pass');
+  if (session.error) {
+    console.log('  FAIL bookkeeper login:', session.error);
+    process.exit(1);
+  }
+  const bkToken = session.token;
+
+  function call(method, path, token) {
+    return new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: token ? { 'authorization': 'Bearer ' + token } : {},
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.end();
+    });
+  }
+  // Wait for require to load.
+  const http = require('node:http');
+  (async () => {
+    const bk = await call('GET', '/api/finance/audit?limit=5', bkToken);
+    if (bk.status !== 403) {
+      console.log('  FAIL bookkeeper audit: expected 403, got', bk.status, bk.body.slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 403 GET /api/finance/audit (Bookkeeper, no security.audit.read)');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  perm gate OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
