@@ -31,6 +31,7 @@ function makeMemoryDb() {
       phone TEXT,
       role TEXT,
       notes TEXT,
+      hvhh TEXT,
       archived INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -294,4 +295,54 @@ test('regression: createContact throws ValueError on bad email (name preserved)'
       return true;
     },
   );
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — contact.hvhh (optional). Same fail-soft pattern
+// as customer + vendor + invoice. Default test env has no A1_VALIDATOR_URL,
+// so the local regex (^\d{8}$) enforces 8 digits.
+// ────────────────────────────────────────────────────────────────────────
+
+test('createContact: hvhh is validated via A1-Validator wrapper (9 digits rejected)', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createContact(db, { name: 'BadContact', hvhh: '123456789' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createContact: hvhh with non-digit char is rejected', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createContact(db, { name: 'BadContact', hvhh: '1234567A' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createContact: hvhh=null is allowed (optional field)', async () => {
+  const db = makeMemoryDb();
+  const out = await createContact(db, { name: 'NoHvhh', hvhh: null }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createContact: hvhh="" is allowed (empty string = absent)', async () => {
+  const db = makeMemoryDb();
+  const out = await createContact(db, { name: 'Empty', hvhh: '' }, 0);
+  assert.equal(out.hvhh, '');
+});
+
+test('createContact: hvhh omitted is allowed', async () => {
+  const db = makeMemoryDb();
+  const out = await createContact(db, { name: 'Omitted' }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createContact: valid 8-digit hvhh persists', async () => {
+  const db = makeMemoryDb();
+  const out = await createContact(
+    db,
+    { name: 'GoodContact', hvhh: '00123456' },
+    0,
+  );
+  assert.equal(out.hvhh, '00123456');
 });

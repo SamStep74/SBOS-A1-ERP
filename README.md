@@ -666,6 +666,42 @@ A1-Validator service is an enhancement, never a requirement.
   now-invalid customer returns 400. End-to-end proof of the
   drift-detection value of the re-validation pass.
 
+## v0.7.0 — A1-Validator drift detection on vendor bills + CRM contacts
+
+Three changes extend the A1-Validator integration from v0.6.0:
+
+1. **Vendor bill HVVH re-validation** — `POST /api/finance/vendor-bills`
+   re-validates the vendor HVVH at bill-create time (catches drift in
+   the same way invoice-create does for the customer). The vendor bill
+   flow re-fetches the live `hvhh` from the `vendors` table, not the
+   denormalized value on `purchase_orders.vendor_hvhh`, so a vendor-edit
+   that updated the hvhh is caught.
+
+2. **CRM contact TIN** — new migration `0016_crm_contacts_hvhh.sql` adds a
+   nullable `hvhh TEXT` column to `finance.crm_contacts`. Most contacts at
+   customer companies don't have their own TIN (the company TIN is on
+   `finance.customers`), but self-employed contacts may. The `createContact`
+   endpoint validates the optional field via the same fail-soft A1-Validator
+   wrapper.
+
+3. **CI self-hosted runner fallback** — the org-level hosted-runner quota
+   has been intermittently exhausted since 2026-06-21 (`Job is waiting
+   for a hosted runner to come online`). `runs-on` is now a list:
+   `[self-hosted, sbos-self-hosted, linux, x64, ubuntu-latest]`. The first
+   match wins, so a registered self-hosted runner sidesteps the quota
+   entirely. Maintainer runbook in `docs/CI.md`.
+
+**Stats:**
+- 1320/1320 tests pass (was 1242 at v0.6.0; +78 across all waves).
+- All 88 endpoint smoke checks + STEP 5b/5c/5d/5e/5f/5g/5h/7/7b/7c/7d/7e/7f/7g pass.
+- `npm run check` clean, boundary 0.
+- 0 dependencies added.
+
+**New deploy smoke steps:**
+- STEP 7f: vendor bill HVVH drift. End-to-end proof of the re-validation value.
+- STEP 7g: CRM contact TIN. Valid persists, invalid returns 400, optional field works.
+
+
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.

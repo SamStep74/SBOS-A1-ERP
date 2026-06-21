@@ -198,3 +198,77 @@ linear steps, so adding a check is mechanical:
 - **Node matrix is single-cell (Node 20)** — the repo's `engines`
   field pins `>= 20` and the test runner is Node-version-sensitive
   (native `node:sqlite`). Adding a second cell is a v1.1 follow-up.
+
+## Hosted runner fallback (v0.7.0+)
+
+**The problem.** As of 2026-06-21, the Armosphera GitHub org's
+hosted-runner quota has been intermittently exhausted. CI jobs
+queued on `ubuntu-latest` get stuck with
+`Job is waiting for a hosted runner to come online` for ~2
+seconds and then fail with empty steps. This is an org-level
+infrastructure problem, not a code problem — local
+`npm run check` and `npm run smoke:deploy` continue to pass
+green on every commit.
+
+**The fix.** The `runs-on` line in `.github/workflows/ci.yml`
+is now a *list* of runner labels:
+
+```yaml
+runs-on: [self-hosted, sbos-self-hosted, linux, x64, ubuntu-latest]
+```
+
+GitHub Actions picks the first available match. When the
+maintainer's self-hosted runner is registered with the
+`sbos-self-hosted` label, jobs run there — sidestepping the
+hosted-runner quota entirely. When no self-hosted runner is
+registered (or it's offline), the workflow falls back to
+`ubuntu-latest`, preserving the canonical CI signal but
+re-exposing the org-level capacity risk.
+
+**Maintainer runbook: register a self-hosted runner.**
+
+```bash
+# On a Linux box with Node 20.19.0 installed:
+
+# 1. Grab a fresh runner token from
+#    https://github.com/Armosphera/SBOS-A1-ERP/settings/actions/runners/new
+#    (must have repo admin access). Use the "Add new runner" → Linux → x64
+#    flow and copy the `./config.sh` token.
+
+# 2. Download + extract the runner:
+mkdir actions-runner && cd actions-runner
+curl -o actions-runner-linux-x64-2.319.1.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-linux-x64-2.319.1.tar.gz
+tar xzf ./actions-runner-linux-x64-2.319.1.tar.gz
+
+# 3. Configure with the labels that match the workflow:
+./config.sh --url https://github.com/Armosphera/SBOS-A1-ERP \
+            --token <TOKEN_FROM_STEP_1> \
+            --labels "sbos-self-hosted,self-hosted,linux,x64" \
+            --unattended
+
+# 4. Run once interactively to verify:
+./run.sh   # should pick up a job within ~30s of a push
+
+# 5. Install as a systemd unit for 24/7 availability:
+sudo ./svc.sh install
+sudo ./svc.sh start
+sudo ./svc.sh status
+```
+
+**Why the labels match exactly.** GitHub's `runs-on` list
+semantics is "match any". A runner registered with only
+`self-hosted, linux, x64` would also match — but the
+`sbos-self-hosted` label is the org-specific discriminator
+that lets the runner pool be repurposed for other
+Armosphera repos later (via a separate workflow that lists
+`[self-hosted, armosphera-*, ubuntu-latest]`).
+
+**What to do when CI is red.**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| CI fails with empty steps after ~2s, "Job is waiting for a hosted runner to come online" | Hosted-runner quota exhausted | Self-hosted runner is offline — check `sudo ./svc.sh status` |
+| CI fails with `Error: Cannot find module '...'` | Self-hosted runner has stale `node_modules` | `cd $REPO && npm ci` (the workflow runs `npm ci` so this should self-heal) |
+| CI passes on `main` but fails on PR | The self-hosted runner only checked out the PR ref, not the upstream | Push a no-op commit to `main` to re-trigger the run with the latest `main` checkout |
+| CI fails lint but local `npm run lint` passes | The runner has a different Node version | Confirm `node --version` on the runner is 20.19.0 (matches the matrix cell) |

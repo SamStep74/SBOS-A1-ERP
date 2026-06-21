@@ -13,6 +13,8 @@
 // Future waves: update + archive endpoints, deal/pipeline
 // tracking, activity log.
 
+import { validateHvhh as _a1ValidateHvhh } from './hvhh-validator.js';
+
 export class ValueError extends Error {
   constructor(message) {
     super(message);
@@ -97,6 +99,28 @@ function validateContactInput(input) {
   assertOptionalString(input.role, 'role', { max: 128 });
   assertOptionalString(input.notes, 'notes', { max: 4096 });
   assertOptionalInt(input.customer_id, 'customer_id');
+  // HVVH is optional (most contacts at customer companies don't have
+  // their own TIN; only self-employed contacts do). The A1-Validator
+  // pass below does the primary validation.
+  if (input.hvhh !== undefined && input.hvhh !== null && input.hvhh !== '') {
+    if (typeof input.hvhh !== 'string') {
+      throw new ValueError('hvhh must be a string of 8 digits or null');
+    }
+  }
+}
+
+/**
+ * Async HVVH validation for CRM contacts — uses the A1-Validator HTTP
+ * service with local regex fallback. Mirrors the customer + vendor +
+ * invoice patterns. Returns the normalized form on success, throws
+ * ValueError on invalid input.
+ */
+export async function assertValidContactHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'contact hvhh is invalid');
 }
 
 function validateLeadInput(input) {
@@ -119,11 +143,16 @@ function validateLeadInput(input) {
 
 export async function createContact(db, input, tenantId = 0) {
   validateContactInput(input);
+  // A1-Validator pass — validates contact.hvhh (optional). Same fail-soft
+  // pattern as customer + vendor + invoice. Throws ValueError on invalid
+  // input (caught by the route handler as 400).
+  await assertValidContactHvhhAsync(input);
+  const { hvhh = null } = input;
   const ins = await runQuery(
     db,
     `INSERT INTO finance.crm_contacts
-       (tenant_id, customer_id, name, email, phone, role, notes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (tenant_id, customer_id, name, email, phone, role, notes, hvhh)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
     [
       tenantId,
@@ -133,6 +162,7 @@ export async function createContact(db, input, tenantId = 0) {
       input.phone ?? null,
       input.role ?? null,
       input.notes ?? null,
+      hvhh,
     ],
   );
   let id;
@@ -147,7 +177,7 @@ export async function createContact(db, input, tenantId = 0) {
     );
     id = Number(lastId.rows[0].id);
   }
-  return { id };
+  return { id, name: input.name, email: input.email ?? null, hvhh, tenant_id: tenantId };
 }
 
 export async function listContacts(db, tenantId = 0) {

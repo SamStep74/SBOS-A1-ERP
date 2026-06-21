@@ -9,10 +9,38 @@ on:
 permissions:
   contents: read
 
+# ────────────────────────────────────────────────────────────────────────
+# Hosted runner fallback
+#
+# As of 2026-06-21, the GitHub org has been intermittently
+# failing CI with "Job is waiting for a hosted runner to come online"
+# (the org's hosted-runner quota is exhausted). To keep CI green without
+# losing signal, this workflow first tries a self-hosted runner tagged
+# `sbos-self-hosted` (Linux x64, Node 20). The self-hosted runner is
+# managed by the maintainer (see docs/CI.md#hosted-runner-fallback for
+# the setup). When no self-hosted runner is available, the workflow
+# falls back to the GH-hosted `ubuntu-latest` runner, which preserves
+# the canonical CI signal but may itself fail when the org's hosted
+# quota is exhausted.
+#
+# To add a self-hosted runner:
+#   1. On a Linux box with Node 20.19.0, run the runner setup script:
+#      ./config.sh --url https://github.com/this repository \
+#                  --token <PAT> --labels "sbos-self-hosted,self-hosted,linux,x64"
+#   2. ./run.sh   (or install as a systemd unit)
+#
+# See docs/CI.md for the full rationale + maintainer runbook.
+# ────────────────────────────────────────────────────────────────────────
+
 jobs:
   build-and-test:
     name: lint, typecheck, format, test, boundary (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    # `runs-on` is a list — GitHub picks the first available match.
+    # The self-hosted runner takes priority when registered; otherwise
+    # the hosted ubuntu-latest fallback kicks in. This preserves the
+    # canonical CI signal even when the org's hosted-runner quota is
+    # exhausted.
+    runs-on: [self-hosted, sbos-self-hosted, linux, x64, ubuntu-latest]
     strategy:
       fail-fast: false
       matrix:

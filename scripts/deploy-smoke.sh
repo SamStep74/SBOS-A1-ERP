@@ -1281,6 +1281,211 @@ fi
 
 
 echo
+echo "=== STEP 7f: Vendor bill HVVH re-validation via A1-Validator (v0.7.0) ==="
+# Same drift-detection rationale as STEP 7e, but for vendor bills: a
+# vendor's HVVH could have become invalid since the PO was created.
+# Re-validate at bill-create time.
+LOG7F="$TESTDIR/server-7f.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7F" 2>&1 &
+SERVER_PID_7F=$!
+SMOKE_RC=0
+cleanup_7f() { kill -9 $SERVER_PID_7F 2>/dev/null; wait $SERVER_PID_7F 2>/dev/null; }
+trap cleanup_7f EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7f"
+    tail -20 "$LOG7F"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7F=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7F" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7F" ]; then
+    echo "  FAIL: STEP 7f server did not print admin session token"
+    tail -20 "$LOG7F"
+    SMOKE_RC=1
+  else
+    # 1. Create a vendor with valid HVVH
+    VENDOR_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/vendors" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"code":"VBILL","name":"BillVendor","hvhh":"00123456"}')
+    VENDOR_ID=$(echo "$VENDOR_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -z "$VENDOR_ID" ]; then
+      echo "  FAIL: could not create vendor for STEP 7f: $VENDOR_OUT"
+      SMOKE_RC=1
+    else
+      # 2. Create a catalog item, PO, receive it (so the bill can be created).
+      CAT_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/catalog/items" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d '{"sku":"VBILL-ITEM","name":"Vendor Bill Test Item","standard_cost":50000}')
+      CAT_ID=$(echo "$CAT_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      WH_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/warehouses" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d '{"code":"VBILL-WH","name":"Test Warehouse"}')
+      WH_ID=$(echo "$WH_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      LOC_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/stock/locations" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"warehouse_id\": $WH_ID, \"code\": \"VBILL-LOC\", \"name\": \"Test Loc\"}")
+      LOC_ID=$(echo "$LOC_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      PO_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/purchase-orders" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"order_number\": \"PO-VBILL\", \"vendor_id\": $VENDOR_ID, \"order_date\": \"2026-06-21\", \"lines\": [{\"catalog_item_id\": $CAT_ID, \"quantity\": 1, \"unit_cost\": 50000}]}")
+      PO_ID=$(echo "$PO_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      POL_ID=$(sqlite3 "$DB" "SELECT id FROM purchase_order_lines WHERE order_id = $PO_ID LIMIT 1" 2>/dev/null)
+      curl -s -X POST "http://127.0.0.1:$PORT/api/finance/purchase-orders/$PO_ID/confirm" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" -H "X-Tenant-Id: 0" > /dev/null
+      curl -s -X POST "http://127.0.0.1:$PORT/api/finance/purchase-orders/$PO_ID/receive" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"destination_location_id\": $LOC_ID, \"lines\": [{\"order_line_id\": $POL_ID, \"received_quantity\": 1}]}" > /dev/null
+
+      # 3. Create a vendor bill (should succeed — vendor HVVH is valid)
+      BILL_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/vendor-bills" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"purchase_order_id\": $PO_ID, \"bill_number\": \"BILL-7F-OK\", \"bill_date\": \"2026-06-21\"}")
+      if echo "$BILL_OUT" | grep -q '"bill_number":"BILL-7F-OK"'; then
+        echo "  OK vendor bill created with valid vendor hvhh"
+      else
+        echo "  FAIL: vendor bill create failed: $BILL_OUT"
+        SMOKE_RC=1
+      fi
+
+      # 4. Kill server, directly UPDATE the vendor's HVVH in sqlite to simulate drift.
+      kill -TERM $SERVER_PID_7F 2>/dev/null
+      wait $SERVER_PID_7F 2>/dev/null
+      trap - EXIT
+      sqlite3 "$DB" "UPDATE vendors SET hvhh = 'NOT_AN_HVVH' WHERE id = $VENDOR_ID" 2>/dev/null
+
+      # 5. Restart server + try to create another bill — should fail with 400.
+      LOG7F2="$TESTDIR/server-7f2.log"
+      PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7F2" 2>&1 &
+      SERVER_PID_7F=$!
+      cleanup_7f() { kill -9 $SERVER_PID_7F 2>/dev/null; wait $SERVER_PID_7F 2>/dev/null; }
+      trap cleanup_7f EXIT
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+          break
+        fi
+        sleep 1
+      done
+      ADMIN_TOKEN_7F=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7F2" | head -1 | awk '{print $NF}')
+
+      BILL_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/vendor-bills" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7F" \
+        -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"purchase_order_id\": $PO_ID, \"bill_number\": \"BILL-7F-BAD\", \"bill_date\": \"2026-06-21\"}")
+      if [ "$BILL_BAD" = "400" ]; then
+        echo "  OK vendor bill create correctly rejects vendor with drifted hvhh"
+      else
+        echo "  FAIL: vendor bill with drifted vendor hvhh returned $BILL_BAD (expected 400)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7F 2>/dev/null
+wait $SERVER_PID_7F 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+echo
+echo "=== STEP 7g: CRM contact TIN validation via A1-Validator wrapper (v0.7.0) ==="
+# Verify that POST /api/finance/crm/contacts with a valid TIN succeeds
+# and with an invalid TIN returns 400. Same fail-soft pattern as
+# customer/vendor.
+LOG7G="$TESTDIR/server-7g.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7G" 2>&1 &
+SERVER_PID_7G=$!
+SMOKE_RC=0
+cleanup_7g() { kill -9 $SERVER_PID_7G 2>/dev/null; wait $SERVER_PID_7G 2>/dev/null; }
+trap cleanup_7g EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7g"
+    tail -20 "$LOG7G"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7G=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7G" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7G" ]; then
+    echo "  FAIL: STEP 7g server did not print admin session token"
+    tail -20 "$LOG7G"
+    SMOKE_RC=1
+  else
+    # Valid 8-digit hvhh should persist
+    CONTACT_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/crm/contacts" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7G" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"ContactCo","hvhh":"01234567"}')
+    if echo "$CONTACT_OUT" | grep -q '"hvhh":"01234567"'; then
+      echo "  OK contact create with valid hvhh persisted"
+    else
+      echo "  FAIL: valid contact hvhh did not persist: $CONTACT_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Invalid 9-digit hvhh should be 400
+    CONTACT_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/crm/contacts" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7G" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"BadContact","hvhh":"123456789"}')
+    if [ "$CONTACT_BAD" = "400" ]; then
+      echo "  OK invalid 9-digit contact hvhh returns 400"
+    else
+      echo "  FAIL: invalid contact hvhh returned $CONTACT_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # No hvhh is fine (optional field)
+    CONTACT_NONE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/crm/contacts" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7G" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"NoHvhhContact"}')
+    if echo "$CONTACT_NONE" | grep -q '"name":"NoHvhhContact"'; then
+      echo "  OK contact create without hvhh (optional) succeeds"
+    else
+      echo "  FAIL: contact create without hvhh failed: $CONTACT_NONE"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7G 2>/dev/null
+wait $SERVER_PID_7G 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"

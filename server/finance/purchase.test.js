@@ -764,3 +764,98 @@ test('end-to-end: vendor → PO → receive → bill → pay', async () => {
   const bills = await listVendorBills(db, 0);
   assert.equal(bills[0].status, 'paid');
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — vendor bill re-validates the vendor's HVVH at
+// create-bill time. Same fail-soft pattern as invoice's customer HVVH
+// re-validation. Drift detection: a vendor's HVVH could have become
+// invalid since the PO was created (e.g. A1-Validator algorithm updated,
+// or the vendor was imported with the validator disabled).
+// ────────────────────────────────────────────────────────────────────────
+
+test('createVendorBillFromReceipt: vendor with valid HVVH → bill created (happy path)', async () => {
+  const db = makeMemoryDb();
+  const { vendor, item, stockLoc } = await setupVendorItemAndLocation(db);
+  // Add some stock via PO receive so the bill can be created
+  const po = await createPurchaseOrder(
+    db,
+    {
+      order_number: 'PO-VBH-1',
+      vendor_id: vendor.id,
+      order_date: '2026-06-21',
+      lines: [{ catalog_item_id: item.id, quantity: 2, unit_cost: 50000 }],
+    },
+    0,
+  );
+  await confirmPurchaseOrder(db, po.id, 0);
+  // Find the order line id, then receive it.
+  const orderLines = await db.query(
+    'SELECT id FROM purchase_order_lines WHERE order_id = $1',
+    [po.id],
+  );
+  const orderLineId = orderLines.rows[0].id;
+  await receivePurchaseOrder(
+    db,
+    po.id,
+    {
+      destination_location_id: stockLoc.id,
+      lines: [{ order_line_id: orderLineId, received_quantity: 2 }],
+    },
+    0,
+  );
+  const bill = await createVendorBillFromReceipt(
+    db,
+    po.id,
+    { bill_number: 'B-VBH-OK', bill_date: '2026-06-21' },
+    0,
+  );
+  assert.ok(Number.isInteger(bill.id) && bill.id > 0);
+  assert.equal(bill.vendor_id, vendor.id);
+});
+
+test('createVendorBillFromReceipt: vendor with invalid HVVH → ValueError (drift detection)', async () => {
+  const db = makeMemoryDb();
+  const { vendor, item, stockLoc } = await setupVendorItemAndLocation(db);
+  const po = await createPurchaseOrder(
+    db,
+    {
+      order_number: 'PO-VBH-2',
+      vendor_id: vendor.id,
+      order_date: '2026-06-21',
+      lines: [{ catalog_item_id: item.id, quantity: 1, unit_cost: 50000 }],
+    },
+    0,
+  );
+  await confirmPurchaseOrder(db, po.id, 0);
+  const orderLines = await db.query(
+    'SELECT id FROM purchase_order_lines WHERE order_id = $1',
+    [po.id],
+  );
+  const orderLineId = orderLines.rows[0].id;
+  await receivePurchaseOrder(
+    db,
+    po.id,
+    {
+      destination_location_id: stockLoc.id,
+      lines: [{ order_line_id: orderLineId, received_quantity: 1 }],
+    },
+    0,
+  );
+  // Directly mutate the vendor's HVVH to simulate drift (A1-Validator
+  // algorithm updated, or vendor imported with the validator disabled).
+  // The sqlite test harness stores hvhh in the vendors table; we patch
+  // it via a raw UPDATE here.
+  await db.query(
+    'UPDATE vendors SET hvhh = $1 WHERE id = $2',
+    ['NOT_AN_HVVH', vendor.id],
+  );
+  await assert.rejects(
+    createVendorBillFromReceipt(
+      db,
+      po.id,
+      { bill_number: 'B-VBH-BAD', bill_date: '2026-06-21' },
+      0,
+    ),
+    /hvhh must be exactly 8 digits/,
+  );
+});

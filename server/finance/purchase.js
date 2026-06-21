@@ -661,7 +661,7 @@ export async function createVendorBillFromReceipt(
 
   const order = await runQuery(
     db,
-    'SELECT id, status, vendor_id, vendor_name, order_number FROM purchase_orders WHERE tenant_id = $1 AND id = $2',
+    'SELECT id, status, vendor_id, vendor_name, vendor_hvhh, order_number FROM purchase_orders WHERE tenant_id = $1 AND id = $2',
     [tenantId, orderId],
   );
   if (!order.rows || order.rows.length === 0) {
@@ -670,6 +670,19 @@ export async function createVendorBillFromReceipt(
   if (order.rows[0].status !== 'received' && order.rows[0].status !== 'partial') {
     throw new ValueError(`cannot bill order ${orderId} (status=${order.rows[0].status}; must be 'received' or 'partial')`);
   }
+
+  // A1-Validator pass — re-validate the vendor's HVVH at bill-create time.
+  // The order row already stores `vendor_hvhh` (denormalized at PO-create time),
+  // but we re-fetch the live value from the vendors table so a vendor-edit
+  // that updated the hvhh is caught here (drift detection). Same fail-soft
+  // pattern as createInvoice's customer HVVH re-validation.
+  const vendorCheck = await runQuery(
+    db,
+    'SELECT hvhh FROM vendors WHERE tenant_id = $1 AND id = $2',
+    [tenantId, order.rows[0].vendor_id],
+  );
+  const vendorHvhh = vendorCheck.rows && vendorCheck.rows[0] ? vendorCheck.rows[0].hvhh : null;
+  await assertValidVendorHvhhAsync({ hvhh: vendorHvhh });
 
   // UNIQUE bill_number.
   const dupe = await runQuery(
