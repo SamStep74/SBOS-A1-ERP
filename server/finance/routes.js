@@ -54,6 +54,11 @@
 //   POST   /api/finance/crm/contacts
 //   GET    /api/finance/crm/leads?status=
 //   POST   /api/finance/crm/leads
+//   GET    /api/finance/desk/cases?status=
+//   GET    /api/finance/desk/cases/:id
+//   POST   /api/finance/desk/cases
+//   GET    /api/finance/desk/cases/:id/replies
+//   POST   /api/finance/desk/cases/:id/replies
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -114,6 +119,13 @@ import {
 } from './purchase.js';
 import { renderPurchaseOrder, renderDeliveryNote } from './poTemplate.js';
 import { createContact, listContacts, createLead, listLeads } from './crm.js';
+import {
+  createCase,
+  listCases,
+  getCase,
+  createReply,
+  listReplies,
+} from './desk.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -1137,5 +1149,127 @@ export function registerFinanceRoutes(app, opts = {}) {
       const out = await createLead(pgAdapter, req.body || {}, tenantId);
       res.status(201).json(out);
     }),
+  );
+
+  // ─────────── Desk (helpdesk / ticketing) — Phase 2 wave 2 (W73) ───────────
+  //
+  // The desk module is a multi-table ticketing / support module:
+  //   desk_cases (id, tenant_id, customer_id, contact_id, subject,
+  //     body, status, priority, assignee_id, tracking_number,
+  //     created_at, updated_at)
+  //   desk_replies (id, tenant_id, case_id, body, author, author_id,
+  //     created_at)
+  //
+  // Statuses: open / pending / resolved / closed.
+  // Priorities: low / normal / high / urgent.
+  // Reply authors: customer / agent.
+  //
+  // Wave 2 wires 5 HTTP endpoints (matches the W70->W71 cadence for
+  // CRM): 2 reads on cases (list + get), 1 write on cases (create),
+  // 1 read on replies (list), 1 write on replies (create). The
+  // 5 endpoints map to 3 perm keys:
+  //   desk.case.read  — list + get
+  //   desk.case.create — create
+  //   desk.reply.create — create reply
+  // The DeskOperator perm set in server/rbac/matrix.js already
+  // includes all 3 keys (no perm changes needed for W73-1).
+
+  // GET /api/finance/desk/cases
+  //   List helpdesk cases for the caller's tenant. Optional
+  //   ?status= filter (open / pending / resolved / closed). Ordered
+  //   by id DESC (most recent first).
+  app.get('/api/finance/desk/cases', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const status = req.query.status ?? null;
+      const items = await listCases(pgAdapter, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/finance/desk/cases/:id
+  //   Get a single helpdesk case. Returns 404 if the case is missing
+  //   or cross-tenant (the pure function throws ValueError on
+  //   "not found in tenant"; the route handler converts to 404
+  //   inline, since the global error handler returns 500 for
+  //   everything else).
+  app.get('/api/finance/desk/cases/:id', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const caseId = Number(req.params.id);
+      const item = await getCase(pgAdapter, caseId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/desk/cases
+  //   Create a new helpdesk case. Body: { subject, body,
+  //   status?, priority?, customer_id?, contact_id?,
+  //   assignee_id?, tracking_number? }. subject + body are
+  //   required. status defaults to 'open'; priority defaults to
+  //   'normal'.
+  app.post(
+    '/api/finance/desk/cases',
+    requireTenant,
+    requirePerm('desk.case.create'),
+    wrapFinanceRoute('desk.case.create', 'desk_case:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createCase(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/desk/cases/:id/replies
+  //   List replies for a helpdesk case (chronological). Returns
+  //   404 if the case is missing or cross-tenant. The pure
+  //   listReplies function returns an empty array when the case
+  //   is missing (it's a normal SQL result), so the route checks
+  //   the case's existence first via getCase (which throws
+  //   ValueError on "not found in tenant") and converts that to
+  //   404 inline.
+  app.get('/api/finance/desk/cases/:id/replies', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const caseId = Number(req.params.id);
+      // Existence check: a request to list replies on a missing
+      // case is 404 (consistent with the single-entity GET
+      // /cases/:id pattern). Calling getCase also enforces
+      // tenant isolation: a cross-tenant id becomes 404, not
+      // 200 with an empty array (no existence-oracle leak).
+      await getCase(pgAdapter, caseId, tenantId);
+      const items = await listReplies(pgAdapter, caseId, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/desk/cases/:id/replies
+  //   Add a reply to a helpdesk case. Body: { body, author,
+  //   author_id? }. author must be 'customer' or 'agent'.
+  app.post(
+    '/api/finance/desk/cases/:id/replies',
+    requireTenant,
+    requirePerm('desk.reply.create'),
+    wrapFinanceRoute(
+      'desk.reply.create',
+      'desk_reply:new',
+      async (req, res) => {
+        const tenantId = req.tenantId;
+        const caseId = Number(req.params.id);
+        const out = await createReply(pgAdapter, caseId, req.body || {}, tenantId);
+        res.status(201).json(out);
+      },
+    ),
   );
 }

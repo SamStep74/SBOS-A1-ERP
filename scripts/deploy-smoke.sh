@@ -105,6 +105,11 @@ const checks = [
   { path: '/api/finance/crm/contacts',      headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/contacts tenant=0' },
   { path: '/api/finance/crm/leads',         headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/leads tenant=0' },
   { path: '/api/finance/crm/leads?status=qualified', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/crm/leads?status=qualified tenant=0' },
+  // Phase 2 desk (W73-1) — cases + replies reads (empty DB → 200, items: [])
+  { path: '/api/finance/desk/cases',        headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/desk/cases tenant=0' },
+  { path: '/api/finance/desk/cases?status=open', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/desk/cases?status=open tenant=0' },
+  { path: '/api/finance/desk/cases/1',      headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1 (404 for missing case)' },
+  { path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/desk/cases/1/replies (404 for missing case)' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -141,6 +146,14 @@ const writeChecks = [
   // Phase 2 CRM (W71-2) — contacts + leads writes.
   { method: 'POST', path: '/api/finance/crm/contacts', body: { name: 'Smoke Contact', email: 'smoke@example.com', role: 'CEO' }, expect: 201, name: 'POST /api/finance/crm/contacts (returns id > 0)' },
   { method: 'POST', path: '/api/finance/crm/leads', body: { name: 'Smoke Lead', company: 'Smoke Corp', source: 'website', status: 'qualified', estimated_value_amd: 1000000 }, expect: 201, name: 'POST /api/finance/crm/leads (returns id > 0)' },
+  // Phase 2 desk (W73-1) — cases + replies writes. The case
+  // smoke check returns id > 0 (the wave-14 production pg adapter
+  // regression guard); the reply smoke check depends on the case
+  // being created first, so it must come AFTER the case POST.
+  { method: 'POST', path: '/api/finance/desk/cases', body: { subject: 'Smoke Case', body: 'smoke body', priority: 'high' }, expect: 201, name: 'POST /api/finance/desk/cases (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/desk/cases/1/replies', body: { body: 'smoke reply', author: 'agent' }, expect: 201, name: 'POST /api/finance/desk/cases/1/replies (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/desk/cases/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1 (returns the case created above)' },
+  { method: 'GET', path: '/api/finance/desk/cases/1/replies', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/desk/cases/1/replies (returns the reply created above)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

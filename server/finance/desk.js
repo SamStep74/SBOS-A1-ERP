@@ -15,7 +15,12 @@
 // tests. Wave 2 (future): route wiring + permission
 // keys + smoke check.
 
-export class ValueError extends Error {}
+export class ValueError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValueError';
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // DB adapter helper (matches the pattern in customer.js /
