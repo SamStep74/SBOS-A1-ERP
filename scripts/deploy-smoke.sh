@@ -148,6 +148,11 @@ const writeChecks = [
   // Phase 2 CRM (W71-2) — contacts + leads writes.
   { method: 'POST', path: '/api/finance/crm/contacts', body: { name: 'Smoke Contact', email: 'smoke@example.com', role: 'CEO' }, expect: 201, name: 'POST /api/finance/crm/contacts (returns id > 0)' },
   { method: 'POST', path: '/api/finance/crm/leads', body: { name: 'Smoke Lead', company: 'Smoke Corp', source: 'website', status: 'qualified', estimated_value_amd: 1000000 }, expect: 201, name: 'POST /api/finance/crm/leads (returns id > 0)' },
+  // Phase 2 CRM — ValueError class regression guard. A bad email
+  // should surface as 400 (not 500), which only works if the
+  // CRM module ValueError sets this.name. Without the fix, this
+  // returns 500 (the route-layer err.name check fails silently).
+  { method: 'POST', path: '/api/finance/crm/contacts', body: { name: 'Bad', email: 'not-an-email' }, expect: 400, name: 'POST crm/contacts with bad email → 400 (ValueError.name regression guard)' },
   // Phase 2 desk (W73-1) — cases + replies writes. The case
   // smoke check returns id > 0 (the wave-14 production pg adapter
   // regression guard); the reply smoke check depends on the case

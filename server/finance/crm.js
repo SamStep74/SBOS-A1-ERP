@@ -13,7 +13,12 @@
 // Future waves: update + archive endpoints, deal/pipeline
 // tracking, activity log.
 
-export class ValueError extends Error {}
+export class ValueError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValueError';
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // DB adapter helper (matches the pattern in customer.js / inventory.js)

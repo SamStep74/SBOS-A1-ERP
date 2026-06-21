@@ -265,3 +265,33 @@ test('crm: createLead with estimated_value_amd stores the int', async () => {
   const rows = await listLeads(db, 0);
   assert.equal(rows[0].estimated_value_amd, 5_000_000);
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Regression: ValueError class must set this.name = 'ValueError' so
+// the route layer's `err.name === 'ValueError'` check correctly maps
+// input-validation errors to 400/404 (instead of silently falling
+// through to 500). See the "ValueError class copy-paste trap" memory
+// entry for the full story.
+// ────────────────────────────────────────────────────────────────────────
+
+test('regression: ValueError instances carry .name === "ValueError" (route layer relies on this)', () => {
+  const err = new ValueError('test message');
+  assert.equal(err.name, 'ValueError');
+  assert.equal(err.message, 'test message');
+  // The route layer's check is exactly this — if the name is
+  // 'Error' (the parent default), all input validation in CRM
+  // would surface as 500 instead of 400.
+  assert.equal(err.name === 'ValueError', true);
+});
+
+test('regression: createContact throws ValueError on bad email (name preserved)', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    () => createContact(db, { name: 'X', email: 'not-an-email' }, 0),
+    (err) => {
+      assert.equal(err.name, 'ValueError');
+      assert.match(err.message, /email/);
+      return true;
+    },
+  );
+});
