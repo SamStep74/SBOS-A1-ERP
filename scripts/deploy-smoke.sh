@@ -136,6 +136,13 @@ const checks = [
   { path: '/api/finance/pos/shifts', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/shifts tenant=0' },
   { path: '/api/finance/pos/shifts?status=open', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/shifts?status=open tenant=0' },
   { path: '/api/finance/pos/shifts/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/pos/shifts/1 (404 for missing shift)' },
+  // Phase 3 HR basics (W91-1) — employees / contracts / payroll
+  // reads (empty DB → 200, items: []; 404 for missing entity)
+  { path: '/api/finance/hr/employees', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/hr/employees tenant=0' },
+  { path: '/api/finance/hr/employees/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/hr/employees/1 (404 for missing employee)' },
+  { path: '/api/finance/hr/contracts', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/hr/contracts tenant=0' },
+  { path: '/api/finance/hr/contracts/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/hr/contracts/1 (404 for missing contract)' },
+  { path: '/api/finance/hr/payroll-runs', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/hr/payroll-runs tenant=0' },
 ];
 
 // Write-endpoint regression guard: catches the 'production pg adapter
@@ -249,6 +256,18 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/pos/sales', body: { shift_id: 1, register_id: 1, cashier_id: 1 }, expect: 201, name: 'POST /api/finance/pos/sales (sale 2 — for void path)' },
   { method: 'POST', path: '/api/finance/pos/sales/2/void', body: { voided_by: 1 }, expect: 200, name: 'POST /api/finance/pos/sales/2/void (state-machine guard open → voided, no refund row)' },
   { method: 'POST', path: '/api/finance/pos/shifts/1/close', body: { closed_by: 1, closing_cash_amd: 5000 }, expect: 200, name: 'POST /api/finance/pos/shifts/1/close (state-machine guard open → closed)' },
+  // Phase 3 HR basics (W91-1) — employee → contract → payroll run
+  // → payroll line lifecycle. The smoke flow chains: create
+  // employee id=1 → create contract id=1 (for employee 1) →
+  // create payroll run id=1 (for 2026-01) → add payroll line
+  // id=1 (for employee 1 + contract 1). Each POST returns id > 0
+  // (the wave-14 production pg adapter regression guard).
+  { method: 'POST', path: '/api/finance/hr/employees', body: { code: 'EMP-SMOKE-1', first_name: 'Anna', last_name: 'Harutyunyan', department: 'Finance', hire_date: '2026-01-15' }, expect: 201, name: 'POST /api/finance/hr/employees (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/hr/employees/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/hr/employees/1 (returns the employee created above)' },
+  { method: 'POST', path: '/api/finance/hr/contracts', body: { employee_id: 1, contract_number: 'C-SMOKE-1', start_date: '2026-01-01', base_salary_amd: 500000, currency: 'AMD', pay_frequency: 'monthly' }, expect: 201, name: 'POST /api/finance/hr/contracts (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/hr/contracts/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/hr/contracts/1 (returns the contract created above)' },
+  { method: 'POST', path: '/api/finance/hr/payroll-runs', body: { period_year: 2026, period_month: 1, notes: 'January 2026 payroll' }, expect: 201, name: 'POST /api/finance/hr/payroll-runs (returns id > 0)' },
+  { method: 'POST', path: '/api/finance/hr/payroll-runs/1/lines', body: { employee_id: 1, contract_id: 1, base_salary_amd: 500000, bonus_amd: 50000, deductions_amd: 10000, tax_amd: 50000, worked_days: 22, vacation_days: 0, sick_days: 0 }, expect: 201, name: 'POST /api/finance/hr/payroll-runs/1/lines (returns id > 0)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

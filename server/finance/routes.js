@@ -207,6 +207,17 @@ import {
   listRefunds,
 } from './pos.js';
 import {
+  addEmployee,
+  listEmployees,
+  getEmployee,
+  addContract,
+  listContracts,
+  getContract,
+  createPayrollRun,
+  addPayrollLine,
+  listPayrollRuns,
+} from './hr.js';
+import {
   listJournalEntries,
   getJournalEntry,
   listAccountBalances,
@@ -2709,4 +2720,167 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 HR basics (W91-1) — employee / contract / payroll
+  // endpoints. The pure functions in server/finance/hr.js own
+  // all the validation + state-machine guards (draft-only
+  // payroll lines; unique codes; FK checks across migrations).
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/hr/employees
+  //   List employees for the caller's tenant. Optional
+  //   filters: ?status=, ?department=. Ordered by id ASC.
+  app.get('/api/finance/hr/employees', requireTenant, requirePerm('hr.employee.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const status = req.query.status ?? null;
+      const department = req.query.department ?? null;
+      const items = await listEmployees(pgAdapter, tenantId, { status, department });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/hr/employees
+  //   Create a new employee. Body: { code, first_name,
+  //   last_name, email?, phone?, role?, department?,
+  //   hire_date, status?, hvhh?, bank_account? }. code is
+  //   unique per tenant.
+  app.post(
+    '/api/finance/hr/employees',
+    requireTenant,
+    requirePerm('hr.employee.create'),
+    wrapFinanceRoute('hr.employee.create', (req, res) => res.locals.createdId ? `hr_employee:${res.locals.createdId}` : 'hr_employee:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await addEmployee(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/hr/employees/:id
+  //   Get a single employee. Returns 404 if missing or
+  //   cross-tenant.
+  app.get('/api/finance/hr/employees/:id', requireTenant, requirePerm('hr.employee.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const employeeId = Number(req.params.id);
+      const item = await getEmployee(pgAdapter, employeeId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/hr/contracts
+  //   List contracts for the caller's tenant. Optional
+  //   filters: ?employee_id=, ?status=. Ordered by id ASC.
+  app.get('/api/finance/hr/contracts', requireTenant, requirePerm('hr.contract.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const employeeId = req.query.employee_id ? Number(req.query.employee_id) : null;
+      const status = req.query.status ?? null;
+      const items = await listContracts(pgAdapter, tenantId, { employeeId, status });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/hr/contracts
+  //   Create a new employment contract. Body: {
+  //   employee_id, contract_number, start_date, end_date?,
+  //   base_salary_amd, currency?, pay_frequency?,
+  //   hours_per_week?, vacation_days_per_year?, status?,
+  //   notes? }. employee_id must exist; contract_number
+  //   is unique per tenant.
+  app.post(
+    '/api/finance/hr/contracts',
+    requireTenant,
+    requirePerm('hr.contract.create'),
+    wrapFinanceRoute('hr.contract.create', (req, res) => res.locals.createdId ? `hr_contract:${res.locals.createdId}` : 'hr_contract:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await addContract(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/hr/contracts/:id
+  //   Get a single contract. Returns 404 if missing or
+  //   cross-tenant.
+  app.get('/api/finance/hr/contracts/:id', requireTenant, requirePerm('hr.contract.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const contractId = Number(req.params.id);
+      const item = await getContract(pgAdapter, contractId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/hr/payroll-runs
+  //   List payroll runs for the caller's tenant. Optional
+  //   filters: ?status=, ?period_year=. Ordered by
+  //   period_year DESC, period_month DESC (most recent
+  //   first).
+  app.get('/api/finance/hr/payroll-runs', requireTenant, requirePerm('hr.payroll.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const status = req.query.status ?? null;
+      const periodYear = req.query.period_year ? Number(req.query.period_year) : null;
+      const items = await listPayrollRuns(pgAdapter, tenantId, { status, periodYear });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/hr/payroll-runs
+  //   Create a new payroll run for a (year, month). Body:
+  //   { period_year, period_month, notes? }. Status
+  //   defaults to 'draft'. UNIQUE (tenant_id,
+  //   period_year, period_month) — a tenant cannot have
+  //   two runs for the same month.
+  app.post(
+    '/api/finance/hr/payroll-runs',
+    requireTenant,
+    requirePerm('hr.payroll.run'),
+    wrapFinanceRoute('hr.payroll.run', (req, res) => res.locals.createdId ? `hr_payroll_run:${res.locals.createdId}` : 'hr_payroll_run:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createPayrollRun(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // POST /api/finance/hr/payroll-runs/:id/lines
+  //   Add a per-employee pay line to a draft payroll run.
+  //   Body: { employee_id, contract_id, base_salary_amd,
+  //   bonus_amd?, deductions_amd?, tax_amd?, worked_days?,
+  //   vacation_days?, sick_days?, notes? }. Recomputes the
+  //   run's aggregate totals on success. Returns 400 if
+  //   the run is not in 'draft' status.
+  app.post(
+    '/api/finance/hr/payroll-runs/:id/lines',
+    requireTenant,
+    requirePerm('hr.payroll.run'),
+    wrapFinanceRoute('hr.payroll.run', (req, res) => `hr_payroll_run:${req.params.id}:line:${res.locals.createdId}`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const runId = Number(req.params.id);
+      const body = { ...(req.body || {}), payroll_run_id: runId };
+      const out = await addPayrollLine(pgAdapter, body, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
 }
