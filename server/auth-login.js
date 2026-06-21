@@ -51,6 +51,79 @@ export function hashPassword(plaintext) {
   return { hash, salt };
 }
 
+// Minimum acceptable password length. Enforced at changePassword()
+// time so callers can't set a 1-char password.
+const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Change a user's password (self-service rotation). Verifies the
+ * old password (constant-time via verifyPassword), enforces the
+ * minimum length on the new password, then writes the new scrypt
+ * hash + salt. Resets failed_logins + locked_until as a side-effect
+ * (password rotation should also clear any active lockout — the
+ * user clearly knows the old password).
+ *
+ * Side-effects on success:
+ *   - users.password_hash + password_salt are updated
+ *   - users.failed_logins reset to 0
+ *   - users.locked_until cleared (NULL)
+ *
+ * Does NOT invalidate active sessions — the user kept their old
+ * password knowledge, so any device they were logged in on is
+ * still legitimately them. If the rotation was forced by a
+ * compromise, the caller should pair this with a revoke-all
+ * (POST /api/auth/sessions/revoke-all).
+ *
+ * @param {DatabaseSync} db  raw node:sqlite handle
+ * @param {number} userId
+ * @param {string} oldPassword
+ * @param {string} newPassword
+ * @returns {{ok: true} | {error: string}}
+ */
+export function changePassword(db, userId, oldPassword, newPassword) {
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return { error: 'userId must be a positive integer' };
+  }
+  if (typeof oldPassword !== 'string' || oldPassword.length === 0) {
+    return { error: 'oldPassword is required' };
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
+    return { error: `newPassword must be at least ${MIN_PASSWORD_LENGTH} chars` };
+  }
+  if (oldPassword === newPassword) {
+    return { error: 'newPassword must be different from oldPassword' };
+  }
+  const row = db
+    .prepare(
+      `SELECT id, password_hash, password_salt, locked_until
+         FROM users WHERE id = ?`,
+    )
+    .get(userId);
+  if (!row) {
+    return { error: 'user not found' };
+  }
+  // Reject if the account is currently locked — the rotation would
+  // be a side-channel for an attacker to test passwords against a
+  // locked account (lockout evasion).
+  if (row.locked_until && Date.parse(row.locked_until) > Date.now()) {
+    return { error: 'account is temporarily locked; try again later' };
+  }
+  const ok = verifyPassword(oldPassword, row.password_hash, row.password_salt);
+  if (!ok) {
+    return { error: 'old password is incorrect' };
+  }
+  const { hash, salt } = hashPassword(newPassword);
+  db.prepare(
+    `UPDATE users
+        SET password_hash = ?,
+            password_salt = ?,
+            failed_logins = 0,
+            locked_until = NULL
+      WHERE id = ?`,
+  ).run(hash, salt, userId);
+  return { ok: true };
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Constants
 // ────────────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { login, verifyPassword, hashPassword } from './auth-login.js';
+import { login, verifyPassword, hashPassword, changePassword } from './auth-login.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Test harness: minimal in-memory sqlite with the bare-minimum
@@ -136,4 +136,73 @@ test('login: per-user salt means same password has different hash per user', () 
   // Both verify successfully with their own salt.
   assert.equal(verifyPassword('same', a.password_hash, a.password_salt), true);
   assert.equal(verifyPassword('same', b.password_hash, b.password_salt), true);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 45 — password rotation (changePassword)
+// ────────────────────────────────────────────────────────────────────────
+
+test('changePassword: rotates the hash + clears failed_logins + clears locked_until', () => {
+  const db = makeAuthDb();
+  seedUser(db, { username: 'admin', password: 'old-pass-1', id: 1 });
+  // Set failed_logins to 3 and locked_until to something in the past
+  // (simulating a previously-locked account that's now cleared).
+  db.prepare('UPDATE users SET failed_logins = 3, locked_until = ? WHERE id = ?')
+    .run(new Date(Date.now() - 1000).toISOString(), 1);
+  const result = changePassword(db, 1, 'old-pass-1', 'new-pass-2');
+  assert.equal(result.ok, true);
+  // After rotation (and before any failed login attempt), the
+  // failed_logins counter is reset to 0 and locked_until cleared.
+  const rowBefore = db.prepare('SELECT failed_logins, locked_until FROM users WHERE id = ?').get(1);
+  assert.equal(rowBefore.failed_logins, 0);
+  assert.equal(rowBefore.locked_until, null);
+  // Login with the new password works.
+  const loginResult = login(db, 'admin', 'new-pass-2');
+  assert.equal(loginResult.error, undefined, `new password should login: ${loginResult.error}`);
+  assert.equal(loginResult.user.username, 'admin');
+  // Old password no longer works.
+  const oldLogin = login(db, 'admin', 'old-pass-1');
+  assert.equal(oldLogin.status, 401);
+});
+
+test('changePassword: rejects when old_password is wrong (returns 403-shaped error)', () => {
+  const db = makeAuthDb();
+  seedUser(db, { username: 'admin', password: 'right-pass-1', id: 1 });
+  const result = changePassword(db, 1, 'wrong-pass-1', 'new-pass-2');
+  assert.equal(result.ok, undefined);
+  assert.equal(result.error, 'old password is incorrect');
+});
+
+test('changePassword: rejects new passwords shorter than 8 chars', () => {
+  const db = makeAuthDb();
+  seedUser(db, { username: 'admin', password: 'old-pass-1', id: 1 });
+  const result = changePassword(db, 1, 'old-pass-1', 'short');
+  assert.equal(result.ok, undefined);
+  assert.match(result.error, /at least 8 chars/);
+});
+
+test('changePassword: rejects when new password equals old password', () => {
+  const db = makeAuthDb();
+  seedUser(db, { username: 'admin', password: 'same-pass-1', id: 1 });
+  const result = changePassword(db, 1, 'same-pass-1', 'same-pass-1');
+  assert.equal(result.ok, undefined);
+  assert.match(result.error, /must be different/);
+});
+
+test('changePassword: rejects on a locked account (lockout evasion guard)', () => {
+  const db = makeAuthDb();
+  seedUser(db, { username: 'admin', password: 'old-pass-1', id: 1 });
+  // Lock the account for 15 minutes from now.
+  db.prepare('UPDATE users SET locked_until = ? WHERE id = ?')
+    .run(new Date(Date.now() + 15 * 60 * 1000).toISOString(), 1);
+  const result = changePassword(db, 1, 'old-pass-1', 'new-pass-2');
+  assert.equal(result.ok, undefined);
+  assert.match(result.error, /temporarily locked/);
+});
+
+test('changePassword: rejects on unknown userId', () => {
+  const db = makeAuthDb();
+  const result = changePassword(db, 999999, 'old-pass-1', 'new-pass-2');
+  assert.equal(result.ok, undefined);
+  assert.equal(result.error, 'user not found');
 });

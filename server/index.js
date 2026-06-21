@@ -435,6 +435,36 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
     }
   });
 
+  // POST /api/auth/password — change the current user's password.
+  // Self-service rotation. Body: { old_password, new_password }.
+  // Perm gate: any authenticated user (this is self-service).
+  app.post('/api/auth/password', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+    try {
+      const { changePassword } = await import('./auth-login.js');
+      const body = req.body || {};
+      const result = changePassword(
+        db,
+        req.user.id,
+        body.old_password,
+        body.new_password,
+      );
+      if (!result.ok) {
+        // Map error codes to HTTP status:
+        //   - "old password is incorrect" → 403 (auth failure)
+        //   - "account is temporarily locked" → 423 (Locked)
+        //   - everything else → 400 (bad request)
+        const status =
+          result.error === 'old password is incorrect' ? 403
+          : result.error === 'account is temporarily locked; try again later' ? 423
+          : 400;
+        return res.status(status).json({ error: 'change_password_failed', message: result.error });
+      }
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: 'internal_error', message: err && err.message });
+    }
+  });
+
   // Generic 404.
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', path: req.path });

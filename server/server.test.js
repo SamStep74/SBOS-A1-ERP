@@ -422,7 +422,11 @@ function makeFullDb() {
       tenant_id INTEGER NOT NULL DEFAULT 0,
       org_id INTEGER,
       mfa_required INTEGER NOT NULL DEFAULT 0,
-      mfa_verified INTEGER NOT NULL DEFAULT 0
+      mfa_verified INTEGER NOT NULL DEFAULT 0,
+      password_hash TEXT,
+      password_salt TEXT,
+      failed_logins INTEGER NOT NULL DEFAULT 0,
+      locked_until TEXT
     );
   `);
   sqliteDb
@@ -1525,6 +1529,52 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
       lines: [{ description: 'A', quantity: 1, unit_price_amd: 100 }],
     });
     assert.equal(status, 201);
+  });
+
+  // ─── Wave 45: password rotation ───
+
+  test('45a. POST /api/auth/password rotates the current user\'s password (200)', async () => {
+    // Stub auth mode sets req.user.id = 1 (admin). Seed the admin
+    // password so changePassword can verify it.
+    const { hashPassword } = await import('./auth-login.js');
+    const { hash, salt } = hashPassword('initial-pass-1');
+    full.db.prepare('DELETE FROM users WHERE id = 1').run();
+    full.db.prepare(
+      `INSERT INTO users (id, username, email, role, tenant_id, password_hash, password_salt)
+       VALUES (1, 'admin', 'admin@example.com', 'Admin', 0, ?, ?)`,
+    ).run(hash, salt);
+    const r = await postJson(server, '/api/auth/password', {
+      old_password: 'initial-pass-1',
+      new_password: 'rotated-pass-2',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    // The new password is now in the DB.
+    const row = full.db.prepare('SELECT password_hash, password_salt FROM users WHERE id = 1').get();
+    assert.ok(row.password_hash, 'password_hash should be set');
+    assert.ok(row.password_salt, 'password_salt should be set');
+    // The new hash should NOT match the old hash.
+    assert.notEqual(row.password_hash, hash);
+  });
+
+  test('45b. POST /api/auth/password with wrong old password returns 403', async () => {
+    const r = await postJson(server, '/api/auth/password', {
+      old_password: 'wrong-password',
+      new_password: 'another-pass-2',
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, 'change_password_failed');
+    assert.match(r.body.message, /old password is incorrect/);
+  });
+
+  test('45c. POST /api/auth/password with short new password returns 400', async () => {
+    const r = await postJson(server, '/api/auth/password', {
+      old_password: 'rotated-pass-2',  // the current password from 45a
+      new_password: 'short',
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'change_password_failed');
+    assert.match(r.body.message, /at least 8 chars/);
   });
 });
 
