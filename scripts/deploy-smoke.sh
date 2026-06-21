@@ -236,6 +236,18 @@ const writeChecks = [
   { method: 'POST', path: '/api/finance/pos/sales', body: { shift_id: 1, register_id: 1, cashier_id: 1 }, expect: 201, name: 'POST /api/finance/pos/sales (returns id > 0)' },
   { method: 'POST', path: '/api/finance/pos/sales/1/lines', body: { catalog_item_id: 1, quantity: 2, unit_price_amd: 1500 }, expect: 201, name: 'POST /api/finance/pos/sales/1/lines (returns id > 0)' },
   { method: 'POST', path: '/api/finance/pos/sales/1/payments', body: { payment_method: 'cash', amount_amd: 3000, tendered_amd: 5000, change_amd: 2000 }, expect: 201, name: 'POST /api/finance/pos/sales/1/payments (returns id > 0)' },
+  // Phase 3 POS basics wave 3 (W89-1) — complete / refund / void
+  // sale lifecycle. Sale 1 is 'open' at this point (addPayment
+  // does NOT auto-complete — that's what completeSale does).
+  // Order matters: complete → refund (need completed sale) →
+  // create sale 2 → void (need open sale). The refund flips
+  // sale 1 to 'voided' so we need a fresh sale for the void
+  // path.
+  { method: 'POST', path: '/api/finance/pos/sales/1/complete', body: {}, expect: 200, name: 'POST /api/finance/pos/sales/1/complete (state-machine guard open → completed)' },
+  { method: 'POST', path: '/api/finance/pos/sales/1/refund', body: { refunded_by: 1, amount_amd: 3000, payment_method: 'cash', reason: 'customer changed mind' }, expect: 201, name: 'POST /api/finance/pos/sales/1/refund (inserts pos_refunds + flips completed → voided)' },
+  { method: 'GET', path: '/api/finance/pos/sales/1/refunds', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/pos/sales/1/refunds (returns the refund)' },
+  { method: 'POST', path: '/api/finance/pos/sales', body: { shift_id: 1, register_id: 1, cashier_id: 1 }, expect: 201, name: 'POST /api/finance/pos/sales (sale 2 — for void path)' },
+  { method: 'POST', path: '/api/finance/pos/sales/2/void', body: { voided_by: 1 }, expect: 200, name: 'POST /api/finance/pos/sales/2/void (state-machine guard open → voided, no refund row)' },
   { method: 'POST', path: '/api/finance/pos/shifts/1/close', body: { closed_by: 1, closing_cash_amd: 5000 }, expect: 200, name: 'POST /api/finance/pos/shifts/1/close (state-machine guard open → closed)' },
 ];
 

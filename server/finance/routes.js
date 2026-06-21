@@ -90,6 +90,10 @@
 //   POST   /api/finance/pos/sales
 //   POST   /api/finance/pos/sales/:id/lines
 //   POST   /api/finance/pos/sales/:id/payments
+//   POST   /api/finance/pos/sales/:id/complete   (Phase 3 W89-1)
+//   POST   /api/finance/pos/sales/:id/void
+//   POST   /api/finance/pos/sales/:id/refund
+//   GET    /api/finance/pos/sales/:id/refunds
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -195,6 +199,10 @@ import {
   addRegister,
   listRegisters,
   getRegister,
+  completeSale,
+  voidSale,
+  refundSale,
+  listRefunds,
 } from './pos.js';
 import {
   listJournalEntries,
@@ -2563,4 +2571,71 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.status(201).json(out);
     }),
   );
+
+  // POST /api/finance/pos/sales/:id/complete
+  //   Finalize a sale: status open → completed, completed_at
+  //   stamped. Must be 'open' (not yet completed or voided).
+  app.post(
+    '/api/finance/pos/sales/:id/complete',
+    requireTenant,
+    requirePerm('pos.sale.create'),
+    wrapFinanceRoute('pos.sale.create', (req) => `pos_sale:${req.params.id}:complete`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const out = await completeSale(pgAdapter, saleId, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/pos/sales/:id/void
+  //   Cancel an OPEN sale: status open → voided. Body: {
+  //   voided_by }. Returns 400 if the sale is already
+  //   completed (must use refundSale) or already voided.
+  //   Does NOT insert a pos_refunds row (a void is not a
+  //   refund — no money changed hands).
+  app.post(
+    '/api/finance/pos/sales/:id/void',
+    requireTenant,
+    requirePerm('pos.sale.void'),
+    wrapFinanceRoute('pos.sale.void', (req) => `pos_sale:${req.params.id}:void`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const out = await voidSale(pgAdapter, saleId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/pos/sales/:id/refund
+  //   Issue a refund for a COMPLETED sale: inserts pos_refunds
+  //   row + flips status completed → voided. Body: {
+  //   refunded_by, amount_amd, payment_method, reason? }.
+  //   Returns 400 if the sale is open (must voidSale) or
+  //   already voided.
+  app.post(
+    '/api/finance/pos/sales/:id/refund',
+    requireTenant,
+    requirePerm('pos.refund.create'),
+    wrapFinanceRoute('pos.refund.create', (req, res) => `pos_sale:${req.params.id}:refund:${res.locals.createdId}`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const out = await refundSale(pgAdapter, saleId, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/pos/sales/:id/refunds
+  //   List refunds for a sale (chronological). Returns []
+  //   for a sale with no refunds. Used by the POS UI to
+  //   display the refund history of a sale.
+  app.get('/api/finance/pos/sales/:id/refunds', requireTenant, requirePerm('pos.refund.create'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const items = await listRefunds(pgAdapter, tenantId, { saleId });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
 }
