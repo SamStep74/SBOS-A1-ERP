@@ -167,6 +167,41 @@ export async function listVendors(db, tenantId = 0) {
   }));
 }
 
+/**
+ * Fetch a single vendor by id (tenant-scoped). Returns null if the
+ * vendor is missing, archived, or cross-tenant. Used by the
+ * vendor 360 endpoint (Wave 33) to surface vendor basic info
+ * in the same call as the open POs + recent receipts.
+ *
+ * @param {object} db — pg-style or sqlite-style adapter
+ * @param {number} id — positive integer
+ * @param {number} [tenantId=0] — non-negative integer
+ * @returns {Promise<{id, code, name, hvhh, address, email, phone, contact_name, tenant_id} | null>}
+ */
+export async function getVendor(db, id, tenantId = 0) {
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const res = await runQuery(
+    db,
+    `SELECT id, code, name, hvhh, address, email, phone, contact_name, tenant_id
+       FROM vendors
+      WHERE tenant_id = $1 AND id = $2 AND archived = 0`,
+    [tenantId, id],
+  );
+  if (!res.rows || res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    id: Number(r.id),
+    code: r.code,
+    name: r.name,
+    hvhh: r.hvhh,
+    address: r.address,
+    email: r.email,
+    phone: r.phone,
+    contact_name: r.contact_name,
+    tenant_id: Number(r.tenant_id),
+  };
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Purchase orders
 // ────────────────────────────────────────────────────────────────────────
