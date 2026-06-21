@@ -27,6 +27,10 @@ import {
   getReplenishmentReport,
   ValueError,
 } from './inventory.js';
+// Wave 39: pull in the lots module to seed test data for the
+// stock-move integration tests (receiveStock/deliverStock accept
+// lot_id + serial_ids).
+import { createLot, createSerial, listLotsForLocation, listSerialsForLocation } from './lots.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Test harness — mirrors the customer.test.js harness.
@@ -127,6 +131,43 @@ function makeMemoryDb() {
       debit INTEGER NOT NULL DEFAULT 0,
       credit INTEGER NOT NULL DEFAULT 0,
       description TEXT
+    );
+    -- Wave 39: lot + serial tracking tables (mirror 0014_lots_serials.sql).
+    -- Bare names here because the test sqlite has no schema prefix.
+    CREATE TABLE lots (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id           INTEGER NOT NULL DEFAULT 0,
+      code                TEXT NOT NULL,
+      supplier_lot_number TEXT,
+      catalog_item_id     INTEGER NOT NULL,
+      expiry_date         TEXT,
+      received_at         TEXT NOT NULL,
+      notes               TEXT,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE serials (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id             INTEGER NOT NULL DEFAULT 0,
+      serial_number         TEXT NOT NULL,
+      catalog_item_id       INTEGER NOT NULL,
+      lot_id                INTEGER,
+      status                TEXT NOT NULL DEFAULT 'in_stock',
+      current_location_id   INTEGER,
+      received_at           TEXT NOT NULL,
+      sold_at               TEXT,
+      notes                 TEXT,
+      created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE stock_lots (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id       INTEGER NOT NULL DEFAULT 0,
+      lot_id          INTEGER NOT NULL,
+      location_id     INTEGER NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      quantity        INTEGER NOT NULL DEFAULT 0,
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
   // pg-style adapter wrapper. We translate $N → ? on the way down.
@@ -750,4 +791,169 @@ test('createCatalogItem: rejects negative reorder_point', async () => {
     () => createCatalogItem(db, { sku: 'A', name: 'A', reorder_point: -1 }, 0),
     (err) => err && err.name === 'ValueError' && /reorder_point/.test(err.message),
   );
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Wave 39 — stock-move integration tests
+// ──────────────────────────────────────────────────────────────────────
+
+// Helper: build a complete stock-setup (warehouse + location + item)
+// and return the ids.
+async function stockSetup(db, sku = 'WAVE39-SKU') {
+  const wh = await createWarehouse(db, { code: 'WH-39', name: 'Wave 39 WH' }, 0);
+  const loc = await createLocation(
+    db, { warehouse_id: wh.id, code: 'A1', name: 'Aisle 1', location_type: 'INTERNAL' }, 0,
+  );
+  const item = await createCatalogItem(db, { sku, name: 'Wave 39 item' }, 0);
+  return { warehouseId: wh.id, locationId: loc.id, itemId: item.id };
+}
+
+test('W39-1. receiveStock with lot_id: writes stock_lots + lot_received in return', async () => {
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-LOT');
+  const lot = await createLot(db, {
+    code: 'LOT-W39-1', catalog_item_id: itemId, received_at: '2026-06-21',
+  }, 0);
+  const out = await receiveStock(db, {
+    catalog_item_id: itemId,
+    destination_location_id: locationId,
+    quantity: 50,
+    unit_cost: 1000,
+    lot_id: lot.id,
+  }, 0);
+  assert.equal(out.move_type, 'RECEIPT');
+  assert.ok(out.lot_received, 'return should include lot_received');
+  assert.equal(out.lot_received.lot_id, lot.id);
+  assert.equal(out.lot_received.quantity, 50);
+  // stock_quants also got the quantity.
+  assert.equal(out.new_quantity_at_destination, 50);
+  // Verify the row directly.
+  const lots = await listLotsForLocation(db, 0, locationId);
+  assert.equal(lots.length, 1);
+  assert.equal(lots[0].quantity, 50);
+  assert.equal(lots[0].code, 'LOT-W39-1');
+});
+
+test('W39-2. receiveStock with serial_ids: assigns serials to destination + in_stock', async () => {
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-SERIAL');
+  const s1 = await createSerial(db, {
+    serial_number: 'SN-W39-1', catalog_item_id: itemId, received_at: '2026-06-21',
+  }, 0);
+  const s2 = await createSerial(db, {
+    serial_number: 'SN-W39-2', catalog_item_id: itemId, received_at: '2026-06-21',
+  }, 0);
+  const out = await receiveStock(db, {
+    catalog_item_id: itemId,
+    destination_location_id: locationId,
+    quantity: 2,
+    serial_ids: [s1.id, s2.id],
+  }, 0);
+  assert.ok(out.serial_updates, 'return should include serial_updates');
+  assert.equal(out.serial_updates.length, 2);
+  // Verify the serials moved to the destination.
+  const serials = await listSerialsForLocation(db, 0, locationId);
+  assert.equal(serials.length, 2);
+  assert.ok(serials.every(s => s.status === 'in_stock'));
+  assert.ok(serials.every(s => s.current_location_id === locationId));
+});
+
+test('W39-3. receiveStock rejects serial_ids.length !== quantity (unit-tracked invariant)', async () => {
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-MISMATCH');
+  await assert.rejects(
+    receiveStock(db, {
+      catalog_item_id: itemId,
+      destination_location_id: locationId,
+      quantity: 5,
+      serial_ids: [1, 2], // length 2, quantity 5 → mismatch
+    }, 0),
+    /must equal quantity/,
+  );
+});
+
+test('W39-4. deliverStock with serial_ids (external sale): assigns status=sold, current_location_id=null', async () => {
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-SOLD');
+  const s1 = await createSerial(db, {
+    serial_number: 'SN-SOLD-1', catalog_item_id: itemId,
+    current_location_id: locationId, received_at: '2026-06-21',
+  }, 0);
+  await receiveStock(db, {
+    catalog_item_id: itemId,
+    destination_location_id: locationId,
+    quantity: 1,
+    serial_ids: [s1.id],
+  }, 0);
+  // Now deliver (external sale — no destination).
+  const out = await deliverStock(db, {
+    catalog_item_id: itemId,
+    source_location_id: locationId,
+    quantity: 1,
+    serial_ids: [s1.id],
+  }, 0);
+  assert.ok(out.serial_updates, 'return should include serial_updates');
+  assert.equal(out.serial_updates[0].status, 'sold');
+  assert.equal(out.serial_updates[0].current_location_id, null);
+  // Verify the serial is no longer at the location.
+  const serials = await listSerialsForLocation(db, 0, locationId);
+  assert.equal(serials.length, 0);
+});
+
+test('W39-5. deliverStock with bulk + lots: FEFO consumption across multiple lots', async () => {
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-FEFO');
+  // Receive 30 from LOT-NEAR + 80 from LOT-FAR, both bulk (no serials).
+  const lotNear = await createLot(db, {
+    code: 'LOT-NEAR-W39', catalog_item_id: itemId,
+    expiry_date: '2026-12-01', received_at: '2026-06-21',
+  }, 0);
+  const lotFar = await createLot(db, {
+    code: 'LOT-FAR-W39', catalog_item_id: itemId,
+    expiry_date: '2028-01-01', received_at: '2026-06-21',
+  }, 0);
+  await receiveStock(db, {
+    catalog_item_id: itemId, destination_location_id: locationId,
+    quantity: 30, lot_id: lotNear.id,
+  }, 0);
+  await receiveStock(db, {
+    catalog_item_id: itemId, destination_location_id: locationId,
+    quantity: 80, lot_id: lotFar.id,
+  }, 0);
+  // Deliver 50 (bulk — no serials). Should consume FEFO: 30 from NEAR + 20 from FAR.
+  const out = await deliverStock(db, {
+    catalog_item_id: itemId,
+    source_location_id: locationId,
+    quantity: 50,
+  }, 0);
+  assert.ok(out.lot_consumption, 'return should include lot_consumption');
+  assert.equal(out.lot_consumption.length, 2);
+  assert.equal(out.lot_consumption[0].lot_id, lotNear.id);
+  assert.equal(out.lot_consumption[0].quantity_consumed, 30);
+  assert.equal(out.lot_consumption[1].lot_id, lotFar.id);
+  assert.equal(out.lot_consumption[1].quantity_consumed, 20);
+  // LOT-NEAR's stock_lots row went to 0 (audit trail preserved).
+  const lots = await listLotsForLocation(db, 0, locationId);
+  assert.equal(lots.length, 1); // only FAR has qty>0 now
+  assert.equal(lots[0].code, 'LOT-FAR-W39');
+  assert.equal(lots[0].quantity, 60);
+});
+
+test('W39-6. deliverStock with bulk + no stock_lots rows: graceful no-op (no FEFO call)', async () => {
+  // Item was received as bulk (no lot_id) — no stock_lots rows exist.
+  // deliverStock should NOT throw and should NOT include lot_consumption.
+  const db = makeMemoryDb();
+  const { itemId, locationId } = await stockSetup(db, 'W39-NOLOT');
+  await receiveStock(db, {
+    catalog_item_id: itemId, destination_location_id: locationId,
+    quantity: 10,
+  }, 0);
+  const out = await deliverStock(db, {
+    catalog_item_id: itemId,
+    source_location_id: locationId,
+    quantity: 5,
+  }, 0);
+  assert.equal(out.lot_consumption, undefined);
+  assert.equal(out.serial_updates, undefined);
+  assert.equal(out.new_quantity_at_source, 5);
 });

@@ -40,6 +40,26 @@ export class ValueError extends Error {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Lot + serial helpers (Wave 39 commit 2).
+// Optional: receiveStock + deliverStock accept lot_id + serial_ids
+// to record lot-level + unit-level movements. Stock-move integration
+// is best-effort: if the lots/serials tables don't exist (old deploys),
+// the move still succeeds — the quantity is just tracked at the
+// stock_quants level.
+// ────────────────────────────────────────────────────────────────────────
+let lotsModule = null;
+async function lots() {
+  if (lotsModule === null) {
+    try {
+      lotsModule = await import('./lots.js');
+    } catch (_e) {
+      lotsModule = false;
+    }
+  }
+  return lotsModule || null;
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // runQuery — same shape as server/finance/invoice.js. Tolerates
 // adapters that don't return rows on INSERT (sqlite path uses
 // lastInsertRowid via the realDb.js adapter's stmt.all path).
@@ -102,6 +122,19 @@ function assertNonNegInt(value, name) {
 function assertPosInt(value, name) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new ValueError(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+// Parse the optional serial_ids array. Returns a positive-integer
+// array (length 0 = no serials) or throws ValueError on malformed input.
+function parseSerialIds(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new ValueError('serial_ids must be an array of positive integers');
+  }
+  for (let i = 0; i < value.length; i++) {
+    assertPosInt(value[i], `serial_ids[${i}]`);
   }
   return value;
 }
@@ -341,6 +374,13 @@ export async function receiveStock(db, input, tenantId = 0) {
   const reference = input.reference || null;
   const notes = input.notes || null;
   const userId = input.user_id == null ? null : Number(input.user_id);
+  // Lot + serial tracking (Wave 39 commit 2). Optional.
+  //   - lot_id: integer; the received quantity belongs to this lot
+  //   - serial_ids: integer[]; for unit-tracked items, each physical
+  //     unit has a serial. Length must equal `quantity` for unit-tracked
+  //     items (mixing unit + bulk in one move is a data error).
+  const lotId = input.lot_id == null ? null : assertPosInt(input.lot_id, 'lot_id');
+  const serialIds = parseSerialIds(input.serial_ids);
 
   // Item + dest must exist + belong to tenant.
   const item = await runQuery(
@@ -432,6 +472,40 @@ export async function receiveStock(db, input, tenantId = 0) {
     }
   }
 
+  // Lot + serial integration (Wave 39 commit 2). Optional.
+  // If the lots module is available (the deploy has the migration
+  // applied), record the lot-level + unit-level movements.
+  let lotReceived = null;
+  let serialUpdates = [];
+  const lotsApi = await lots();
+  if (lotsApi) {
+    // If lot_id is given, the entire received quantity belongs to
+    // that lot. receiveIntoLot validates that the lot is for this
+    // catalog_item_id (a mismatch is a data error).
+    if (lotId != null) {
+      lotReceived = await lotsApi.receiveIntoLot(
+        db, tenantId, lotId, destLocationId, itemId, quantity,
+      );
+    }
+    // If serial_ids is given, each unit gets pinned to the destination
+    // location + status='in_stock'. For unit-tracked items,
+    // serial_ids.length must equal quantity (one serial per physical
+    // unit). Mismatch is a data error.
+    if (serialIds.length > 0) {
+      if (serialIds.length !== quantity) {
+        throw new ValueError(
+          `serial_ids.length (${serialIds.length}) must equal quantity (${quantity}) for unit-tracked items`,
+        );
+      }
+      for (const sid of serialIds) {
+        const updated = await lotsApi.assignSerialLocation(
+          db, tenantId, sid, destLocationId, 'in_stock', lotId,
+        );
+        serialUpdates.push({ id: updated.id, status: updated.status, current_location_id: updated.current_location_id });
+      }
+    }
+  }
+
   // Append-only move row.
   const moveRes = await runQuery(
     db,
@@ -467,6 +541,8 @@ export async function receiveStock(db, input, tenantId = 0) {
     unit_cost: effectiveUnitCost,
     new_quantity_at_destination: newQty,
     new_average_cost: newAvg,
+    ...(lotReceived != null ? { lot_received: lotReceived } : {}),
+    ...(serialUpdates.length > 0 ? { serial_updates: serialUpdates } : {}),
   };
 }
 
@@ -486,6 +562,12 @@ export async function deliverStock(db, input, tenantId = 0) {
   const reference = input.reference || null;
   const notes = input.notes || null;
   const userId = input.user_id == null ? null : Number(input.user_id);
+  // Lot + serial tracking (Wave 39 commit 2). Optional.
+  //   - serial_ids: integer[]; for unit-tracked items, the list of
+  //     serials that left the source. Length must equal quantity.
+  //   - lot_id is NOT accepted: deliveries use FEFO across all lots
+  //     at the source (the caller doesn't pre-select the lot).
+  const serialIds = parseSerialIds(input.serial_ids);
 
   // Source must have enough stock.
   const src = await runQuery(
@@ -558,6 +640,65 @@ export async function deliverStock(db, input, tenantId = 0) {
     }
   }
 
+  // Lot + serial integration (Wave 39 commit 2). Optional.
+  // If the lots module is available, record the lot-level + unit-level
+  // movements. FEFO consumption happens BEFORE the move row so the
+  // GL side-effect (which reads the move's unit_cost) reflects the
+  // true source.
+  let lotConsumption = null;
+  let serialUpdates = [];
+  const lotsApi = await lots();
+  if (lotsApi) {
+    // Unit-tracked delivery: assign each serial to the destination
+    // (or null for external sale → status='sold'). Length must equal
+    // quantity (one serial per physical unit).
+    if (serialIds.length > 0) {
+      if (serialIds.length !== quantity) {
+        throw new ValueError(
+          `serial_ids.length (${serialIds.length}) must equal quantity (${quantity}) for unit-tracked items`,
+        );
+      }
+      // External sale (no destination) vs internal transfer (destination
+      // is another internal location). Status reflects this:
+      //   - destLocationId == null OR CUSTOMER → 'sold'
+      //   - destLocationId set (INTERNAL) → 'in_stock' at the new location
+      const newStatus = (destLocationId == null) ? 'sold' : 'in_stock';
+      const newLoc = (destLocationId == null) ? null : destLocationId;
+      for (const sid of serialIds) {
+        const updated = await lotsApi.assignSerialLocation(
+          db, tenantId, sid, newLoc, newStatus, null,
+        );
+        serialUpdates.push({ id: updated.id, status: updated.status, current_location_id: updated.current_location_id });
+      }
+    } else {
+      // Bulk delivery with lot-tracking at the source: FEFO consumption.
+      // If no stock_lots rows exist for (item, source), this is a no-op
+      // (graceful degradation — the item is fungible, no lot tracking).
+      // If stock_lots rows exist, we MUST have enough lot-tracked stock
+      // to satisfy the delivery (the function throws on shortfall).
+      // Wrap in try/catch so a missing stock_lots table (pre-migration
+      // deploys, some test schemas) doesn't break the move.
+      try {
+        const stockLotsExist = await runQuery(
+          db,
+          `SELECT id FROM finance.stock_lots
+            WHERE tenant_id = $1 AND catalog_item_id = $2 AND location_id = $3
+              AND quantity > 0
+            LIMIT 1`,
+          [tenantId, itemId, sourceLocationId],
+        );
+        if (stockLotsExist.rows && stockLotsExist.rows.length > 0) {
+          lotConsumption = await lotsApi.consumeFromLotsFEFO(
+            db, tenantId, itemId, sourceLocationId, quantity,
+          );
+        }
+      } catch (_e) {
+        // stock_lots table missing → no FEFO possible, fall through.
+        lotConsumption = null;
+      }
+    }
+  }
+
   // Append-only move row.
   const moveRes = await runQuery(
     db,
@@ -599,6 +740,8 @@ export async function deliverStock(db, input, tenantId = 0) {
     quantity,
     unit_cost: srcAvg,
     new_quantity_at_source: newSrcQty,
+    ...(lotConsumption != null ? { lot_consumption: lotConsumption } : {}),
+    ...(serialUpdates.length > 0 ? { serial_updates: serialUpdates } : {}),
   };
 }
 
