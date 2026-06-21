@@ -269,6 +269,48 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     the catalog v2 wave 1 commit that landed on origin in
     parallel). Smoke 68 endpoints + 2 new 403 checks (5b
     audit + 5c GET). `npm run check` clean, boundary 0.
+- **Wave 28 (Finance GETs — tenant middleware swap)** — DONE.
+  - Closes the Wave 27 deferral: the 38 perm-gated GETs now
+    also run the `requireTenant` middleware. Previously they
+    used `readTenant(req)` (silent fallback to tenant 0); now
+    they 400 when no X-Tenant-Id header AND no
+    `req.user.tenant_id` (the same middleware the audit
+    endpoint + all writes use). This brings the GETs to
+    defense-in-depth parity with the writes.
+  - 3 things happened in this wave:
+    1. Added `requireTenant` middleware to all 38 perm-gated
+       GETs (the audit endpoint already had it from Wave 26).
+       The middleware runs before `requirePerm`, so a missing
+       tenant 400s before the perm check.
+    2. Swapped `readTenant(req)` for `req.tenantId` in all
+       38 GET handler bodies. `req.tenantId` is stamped by
+       the `requireTenant` middleware and is always defined
+       when the handler runs.
+    3. The dashboard GET now passes
+       `tenantId: req.tenantId` to `renderDashboard` (it
+       already accepted the option; the route just wasn't
+       wiring it through). Non-bootstrap tenants now get
+       their own numbers on the dashboard.
+  - Also closed a Wave 27 gap that the audit missed: the 5
+    catalog v2 GETs from commit `ac41aff` (categories list /
+    get / breadcrumb path, variants list / get) were perm-less
+    because they were multi-line `app.get(\n  '/path',\n  ...)`
+    that the Wave 27 grep audit didn't catch. Gated them with
+    `finance.category.read` / `finance.variant.read` (the
+    perms already existed in the catalog and were bound to
+    perm sets).
+  - Removed the now-unused `readTenant(req)` helper from
+    `server/finance/routes.js`. The 35 callers are all on
+    `req.tenantId` now; the helper was dead code.
+  - No new tests added: the existing 78 endpoint smoke
+    checks (admin token WITHOUT an X-Tenant-Id header, all
+    expect 200) are the regression test. If the middleware
+    swap is wrong, the smoke fails. The existing
+    `tenant.test.js` already covers the `requireTenant`
+    middleware (400 on missing, header-vs-user fallback, etc.)
+    — no new test surface needed.
+  - 1190/1190 tests pass. Smoke 78 endpoints + STEP 5b + 5c
+    all pass. `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
