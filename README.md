@@ -284,6 +284,53 @@ npm run lint
 npm run format:check
 ```
 
+## A1-Validator integration (optional, Wave 27)
+
+`lib/a1-validator-client.js` is a zero-dep Node.js client for the
+[A1-Validator](https://github.com/Armosphera/A1-Validator) HTTP service
+(37 business-ID validators: HHVH, INN, CNPJ, MX RFC, JP My Number, etc.).
+The integration is **opt-in**: if the service is unreachable, the client
+returns `{ ok: null, _error: ... }` (no crash, no blocking).
+
+```js
+import { A1ValidatorClient } from './lib/a1-validator-client.js';
+
+const a1 = new A1ValidatorClient({
+  baseUrl: process.env.A1_VALIDATOR_URL || 'http://a1-validator:8000',
+  timeoutMs: 2000,
+  retries: 1,
+});
+
+// At boot, log integration state:
+const h = await a1.health();
+if (h.ok) {
+  console.log(`a1-validator ${h.version}: ${h.validators.length} kinds available`);
+} else {
+  console.log(`a1-validator unreachable: ${h.error} (running in local-fallback mode)`);
+}
+
+// Per-request validation (e.g. before creating a customer with a tax id):
+const result = await a1.validate('hvvh', { hvhh: input.hvhh });
+if (result._skipped || result._error) {
+  // Service unavailable — fall back to local regex check
+} else if (!result.ok) {
+  throw new ValueError(`hvhh is invalid: ${result.error}`);
+}
+```
+
+**To deploy the A1-Validator sidecar:**
+
+```bash
+docker run -d --name a1-validator -p 8000:8000 \
+  ghcr.io/armosphera/a1-validator:v0.4.0
+export A1_VALIDATOR_URL=http://localhost:8000
+npm start
+```
+
+**Smoke test:** `scripts/deploy-smoke.sh` STEP 7b verifies the client
+loads, `validate()` returns `_skipped` when disabled, and `health()`
+returns `ok=false` for an unreachable host (no crash).
+
 ## Phase 1 ERP API surface
 
 The Phase 1 ERP release adds the **Inventory** + **Purchase Core** modules
