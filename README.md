@@ -793,6 +793,28 @@ Three changes on top of v0.8.0:
 ```
 
 
+
+## v1.0.0 — GA foundation
+
+The first stable release of SBOS-A1-ERP. This release marks the end of the Phase-1 ERP foundation (RBAC + finance + audit + POS + lots/serials + recall) and the start of Phase 2 (drift-detected customer/vendor/CRM/AR/AP data integrity via the A1-Validator).
+
+**Five SBOS endpoints now use the A1-Validator HTTP service.** The drift-detection pattern — re-fetch the live customer's HVVH at write time, not the denormalized value on the dependent table — catches customer/vendor edits that invalidated the HVVH between the original create and the dependent write. See [the README's "A1-Validator integration" section](#a1-validator-integration-optional-wave-27) for the contract and the fail-soft pattern (3-tier: URL unset → local regex; URL set + unreachable → local regex; URL set + reachable → service).
+
+**Phase-1 ERP feature set:**
+- RBAC (28 roles, 445 perms, 74 perm sets) — tenant-scoped, perm-gated, audit-logged
+- Finance — customers, vendors, POs (rfq → confirmed → partial → received → billed), vendor bills (3-way match), invoices, payments, journal entries, account balances, trial balance, replenishment report, audit log
+- CRM — contacts, leads, dashboard
+- POS — registers, shifts, sales (open → completed → voided/refunded), sale lines, payments
+- Inventory — lots + serials, stock moves, weighted-average cost
+- Recall — lot + serial cascade (regulatory compliance)
+- Local CI — `npm run check` + `scripts/deploy-smoke.sh` (repo is private; GH Actions disabled)
+
+**Stats:**
+- 1437/1437 tests pass (was 776 at the project's earliest checkpoint; +661 across all waves).
+- All 88+ endpoint smoke checks pass.
+- `npm run check` clean, boundary 0.
+- 0 production dependencies added across the v0.6 → v1.0 cycle.
+
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
