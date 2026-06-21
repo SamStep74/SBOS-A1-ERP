@@ -49,6 +49,10 @@
 //   GET    /api/finance/replenishment-report?warehouse_id=
 //   GET    /api/finance/journal-entries?since=&until=&source=&limit=&offset=
 //   GET    /api/finance/account-balances?asOfDate=
+//   GET    /api/finance/crm/contacts
+//   POST   /api/finance/crm/contacts
+//   GET    /api/finance/crm/leads?status=
+//   POST   /api/finance/crm/leads
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -108,6 +112,7 @@ import {
   listVendorBills,
 } from './purchase.js';
 import { renderPurchaseOrder, renderDeliveryNote } from './poTemplate.js';
+import { createContact, listContacts, createLead, listLeads } from './crm.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -1006,4 +1011,70 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 2 CRM (W71-1) — contacts + leads.
+  // Wave 1 ships read + create; future waves add update + archive.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/crm/contacts
+  //   List active CRM contacts for the caller's tenant.
+  app.get('/api/finance/crm/contacts', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const items = await listContacts(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/crm/contacts
+  //   Create a new CRM contact. Body: { name, email?, phone?,
+  //   role?, notes?, customer_id? }. The customer_id is OPTIONAL
+  //   (a contact may exist before the financial customer is
+  //   created; future waves link the contact to a customer once
+  //   the customer is on-boarded).
+  app.post(
+    '/api/finance/crm/contacts',
+    requireTenant,
+    requirePerm('crm.contact.create'),
+    wrapFinanceRoute('crm.contact.create', 'crm_contact:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createContact(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/crm/leads
+  //   List CRM leads for the caller's tenant. Optional ?status=
+  //   filter (new / qualified / proposal / won / lost). Ordered by
+  //   id DESC (most recent first).
+  app.get('/api/finance/crm/leads', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const status = req.query.status ?? null;
+      const items = await listLeads(pgAdapter, tenantId, status);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/crm/leads
+  //   Create a new CRM lead. Body: { name, company?, email?,
+  //   phone?, source?, status?, estimated_value_amd?, notes? }.
+  //   Default status is 'new'; the operator can move the lead
+  //   through the pipeline (qualified / proposal / won / lost)
+  //   via a future update endpoint.
+  app.post(
+    '/api/finance/crm/leads',
+    requireTenant,
+    requirePerm('crm.lead.create'),
+    wrapFinanceRoute('crm.lead.create', 'crm_lead:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createLead(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    }),
+  );
 }
