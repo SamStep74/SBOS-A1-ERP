@@ -268,6 +268,13 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/hr/contracts/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/hr/contracts/1 (returns the contract created above)' },
   { method: 'POST', path: '/api/finance/hr/payroll-runs', body: { period_year: 2026, period_month: 1, notes: 'January 2026 payroll' }, expect: 201, name: 'POST /api/finance/hr/payroll-runs (returns id > 0)' },
   { method: 'POST', path: '/api/finance/hr/payroll-runs/1/lines', body: { employee_id: 1, contract_id: 1, base_salary_amd: 500000, bonus_amd: 50000, deductions_amd: 10000, tax_amd: 50000, worked_days: 22, vacation_days: 0, sick_days: 0 }, expect: 201, name: 'POST /api/finance/hr/payroll-runs/1/lines (returns id > 0)' },
+  // Phase 3 reporting drill-downs (W92-1) — empty-DB smoke
+  // checks (no invoices yet → empty arrays, but valid JSON).
+  // End-to-end drill-down coverage requires populated invoices;
+  // that's covered by the unit tests (listInvoicesInAgingBucket /
+  // listMonthlyRevenueTrend / getCustomerRevenueBreakdown).
+  { method: 'GET', path: '/api/finance/reports/ar-aging-bucket?asOfDate=2026-06-21&bucket=0_30', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ar-aging-bucket (empty DB → 200, items: [])' },
+  { method: 'GET', path: '/api/finance/reports/revenue-trend?months=12', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET revenue-trend (empty DB → 200, 12 empty months)' },
 ];
 
 let done = 0, pass = 0, fail = 0;

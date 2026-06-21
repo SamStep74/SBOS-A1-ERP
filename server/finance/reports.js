@@ -532,3 +532,317 @@ export async function getVatSummary(db, since, until, tenantId = 0) {
     invoice_count: invoiceCount,
   };
 }
+// ────────────────────────────────────────────────────────────────────────
+// Drill-down functions (W92-1 — Phase 3 reporting wave 2)
+//
+// The aggregate functions above (getArAging / getMonthlyRevenue /
+// getTopCustomers) give the CFO a dashboard view. These drill-down
+// functions let the CFO click into an aggregate number and see the
+// underlying invoices / customers / months that contribute to it.
+//
+// Pattern: every drill-down takes (db, ..., tenantId) like the
+// aggregate functions. The output is a flat list (not a tree) so
+// the UI can render it as a table or paginate it.
+// ────────────────────────────────────────────────────────────────────────
+
+const VALID_AGING_BUCKETS = Object.freeze(['0_30', '31_60', '61_90', '90_plus']);
+const DEFAULT_TREND_MONTHS = 12;
+const MAX_TREND_MONTHS = 36;
+
+function assertAgingBucket(bucket, name) {
+  if (!VALID_AGING_BUCKETS.includes(bucket)) {
+    throw new ValueError(
+      `${name} must be one of: ${VALID_AGING_BUCKETS.join(', ')} (got ${String(bucket)})`,
+    );
+  }
+}
+
+/**
+ * List the invoices that fall into a specific aging bucket as of
+ * `asOfDate`. Drill-down for the getArAging aggregate. Each row
+ * is sorted by days_overdue DESC (oldest first within the bucket).
+ *
+ * @param {'0_30'|'31_60'|'61_90'|'90_plus'} bucket
+ * @returns {Promise<Array<{
+ *   id: number, invoice_number: string, customer_id: number,
+ *   customer_name: string, total_amd: number, paid_amd: number,
+ *   balance_amd: number, due_date: string, days_overdue: number,
+ * }>>}
+ */
+export async function listInvoicesInAgingBucket(
+  db,
+  asOfDate,
+  bucket,
+  tenantId = 0,
+) {
+  assertDate(asOfDate, 'asOfDate');
+  assertAgingBucket(bucket, 'bucket');
+
+  const invResult = await runQuery(
+    db,
+    `SELECT i.id, i.invoice_number, i.customer_id, i.due_date,
+            i.total_amd,
+            COALESCE(c.name, '') AS customer_name
+       FROM finance.invoices i
+       LEFT JOIN finance.customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+      WHERE i.tenant_id = $1
+        AND i.status IN ($2, $3)
+        AND i.due_date < $4
+      ORDER BY julianday($4) - julianday(i.due_date) DESC`,
+    [tenantId, UNPAID_STATUSES[0], UNPAID_STATUSES[1], asOfDate],
+  );
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
+
+  const rows = [];
+  for (const inv of invResult.rows || []) {
+    const total = Number(inv.total_amd);
+    const paid = paidByInvoice.get(Number(inv.id)) || 0;
+    const outstanding = total - paid;
+    if (outstanding <= 0) continue;
+
+    const days = daysBetween(asOfDate, String(inv.due_date));
+    let key;
+    if (days <= 30) key = '0_30';
+    else if (days <= 60) key = '31_60';
+    else if (days <= 90) key = '61_90';
+    else key = '90_plus';
+
+    if (key !== bucket) continue;
+    rows.push({
+      id: Number(inv.id),
+      invoice_number: inv.invoice_number,
+      customer_id: inv.customer_id != null ? Number(inv.customer_id) : null,
+      customer_name: inv.customer_name,
+      total_amd: roundAmd(total),
+      paid_amd: roundAmd(paid),
+      balance_amd: roundAmd(outstanding),
+      due_date: String(inv.due_date),
+      days_overdue: days,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Monthly revenue trend for the last `months` months (including
+ * the current month). Drill-down for getMonthlyRevenue: instead
+ * of one month at a time, get the trend as a single array.
+ *
+ * Ordered chronologically (oldest first). The current month is
+ * always the last entry, even if its invoices are not yet due.
+ *
+ * @param {number} [months=12] — how many months back to include
+ * @returns {Promise<Array<{
+ *   year_month: string, invoice_count: number,
+ *   total_billed_amd: number, total_paid_amd: number,
+ *   total_outstanding_amd: number,
+ * }>>}
+ */
+export async function listMonthlyRevenueTrend(
+  db,
+  months = DEFAULT_TREND_MONTHS,
+  tenantId = 0,
+) {
+  if (!Number.isInteger(months) || months < 1 || months > MAX_TREND_MONTHS) {
+    throw new ValueError(`months must be 1-${MAX_TREND_MONTHS} (got ${String(months)})`);
+  }
+  // Compute the (year, month) tuples for the last N months,
+  // starting from the current month and walking backwards.
+  const now = new Date();
+  const tuples = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    tuples.push({
+      year: d.getFullYear(),
+      month: d.getMonth() + 1,
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+    });
+  }
+  // Fetch all billable invoices for the trend window in one
+  // query (the (year, month) tuples span months - but the
+  // date filter is on issue_date which has a regular index).
+  // We compute each month's totals in JS — small CPU cost,
+  // no extra round-trips.
+  const firstKey = tuples[0].key;
+  const lastKey = tuples[tuples.length - 1].key;
+  const [firstYear, firstMonth] = firstKey.split('-').map(Number);
+  const firstDate = `${firstYear}-${String(firstMonth).padStart(2, '0')}-01`;
+  const [lastYear, lastMonth] = lastKey.split('-').map(Number);
+  const lastDate = new Date(lastYear, lastMonth, 0).toISOString().slice(0, 10);
+
+  const invResult = await runQuery(
+    db,
+    `SELECT id, issue_date, total_amd, status
+       FROM finance.invoices
+      WHERE tenant_id = $1
+        AND status IN ($2, $3, $4)
+        AND issue_date >= $5
+        AND issue_date <= $6`,
+    [
+      tenantId,
+      BILLED_STATUSES[0], BILLED_STATUSES[1], BILLED_STATUSES[2],
+      firstDate, lastDate,
+    ],
+  );
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
+
+  // Initialize per-month buckets
+  const byMonth = new Map();
+  for (const t of tuples) {
+    byMonth.set(t.key, {
+      year_month: t.key,
+      invoice_count: 0,
+      total_billed_amd: 0,
+      total_paid_amd: 0,
+      total_outstanding_amd: 0,
+    });
+  }
+  // Walk the invoices and accumulate into month buckets
+  for (const inv of invResult.rows || []) {
+    const issueDate = String(inv.issue_date);
+    const ym = issueDate.slice(0, 7); // 'YYYY-MM'
+    if (!byMonth.has(ym)) continue;
+    const total = Number(inv.total_amd);
+    const paid = paidByInvoice.get(Number(inv.id)) || 0;
+    const bucket = byMonth.get(ym);
+    bucket.invoice_count += 1;
+    bucket.total_billed_amd += total;
+    bucket.total_paid_amd += Math.min(paid, total);
+    bucket.total_outstanding_amd += Math.max(0, total - paid);
+  }
+  return tuples.map((t) => {
+    const b = byMonth.get(t.key);
+    return {
+      year_month: b.year_month,
+      invoice_count: b.invoice_count,
+      total_billed_amd: roundAmd(b.total_billed_amd),
+      total_paid_amd: roundAmd(b.total_paid_amd),
+      total_outstanding_amd: roundAmd(b.total_outstanding_amd),
+    };
+  });
+}
+
+/**
+ * Revenue + outstanding breakdown for one customer in a date
+ * range. Drill-down for getTopCustomers: instead of "this
+ * customer is in the top 5", see all of the customer's
+ * activity (invoices + payments + aging).
+ *
+ * @param {number} customerId
+ * @param {string} since — YYYY-MM-DD
+ * @param {string} until — YYYY-MM-DD
+ * @returns {Promise<{
+ *   customer: { id, name, hvhh },
+ *   period: { since, until },
+ *   invoice_count: number,
+ *   total_billed_amd: number,
+ *   total_paid_amd: number,
+ *   total_outstanding_amd: number,
+ *   aging: { '0_30': { count, amount }, '31_60': { count, amount },
+ *           '61_90': { count, amount }, '90_plus': { count, amount } },
+ *   invoices: Array<{ id, invoice_number, issue_date, due_date,
+ *                      total_amd, paid_amd, balance_amd, status }>,
+ * }>}
+ */
+export async function getCustomerRevenueBreakdown(
+  db,
+  customerId,
+  since,
+  until,
+  tenantId = 0,
+) {
+  if (!Number.isInteger(customerId) || customerId <= 0) {
+    throw new ValueError('customerId must be a positive integer');
+  }
+  assertDate(since, 'since');
+  assertDate(until, 'until');
+  if (since > until) {
+    throw new ValueError(`since (${since}) must be <= until (${until})`);
+  }
+
+  const custResult = await runQuery(
+    db,
+    `SELECT id, name, hvhh
+       FROM finance.customers
+      WHERE id = $1 AND tenant_id = $2`,
+    [customerId, tenantId],
+  );
+  if (!custResult.rows || custResult.rows.length === 0) {
+    throw new ValueError(`customer ${customerId} not found in tenant ${tenantId}`);
+  }
+  const customer = custResult.rows[0];
+
+  const invResult = await runQuery(
+    db,
+    `SELECT id, invoice_number, issue_date, due_date, total_amd, status
+       FROM finance.invoices
+      WHERE tenant_id = $1 AND customer_id = $2
+        AND issue_date >= $3 AND issue_date <= $4
+        AND status IN ($5, $6, $7)
+      ORDER BY issue_date ASC, id ASC`,
+    [
+      tenantId, customerId, since, until,
+      BILLED_STATUSES[0], BILLED_STATUSES[1], BILLED_STATUSES[2],
+    ],
+  );
+  const paidByInvoice = await buildPaidByInvoice(db, tenantId);
+
+  const aging = {
+    '0_30': { count: 0, amount: 0 },
+    '31_60': { count: 0, amount: 0 },
+    '61_90': { count: 0, amount: 0 },
+    '90_plus': { count: 0, amount: 0 },
+  };
+  const invoices = [];
+  let totalBilled = 0;
+  let totalPaid = 0;
+  let totalOutstanding = 0;
+
+  for (const inv of invResult.rows || []) {
+    const total = Number(inv.total_amd);
+    const paid = paidByInvoice.get(Number(inv.id)) || 0;
+    const balance = total - paid;
+    totalBilled += total;
+    totalPaid += Math.min(paid, total);
+    totalOutstanding += Math.max(0, balance);
+    invoices.push({
+      id: Number(inv.id),
+      invoice_number: inv.invoice_number,
+      issue_date: String(inv.issue_date),
+      due_date: String(inv.due_date),
+      total_amd: roundAmd(total),
+      paid_amd: roundAmd(paid),
+      balance_amd: roundAmd(balance),
+      status: inv.status,
+    });
+    if (balance > 0 && inv.status !== 'paid') {
+      const days = daysBetween(until, String(inv.due_date));
+      let key;
+      if (days <= 30) key = '0_30';
+      else if (days <= 60) key = '31_60';
+      else if (days <= 90) key = '61_90';
+      else key = '90_plus';
+      aging[key].count += 1;
+      aging[key].amount += balance;
+    }
+  }
+  return {
+    customer: {
+      id: Number(customer.id),
+      name: customer.name,
+      hvhh: customer.hvhh ?? null,
+    },
+    period: { since, until },
+    invoice_count: invoices.length,
+    total_billed_amd: roundAmd(totalBilled),
+    total_paid_amd: roundAmd(totalPaid),
+    total_outstanding_amd: roundAmd(totalOutstanding),
+    aging: {
+      '0_30': { count: aging['0_30'].count, amount_amd: roundAmd(aging['0_30'].amount) },
+      '31_60': { count: aging['31_60'].count, amount_amd: roundAmd(aging['31_60'].amount) },
+      '61_90': { count: aging['61_90'].count, amount_amd: roundAmd(aging['61_90'].amount) },
+      '90_plus': { count: aging['90_plus'].count, amount_amd: roundAmd(aging['90_plus'].amount) },
+    },
+    invoices,
+  };
+}

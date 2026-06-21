@@ -50,6 +50,7 @@ function makeMockDb() {
     // stitches the two tables together.
     if (/SELECT[\s\S]*FROM\s+FINANCE\.INVOICES/i.test(s) && /JOIN\s+FINANCE\.CUSTOMERS/i.test(s))
       return 'report-join';
+    if (/^SELECT[\s\S]*FROM\s+FINANCE\.CUSTOMERS/i.test(s)) return 'report-customer';
     if (/SELECT[\s\S]*FROM\s+FINANCE\.PAYMENTS/i.test(s) && /JOIN\s+FINANCE\.INVOICES/i.test(s))
       return 'report-payments-join';
     if (/SELECT[\s\S]*FROM\s+FINANCE\.INVOICES/i.test(s)) return 'report-invoices';
@@ -147,6 +148,8 @@ function makeMockDb() {
           cust_id: cust.id,
         });
       }
+    } else if (kind === 'report-customer') {
+      for (const c of customers.values()) candidateRows.push({ ...c });
     } else if (kind === 'report-invoices') {
       for (const inv of invoices.values()) candidateRows.push({ ...inv });
     } else if (kind === 'report-payments') {
@@ -494,6 +497,9 @@ describe('finance reports', () => {
   let getMonthlyRevenue;
   let getTopCustomers;
   let getVatSummary;
+  let listInvoicesInAgingBucket;
+  let listMonthlyRevenueTrend;
+  let getCustomerRevenueBreakdown;
 
   before(async () => {
     db = makeMockDb();
@@ -503,6 +509,9 @@ describe('finance reports', () => {
     getMonthlyRevenue = mod.getMonthlyRevenue;
     getTopCustomers = mod.getTopCustomers;
     getVatSummary = mod.getVatSummary;
+    listInvoicesInAgingBucket = mod.listInvoicesInAgingBucket;
+    listMonthlyRevenueTrend = mod.listMonthlyRevenueTrend;
+    getCustomerRevenueBreakdown = mod.getCustomerRevenueBreakdown;
   });
 
   // ──────────────────────────────────────────────────────────────────
@@ -1281,6 +1290,127 @@ describe('finance reports', () => {
       assert.equal(out.buckets['0_30'].invoice_count, 1);
       assert.equal(out.buckets['0_30'].amount_amd, 40000);
       assert.equal(out.total_outstanding_amd, 40000);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // listInvoicesInAgingBucket (W92-1 — drill-down for getArAging)
+  // ──────────────────────────────────────────────────────────────────
+  describe('listInvoicesInAgingBucket', () => {
+    test('returns only invoices in the specified bucket', async () => {
+      const localDb = makeMockDb();
+      const custId = await seedCustomer(localDb, { name: 'Acme' });
+      // Three invoices in three different buckets as of 2026-06-20
+      await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-A', issue_date: '2026-05-01', due_date: '2026-06-10', total_amd: 40000, status: 'sent' });
+      await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-B', issue_date: '2026-03-01', due_date: '2026-04-20', total_amd: 80000, status: 'overdue' });
+      await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-C', issue_date: '2025-12-01', due_date: '2026-01-01', total_amd: 120000, status: 'overdue' });
+      const bucket0 = await listInvoicesInAgingBucket(localDb, '2026-06-20', '0_30');
+      assert.equal(bucket0.length, 1);
+      assert.equal(bucket0[0].invoice_number, 'INV-A');
+      assert.equal(bucket0[0].days_overdue, 10);
+      const bucket61 = await listInvoicesInAgingBucket(localDb, '2026-06-20', '61_90');
+      assert.equal(bucket61.length, 1);
+      assert.equal(bucket61[0].invoice_number, 'INV-B');
+      const bucket90 = await listInvoicesInAgingBucket(localDb, '2026-06-20', '90_plus');
+      assert.equal(bucket90.length, 1);
+      assert.equal(bucket90[0].invoice_number, 'INV-C');
+    });
+
+    test('throws ValueError on bad bucket name', async () => {
+      const localDb = makeMockDb();
+      await assert.rejects(
+        listInvoicesInAgingBucket(localDb, '2026-06-20', '15_45'),
+        /bucket must be one of/,
+      );
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // listMonthlyRevenueTrend (W92-1 — drill-down for getMonthlyRevenue)
+  // ──────────────────────────────────────────────────────────────────
+  describe('listMonthlyRevenueTrend', () => {
+    test('returns N monthly buckets (default 12), oldest first', async () => {
+      const localDb = makeMockDb();
+      const trend = await listMonthlyRevenueTrend(localDb, 6);
+      assert.equal(trend.length, 6);
+      // Verify chronological order: each year_month < the next
+      for (let i = 0; i < trend.length - 1; i++) {
+        assert.ok(trend[i].year_month < trend[i + 1].year_month);
+      }
+    });
+
+    test('accumulates invoices into the correct month', async () => {
+      const localDb = makeMockDb();
+      const custId = await seedCustomer(localDb, { name: 'Acme' });
+      // Add an invoice in the current month + one in a previous month
+      const now = new Date();
+      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const prevMonth = `${now.getFullYear()}-${String(now.getMonth()).padStart(2, '0')}`;
+      await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-CURR', issue_date: `${currentMonth}-15`, due_date: `${currentMonth}-28`, total_amd: 100000, status: 'sent' });
+      const prevInvId = await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-PREV', issue_date: `${prevMonth}-10`, due_date: `${prevMonth}-25`, total_amd: 50000, status: 'paid' });
+      await seedPayment(localDb, { invoice_id: prevInvId, amount_amd: 50000 });
+      const trend = await listMonthlyRevenueTrend(localDb, 3);
+      const currentBucket = trend.find((t) => t.year_month === currentMonth);
+      const prevBucket = trend.find((t) => t.year_month === prevMonth);
+      assert.equal(currentBucket.invoice_count, 1);
+      assert.equal(currentBucket.total_billed_amd, 100000);
+      assert.equal(currentBucket.total_outstanding_amd, 100000);
+      assert.equal(prevBucket.invoice_count, 1);
+      assert.equal(prevBucket.total_billed_amd, 50000);
+      assert.equal(prevBucket.total_paid_amd, 50000);
+      assert.equal(prevBucket.total_outstanding_amd, 0);
+    });
+
+    test('throws ValueError on bad months count', async () => {
+      const localDb = makeMockDb();
+      await assert.rejects(listMonthlyRevenueTrend(localDb, 0), /months must be 1-36/);
+      await assert.rejects(listMonthlyRevenueTrend(localDb, 100), /months must be 1-36/);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // getCustomerRevenueBreakdown (W92-1 — drill-down for getTopCustomers)
+  // ──────────────────────────────────────────────────────────────────
+  describe('getCustomerRevenueBreakdown', () => {
+    test('returns the customer + per-invoice breakdown + aging', async () => {
+      const localDb = makeMockDb();
+      const custId = await seedCustomer(localDb, { name: 'Acme Corp', hvhh: '01234567' });
+      const paidInvId = await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-A', issue_date: '2026-01-15', due_date: '2026-02-15', total_amd: 100000, status: 'paid' });
+      await seedInvoice(localDb, { customer_id: custId, invoice_number: 'INV-B', issue_date: '2026-03-15', due_date: '2026-04-15', total_amd: 200000, status: 'overdue' });
+      await seedPayment(localDb, { invoice_id: paidInvId, amount_amd: 100000 });
+      const out = await getCustomerRevenueBreakdown(localDb, 1, '2026-01-01', '2026-06-30');
+      assert.equal(out.customer.id, 1);
+      assert.equal(out.customer.name, 'Acme Corp');
+      assert.equal(out.customer.hvhh, '01234567');
+      assert.equal(out.invoice_count, 2);
+      assert.equal(out.total_billed_amd, 300000);
+      assert.equal(out.total_paid_amd, 100000);
+      assert.equal(out.total_outstanding_amd, 200000);
+      assert.equal(out.invoices.length, 2);
+      assert.equal(out.invoices[0].invoice_number, 'INV-A');
+      assert.equal(out.invoices[1].invoice_number, 'INV-B');
+      // Aging: INV-B is overdue (as of 2026-06-30, due 2026-04-15,
+      // 76 days overdue → 61_90 bucket)
+      assert.equal(out.aging['61_90'].count, 1);
+      assert.equal(out.aging['61_90'].amount_amd, 200000);
+      assert.equal(out.aging['0_30'].count, 0);
+    });
+
+    test('throws ValueError on missing customer', async () => {
+      const localDb = makeMockDb();
+      await assert.rejects(
+        getCustomerRevenueBreakdown(localDb, 999, '2026-01-01', '2026-06-30'),
+        /customer 999 not found/,
+      );
+    });
+
+    test('throws ValueError on bad date range', async () => {
+      const localDb = makeMockDb();
+      const custId = await seedCustomer(localDb, { name: 'X' });
+      await assert.rejects(
+        getCustomerRevenueBreakdown(localDb, custId, '2026-12-31', '2026-01-01'),
+        /since.*must be <= until/,
+      );
     });
   });
 });

@@ -120,6 +120,15 @@ import { getCustomer360 } from './customer360.js';
 import { validateHvhhOnDemand } from './validate-hvhh.js';
 import { getVendor360 } from './vendor360.js';
 import { getDashboard360 } from './dashboard360.js';
+import {
+  // The aggregate functions (getArAging / listOverdueInvoices /
+  // getMonthlyRevenue / getTopCustomers / getVatSummary) are
+  // imported for the dashboard route in the existing code; the
+  // drill-down functions below are wired in W92-1.
+  listInvoicesInAgingBucket,
+  listMonthlyRevenueTrend,
+  getCustomerRevenueBreakdown,
+} from './reports.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
@@ -2883,4 +2892,70 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.status(201).json(out);
     }),
   );
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 reporting drill-downs (W92-1) — the clickable
+  // detail rows behind the dashboard's aggregate numbers.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/reports/ar-aging-bucket?asOfDate=&bucket=
+  //   Drill-down for getArAging: list the actual invoices
+  //   that fall into a specific aging bucket (0_30, 31_60,
+  //   61_90, 90_plus). Sorted by days_overdue DESC.
+  app.get('/api/finance/reports/ar-aging-bucket', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const asOfDate = String(req.query.asOfDate ?? '');
+      const bucket = String(req.query.bucket ?? '');
+      const items = await listInvoicesInAgingBucket(pgAdapter, asOfDate, bucket, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/reports/revenue-trend?months=
+  //   Drill-down for getMonthlyRevenue: revenue trend for
+  //   the last N months (default 12, max 36). Ordered
+  //   chronologically.
+  app.get('/api/finance/reports/revenue-trend', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const months = req.query.months ? Number(req.query.months) : 12;
+      const items = await listMonthlyRevenueTrend(pgAdapter, months, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/reports/customer-breakdown/:id?since=&until=
+  //   Drill-down for getTopCustomers: per-invoice breakdown
+  //   for one customer in a date range. Returns the
+  //   customer's profile, billing totals, aging buckets,
+  //   and per-invoice detail.
+  app.get('/api/finance/reports/customer-breakdown/:id', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const customerId = Number(req.params.id);
+      const since = String(req.query.since ?? '');
+      const until = String(req.query.until ?? '');
+      const out = await getCustomerRevenueBreakdown(pgAdapter, customerId, since, until, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
 }
