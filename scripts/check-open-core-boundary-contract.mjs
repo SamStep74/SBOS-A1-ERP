@@ -182,10 +182,20 @@ for (const file of repoFileList.filter(isSourceBoundaryFile).filter(isTextFile))
   }
   const text = readRepoFile(file);
   const lines = text.split(/\r?\n/);
+  // Files that legitimately reference the org as part of their
+  // meta-documentation content (not as source identifiers). Add new
+  // entries sparingly — every exemption loosens the contract.
+  const exemptedBrandFiles = new Set([
+    'AGENTS.md',  // cross-repo agent guide — references the armosphera org
+    '.github/workflows/karpathy-evals.yml',  // disabled workflow — references the armosphera repos it would monitor
+    'scripts/health.sh',  // cross-link-sweep harness — needs the GH org name to query
+  ]);
+
   lines.forEach((line, index) => {
     const isStableProtocolException =
       file === 'server/l10n-am/einvoice/einvoice.js' && line.trim() === stableEInvoiceNamespaceLine;
-    if (!isStableProtocolException && forbiddenBrandPattern.test(line)) {
+    const isExemptedBrandFile = exemptedBrandFiles.has(file);
+    if (!isStableProtocolException && !isExemptedBrandFile && forbiddenBrandPattern.test(line)) {
       brandLeaks.push(`${file}:${index + 1}`);
     }
   });

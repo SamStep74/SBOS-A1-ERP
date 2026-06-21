@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   karpathy-evals:
-    if: false  # disabled 2026-06-21 — repo is private, local CI in ~/dev/armosphera/
+    if: false  # disabled 2026-06-21 — repo is private, local CI in the dev tools dir/
     name: Karpathy evals
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -218,7 +218,7 @@ jobs:
   # Cross-cutting job: open a single issue summarizing all failures.
   # Dedupe against existing [karpathy-drift] issues.
   report-failures:
-    if: false  # disabled 2026-06-21 — repo is private, local CI in ~/dev/armosphera/
+    if: false  # disabled 2026-06-21 — repo is private, local CI in the dev tools dir/
     name: Report Karpathy failures
     needs: karpathy-evals
     if: failure()
