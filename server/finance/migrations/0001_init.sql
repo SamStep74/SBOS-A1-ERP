@@ -17,6 +17,7 @@ CREATE TABLE finance.customers (
   name            TEXT NOT NULL,
   hvhh            TEXT,                        -- Armenian tax ID, nullable
   address         TEXT,
+  email           TEXT,                        -- contact email, nullable
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

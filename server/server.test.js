@@ -47,7 +47,7 @@ function makeFinanceDb() {
     CREATE TABLE finance.customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id INTEGER NOT NULL DEFAULT 0,
-      name TEXT NOT NULL, hvhh TEXT, address TEXT,
+      name TEXT NOT NULL, hvhh TEXT, address TEXT, email TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -163,6 +163,48 @@ async function get(server, path) {
   const port = server.address().port;
   const url = `http://127.0.0.1:${port}${path}`;
   const res = await globalThis.fetch(url);
+  const text = await res.text();
+  let body = text;
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  return { status: res.status, body, contentType, headers: res.headers };
+}
+
+async function postJson(server, path, payload, extraHeaders = {}) {
+  const port = server.address().port;
+  const url = `http://127.0.0.1:${port}${path}`;
+  const res = await globalThis.fetch(url, {
+    method: 'POST',
+    headers: Object.assign({ 'content-type': 'application/json' }, extraHeaders),
+    body: JSON.stringify(payload || {}),
+  });
+  const text = await res.text();
+  let body = text;
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  return { status: res.status, body, contentType, headers: res.headers };
+}
+
+async function patchJson(server, path, payload, extraHeaders = {}) {
+  const port = server.address().port;
+  const url = `http://127.0.0.1:${port}${path}`;
+  const res = await globalThis.fetch(url, {
+    method: 'PATCH',
+    headers: Object.assign({ 'content-type': 'application/json' }, extraHeaders),
+    body: JSON.stringify(payload || {}),
+  });
   const text = await res.text();
   let body = text;
   const contentType = res.headers.get('content-type') || '';
@@ -342,6 +384,92 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
       body && body.error === 'not_found',
       `expected error=not_found, got ${JSON.stringify(body)}`,
     );
+  });
+
+  // ─── Write routes (the next wave) ───
+
+  test('17. POST /api/finance/customers creates a customer (201, returns row)', async () => {
+    const { status, body } = await postJson(server, '/api/finance/customers', {
+      name: 'Acme LLC',
+      hvhh: '12345678',
+      address: 'Yerevan',
+      email: 'ar@acme.am',
+    });
+    assert.equal(status, 201);
+    assert.equal(body.name, 'Acme LLC');
+    assert.equal(body.hvhh, '12345678');
+    assert.equal(body.tenant_id, 0);
+    assert.ok(Number.isInteger(body.id) && body.id > 0);
+  });
+
+  test('18. POST /api/finance/customers with invalid hvhh returns 400', async () => {
+    const { status, body } = await postJson(server, '/api/finance/customers', {
+      name: 'Bad',
+      hvhh: '12',
+    });
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_request');
+  });
+
+  test('19. PATCH /api/finance/customers/:id updates the customer (200)', async () => {
+    const created = await postJson(server, '/api/finance/customers', { name: 'Original' });
+    assert.equal(created.status, 201);
+    const id = created.body.id;
+    const { status, body } = await patchJson(server, `/api/finance/customers/${id}`, {
+      name: 'Renamed',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.name, 'Renamed');
+  });
+
+  test('20. PATCH /api/finance/customers/:id with non-numeric id returns 404', async () => {
+    const { status, body } = await patchJson(server, '/api/finance/customers/abc', {
+      name: 'X',
+    });
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
+  test('21. PATCH /api/finance/customers/:id for cross-tenant id returns 404', async () => {
+    // Create a customer (tenant 0), then try to PATCH it with a different
+    // tenant scope. The route's readTenant() picks up X-Tenant-Id.
+    const created = await postJson(server, '/api/finance/customers', { name: 'Tenant-0 row' });
+    const id = created.body.id;
+    const { status, body } = await patchJson(
+      server,
+      `/api/finance/customers/${id}`,
+      { name: 'Should fail' },
+      { 'X-Tenant-Id': '7' },
+    );
+    assert.equal(status, 404);
+    assert.equal(body.error, 'not_found');
+  });
+
+  test('22. POST /api/finance/invoices creates an invoice (201, status=draft)', async () => {
+    // First create a customer to reference.
+    const c = await postJson(server, '/api/finance/customers', { name: 'Inv Cust' });
+    const customerId = c.body.id;
+    const { status, body } = await postJson(server, '/api/finance/invoices', {
+      customer_id: customerId,
+      invoice_number: 'INV-2026-0001',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [{ description: 'Service', quantity: 1, unit_price_amd: 100000 }],
+    });
+    assert.equal(status, 201);
+    assert.equal(body.status, 'draft');
+    assert.equal(body.total_amd, 100000);
+  });
+
+  test('23. POST /api/finance/invoices with bad body (no customer) returns 400', async () => {
+    const { status, body } = await postJson(server, '/api/finance/invoices', {
+      invoice_number: 'INV-bad',
+      issue_date: '2026-06-21',
+      due_date: '2026-07-21',
+      lines: [],
+    });
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_request');
   });
 });
 

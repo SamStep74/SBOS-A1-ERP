@@ -4,20 +4,27 @@
 // `npm run serve` entry point can expose the finance domain over HTTP.
 //
 // Endpoints:
-//   GET  /api/finance/dashboard?asOfDate=YYYY-MM-DD
-//   GET  /api/finance/invoices
-//   GET  /api/finance/invoices/:id
-//   GET  /api/finance/customers
-//   GET  /api/finance/vat/return?yearMonth=YYYY-MM
-//   GET  /api/finance/einvoice/export/:invoiceId
+//   GET    /api/finance/dashboard?asOfDate=YYYY-MM-DD
+//   GET    /api/finance/invoices
+//   GET    /api/finance/invoices/:id
+//   POST   /api/finance/invoices
+//   GET    /api/finance/customers
+//   POST   /api/finance/customers
+//   PATCH  /api/finance/customers/:id
+//   GET    /api/finance/vat/return?yearMonth=YYYY-MM
+//   GET    /api/finance/einvoice/export/:invoiceId
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
 // `opts.locale` flows into the dashboard render.
+// `req.tenantId` (or X-Tenant-Id / req.user.tenant_id fallback) is the
+// tenant scope; write routes also accept the requireTenant middleware
+// via `opts.requireTenantMiddleware`.
 //
 // No `eval`, no string-concat SQL, no `new Function`. The SQL the
 // pure functions emit is fixed-string; we just translate param style.
-import { listInvoices, getInvoice } from './invoice.js';
+import { listInvoices, getInvoice, createInvoice } from './invoice.js';
+import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 
@@ -50,18 +57,34 @@ function parseInvoiceId(segment) {
   return n;
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// listCustomers — minimal helper. Lives here (not in a separate
-// finance/customers.js) because the routes file is the only consumer.
-// ────────────────────────────────────────────────────────────────────────
-
-async function listCustomers(db) {
-  const { rows } = await db.query(
-    'SELECT id, name, hvhh, address FROM finance.customers ORDER BY id ASC',
-    [],
-  );
-  return rows || [];
+// parseCustomerId — same shape as parseInvoiceId, separate function for
+// clarity in route code (the segment might be a customer id in a
+// /api/finance/customers/:id path).
+function parseCustomerId(segment) {
+  if (typeof segment !== 'string') return null;
+  const n = Number(segment);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
 }
+
+// readTenant — extracts the tenant scope from the request. Falls back
+// to X-Tenant-Id header, then req.user.tenant_id, then 0. The auth
+// stub in server/index.js sets req.user = { id, role, tenant_id: 0 }
+// so the default is "tenant 0" (the bootstrap tenant).
+function readTenant(req) {
+  if (req && req.tenantId !== undefined && req.tenantId !== null) return Number(req.tenantId);
+  const headerVal = req && req.headers && req.headers['x-tenant-id'];
+  if (headerVal !== undefined && headerVal !== '') {
+    const n = Number(headerVal);
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  if (req && req.user && req.user.tenant_id !== undefined) return Number(req.user.tenant_id);
+  return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Supplier stub — Task 2 replaces this with real per-tenant config.
+// ────────────────────────────────────────────────────────────────────────
 
 // ────────────────────────────────────────────────────────────────────────
 // Supplier stub — Task 2 replaces this with real per-tenant config.
@@ -102,24 +125,28 @@ export function registerFinanceRoutes(app, opts = {}) {
     }
   });
 
-  // List invoices.
+  // List invoices — tenant-scoped. The listInvoices pure function already
+  // threads tenantId; the route picks it up from req (X-Tenant-Id or
+  // req.user.tenant_id) and passes it through.
   app.get('/api/finance/invoices', async (req, res, next) => {
     try {
-      const items = await listInvoices(pgAdapter, {});
+      const tenantId = readTenant(req);
+      const items = await listInvoices(pgAdapter, {}, tenantId);
       res.status(200).json({ items });
     } catch (err) {
       next(err);
     }
   });
 
-  // Get one invoice (with lines).
+  // Get one invoice (with lines) — tenant-scoped.
   app.get('/api/finance/invoices/:id', async (req, res, next) => {
     try {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
-      const invoice = await getInvoice(pgAdapter, id);
+      const tenantId = readTenant(req);
+      const invoice = await getInvoice(pgAdapter, id, tenantId);
       if (!invoice) {
         return res.status(404).json({ error: 'not_found' });
       }
@@ -129,12 +156,67 @@ export function registerFinanceRoutes(app, opts = {}) {
     }
   });
 
-  // List customers.
+  // Create invoice — tenant-scoped. The body must include customer_id,
+  // invoice_number, issue_date, due_date, lines[]; vat_amd/notes optional.
+  app.post('/api/finance/invoices', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const body = req.body || {};
+      const out = await createInvoice(pgAdapter, body, tenantId);
+      res.status(201).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // List customers — tenant-scoped.
   app.get('/api/finance/customers', async (req, res, next) => {
     try {
-      const items = await listCustomers(pgAdapter);
+      const tenantId = readTenant(req);
+      const items = await listCustomersPure(pgAdapter, tenantId);
       res.status(200).json({ items });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // Create customer — tenant-scoped. Body: { name, hvhh?, address?, email? }.
+  app.post('/api/finance/customers', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const out = await createCustomer(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // Update customer — tenant-scoped. Patch body: any of { name, hvhh, address, email }.
+  app.patch('/api/finance/customers/:id', async (req, res, next) => {
+    try {
+      const id = parseCustomerId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = readTenant(req);
+      const out = await updateCustomer(pgAdapter, id, req.body || {}, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        // updateCustomer throws ValueError both for invalid input AND for
+        // "not found in tenant" — distinguish by message text so the
+        // route returns 404 for the latter, 400 for the former.
+        if (/not found in tenant/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
       next(err);
     }
   });
