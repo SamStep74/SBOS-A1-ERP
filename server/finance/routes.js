@@ -115,8 +115,9 @@ import {
   voidInvoice,
 } from './invoice.js';
 import { recordPayment, reconcileInvoice } from './payment.js';
-import { createCustomer, updateCustomer, listCustomers as listCustomersPure } from './customer.js';
+import { createCustomer, updateCustomer, listCustomers as listCustomersPure, getCustomer } from './customer.js';
 import { getCustomer360 } from './customer360.js';
+import { validateHvhhOnDemand } from './validate-hvhh.js';
 import { getVendor360 } from './vendor360.js';
 import { getDashboard360 } from './dashboard360.js';
 import { computeAndCloseVatPeriod } from './vatLedger.js';
@@ -140,6 +141,7 @@ import {
 } from './inventory.js';
 import {
   createVendor,
+  getVendor,
   listVendors,
   createPurchaseOrder,
   confirmPurchaseOrder,
@@ -626,6 +628,75 @@ export function registerFinanceRoutes(app, opts = {}) {
         if (err && err.name === 'ValueError' && /not found in tenant/.test(err.message)) {
           return res.status(404).json({ error: 'not_found', message: err.message });
         }
+        next(err);
+      }
+    },
+  );
+
+  // Customer HVVH on-demand validation — calls the A1-Validator HTTP
+  // service to verify the customer's HVVH is still valid. Useful for
+  // ad-hoc compliance checks ("is customer 42 still good?"). Same
+  // fail-soft 3-tier as the create-time wrapper; never throws on
+  // invalid TIN (returns ok=false in the body). Returns 200 always
+  // (unless the customer doesn't exist, which is 404).
+  app.post(
+    '/api/finance/customers/:id/validate-hvhh',
+    requireTenant,
+    requirePerm('finance.customer.read'),
+    async (req, res, next) => {
+      try {
+        const id = parseCustomerId(req.params.id);
+        if (id === null) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const tenantId = req.tenantId;
+        const cust = await getCustomer(pgAdapter, id, tenantId);
+        if (!cust) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const result = await validateHvhhOnDemand({ hvhh: cust.hvhh });
+        res.status(200).json({
+          customer_id: id,
+          hvhh: cust.hvhh,
+          ok: result.ok,
+          normalized: result.normalized,
+          error: result.error,
+          _via: result._via,
+          _skipped: result._skipped,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // Vendor HVVH on-demand validation — mirror of customer version.
+  app.post(
+    '/api/finance/vendors/:id/validate-hvhh',
+    requireTenant,
+    requirePerm('finance.vendor.read'),
+    async (req, res, next) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const tenantId = req.tenantId;
+        const vendor = await getVendor(pgAdapter, id, tenantId);
+        if (!vendor) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        const result = await validateHvhhOnDemand({ hvhh: vendor.hvhh });
+        res.status(200).json({
+          vendor_id: id,
+          hvhh: vendor.hvhh,
+          ok: result.ok,
+          normalized: result.normalized,
+          error: result.error,
+          _via: result._via,
+          _skipped: result._skipped,
+        });
+      } catch (err) {
         next(err);
       }
     },

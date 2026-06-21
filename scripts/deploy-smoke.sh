@@ -2264,6 +2264,105 @@ fi
 
 
 echo
+echo "=== STEP 7j: Customer/vendor on-demand validate-hvhh via A1-Validator (v1.0.0) ==="
+# Tests the on-demand validation endpoints:
+#   POST /api/finance/customers/:id/validate-hvhh
+#   POST /api/finance/vendors/:id/validate-hvhh
+# Without A1_VALIDATOR_URL, the wrapper falls back to local regex.
+LOG7J="$TESTDIR/server-7j.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7J" 2>&1 &
+SERVER_PID_7J=$!
+SMOKE_RC=0
+cleanup_7j() { kill -9 $SERVER_PID_7J 2>/dev/null; wait $SERVER_PID_7J 2>/dev/null; }
+trap cleanup_7j EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7j"
+    tail -20 "$LOG7J"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7J=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7J" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7J" ]; then
+    echo "  FAIL: STEP 7j server did not print admin session token"
+    tail -20 "$LOG7J"
+    SMOKE_RC=1
+  else
+    # Setup: create customer + vendor with valid hvhh
+    CUST_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"ValidateCo","hvhh":"00123456"}')
+    CUST_ID=$(echo "$CUST_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+
+    VENDOR_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/vendors" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"code":"VAL-V","name":"ValidateVendor","hvhh":"00123456"}')
+    VENDOR_ID=$(echo "$VENDOR_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+
+    if [ -z "$CUST_ID" ] || [ -z "$VENDOR_ID" ]; then
+      echo "  FAIL: setup incomplete (CUST_ID=$CUST_ID, VENDOR_ID=$VENDOR_ID)"
+      SMOKE_RC=1
+    else
+      # Customer validate-hvhh (valid hvhh → ok=true via local regex fallback)
+      VAL_CUST=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers/$CUST_ID/validate-hvhh" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0")
+      if echo "$VAL_CUST" | grep -q '"ok":true'; then
+        echo "  OK customer validate-hvhh returns ok=true for valid hvhh"
+      else
+        echo "  FAIL: customer validate-hvhh returned: $VAL_CUST"
+        SMOKE_RC=1
+      fi
+
+      # Vendor validate-hvhh (valid hvhh → ok=true)
+      VAL_VENDOR=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/vendors/$VENDOR_ID/validate-hvhh" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0")
+      if echo "$VAL_VENDOR" | grep -q '"ok":true'; then
+        echo "  OK vendor validate-hvhh returns ok=true for valid hvhh"
+      else
+        echo "  FAIL: vendor validate-hvhh returned: $VAL_VENDOR"
+        SMOKE_RC=1
+      fi
+
+      # Mutate customer's hvhh to invalid → validate-now returns ok=false
+      sqlite3 "$DB" "UPDATE customers SET hvhh = 'INVALID_HVVH' WHERE id = $CUST_ID" 2>/dev/null
+      VAL_BAD=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers/$CUST_ID/validate-hvhh" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0")
+      if echo "$VAL_BAD" | grep -q '"ok":false'; then
+        echo "  OK customer validate-hvhh returns ok=false for invalid hvhh (drift detected)"
+      else
+        echo "  FAIL: customer validate-hvhh should return ok=false: $VAL_BAD"
+        SMOKE_RC=1
+      fi
+
+      # 404 for non-existent customer
+      VAL_404=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/customers/99999/validate-hvhh" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7J" -H "X-Tenant-Id: 0")
+      if [ "$VAL_404" = "404" ]; then
+        echo "  OK validate-hvhh returns 404 for non-existent customer"
+      else
+        echo "  FAIL: validate-hvhh non-existent customer returned $VAL_404 (expected 404)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7J 2>/dev/null
+wait $SERVER_PID_7J 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
