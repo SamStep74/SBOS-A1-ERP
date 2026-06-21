@@ -1007,6 +1007,29 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(updateRow, 'expected to find the PATCH audit row by resource_id');
   });
 
+  // ─── Wave 30: create routes also record the new entity id ───
+
+  test('36c. POST /api/finance/customers records audit with resource=customer:<newId> (Wave 30 — closes the Wave 29 create-route gap)', async () => {
+    // Wave 29 only fixed the id-based write routes (PATCH /:id,
+    // POST /:id/void, etc.). The create routes (POST /invoices,
+    // POST /customers) still recorded the literal 'customer:new'.
+    // Wave 30 reads res.locals.createdId (set by the handler
+    // right before res.json) so the create row records the
+    // ACTUAL new id. After this wave, ?resource_id=<newId>
+    // finds BOTH the create row and any subsequent update /
+    // patch / void / payment rows for the same entity.
+    const c = await postJson(server, '/api/finance/customers', { name: 'Wave30Create', hvhh: '22222222' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    // The create row should be findable by resource_id.
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const createRow = body.items.find(
+      (r) => r.resource === `customer:${custId}` && r.action === 'customer.create',
+    );
+    assert.ok(createRow, `expected create row with resource="customer:${custId}", got: ${JSON.stringify(body.items.map((r) => `${r.action}:${r.resource}`))}`);
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {

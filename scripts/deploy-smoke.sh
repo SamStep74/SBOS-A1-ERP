@@ -570,6 +570,73 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5e: Audit create-route resource captures the new id (Wave 30) ==="
+# Wave 30 closes the Wave 29 create-route gap: POST /customers
+# used to record the literal 'customer:new'; now it reads
+# res.locals.createdId (set by the handler) and records
+# 'customer:<newId>'. Test: create a customer, then assert the
+# create audit row's resource field is 'customer:<newId>'
+# (findable via ?resource_id=<newId>).
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave30Create', hvhh: '33333333' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) GET audit filtered by resource_id — the CREATE row should be in there
+    const a = await call('GET', '/api/finance/audit?resource_id=' + custId + '&limit=20', null, tok);
+    if (a.status !== 200) {
+      console.log('  FAIL get audit:', a.status);
+      process.exit(1);
+    }
+    const expected = 'customer:' + custId;
+    const createRow = a.body.items.find(
+      (r) => r.resource === expected && r.action === 'customer.create',
+    );
+    if (!createRow) {
+      console.log('  FAIL create row not found for resource_id=' + custId + ', got: ' +
+        JSON.stringify(a.body.items.map((r) => r.action + ':' + r.resource)));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/audit?resource_id=' + custId + ' returns the CREATE row with resource=\"' + expected + '\"');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  audit create resource_id OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")

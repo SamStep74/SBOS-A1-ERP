@@ -373,6 +373,54 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
   - 1216/1216 tests pass (was 1213; +3 new). Smoke 78
     endpoints + STEP 5b + 5c + 5d all pass. `npm run check`
     clean, boundary 0.
+- **Wave 30 (Audit create-route resource_id — close the Wave 29
+  create-route gap)** — DONE.
+  - The Wave 29 fix made id-based write routes record the actual
+    entity id (`invoice:42` instead of `invoice:id`). It left
+    the create routes (POST /invoices, POST /customers, etc.)
+    recording the literal `'customer:new'` because the new id
+    lives in the response body, not in `req.params.id`. Wave 30
+    closes that gap.
+  - 2 mechanical changes per create handler:
+    1. Each create handler now does
+       `res.locals.createdId = out.id;` right before
+       `res.status(201).json(out);`. The wrap helper reads
+       `res.locals.createdId` when building the audit resource
+       string. On the error path (handler never reached the
+       assignment), the resource falls back to the literal
+       `'X:new'`.
+    2. Each create's resource arg is now a function
+       `(req, res) => res.locals.createdId ? \`X:\${res.locals.createdId}\` : 'X:new'`
+       instead of the static string `'X:new'`.
+  - Backward-compat API extension: `wrapFinanceRoute`'s
+    `resource` arg was (string | `(req) => string`).
+    Wave 30 extends it to `(req, res) => string`. Existing
+    call sites pass `(req) => 'invoice:' + req.params.id`
+    and still work — JS doesn't enforce arity, the unused
+    `res` arg is just ignored. New call sites use the
+    `(req, res)` form to read `res.locals.createdId`.
+  - 25 create routes touched (the original 19 + 6 that
+    the original audit missed: payment.create, stock.{receive,
+    deliver, transfer, adjust}, po.receive).
+  - 1 new test: `server.test.js` 36c — POST /customers
+    records audit with `resource='customer:<newId>'`
+    (findable via `?resource_id=<newId>`). The test asserts
+    the create row is in the response of
+    `GET /api/finance/audit?resource_id=<id>`.
+  - 1 new deploy smoke step (STEP 5e): creates a customer,
+    then GETs `?resource_id=<custId>` and asserts the
+    response includes a row with
+    `resource='customer:<custId>'` AND `action='customer.create'`.
+  - **End-to-end audit loop closed**: with Waves 26 + 28 + 29
+    + 30, you can now answer "what happened to invoice 42?"
+    with `GET /api/finance/audit?resource_id=42` and see
+    EVERY event in the lifecycle: create (Wave 30), update
+    (Wave 29), void, payment, lines replacement, reconcile,
+    etc. The audit log is the authoritative source for
+    compliance + forensics.
+  - 1217/1217 tests pass (was 1216; +1 new). Smoke 86
+    endpoints + STEP 5b + 5c + 5d + 5e all pass.
+    `npm run check` clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See

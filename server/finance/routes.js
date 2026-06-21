@@ -258,10 +258,19 @@ function wrapFinanceRoute(action, resource, handler) {
   //     (the resource is constant per route), OR
   //   - a function (req) => 'invoice:' + req.params.id
   //     (the resource includes the URL parameter — Wave 29
-  //     change so the audit row records the actual entity id).
+  //     change so the audit row records the actual entity id),
+  //     OR
+  //   - a function (req, res) => 'invoice:' + res.locals.createdId
+  //     (the resource includes the new entity id from the
+  //     create response — Wave 30 change so creates also
+  //     record the actual id, not the literal ':new').
+  //
   // The function form lets every id-based write route
   // (PATCH /invoices/:id, POST /invoices/:id/void, etc.)
-  // record 'invoice:42' instead of the literal 'invoice:id'.
+  // record 'invoice:42' instead of the literal 'invoice:id',
+  // and every create route (POST /invoices, POST /customers,
+  // POST /desk/cases/:id/replies, etc.) record
+  // 'invoice:<newId>' instead of 'invoice:new'.
   const resolveResource = typeof resource === 'function'
     ? resource
     : () => resource;
@@ -294,7 +303,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource: resolveResource(req),
+          resource: resolveResource(req, res),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: status,
@@ -314,7 +323,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource: resolveResource(req),
+          resource: resolveResource(req, res),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: res.statusCode,
@@ -393,10 +402,11 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices',
     requireTenant,
     requirePerm('finance.invoice.create'),
-    wrapFinanceRoute('invoice.create', 'invoice:new', async (req, res) => {
+    wrapFinanceRoute('invoice.create', (req, res) => res.locals.createdId ? `invoice:${res.locals.createdId}` : 'invoice:new', async (req, res) => {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await createInvoice(pgAdapter, body, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -424,7 +434,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/payments',
     requireTenant,
     requirePerm('finance.payment.create'),
-    wrapFinanceRoute('payment.create', (req) => `invoice:${req.params.id}:payment`, async (req, res) => {
+    wrapFinanceRoute('payment.create', (req, res) => `invoice:${req.params.id}:payment:${res.locals.createdId}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -432,6 +442,7 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const out = await recordPayment(pgAdapter, { ...body, invoice_id: id }, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -488,9 +499,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/customers',
     requireTenant,
     requirePerm('finance.customer.create'),
-    wrapFinanceRoute('customer.create', 'customer:new', async (req, res) => {
+    wrapFinanceRoute('customer.create', (req, res) => res.locals.createdId ? `customer:${res.locals.createdId}` : 'customer:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCustomer(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -629,9 +641,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/catalog/items',
     requireTenant,
     requirePerm('finance.product.create'),
-    wrapFinanceRoute('product.create', 'product:new', async (req, res) => {
+    wrapFinanceRoute('product.create', (req, res) => res.locals.createdId ? `product:${res.locals.createdId}` : 'product:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCatalogItem(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -650,9 +663,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/warehouses',
     requireTenant,
     requirePerm('finance.warehouse.create'),
-    wrapFinanceRoute('warehouse.create', 'warehouse:new', async (req, res) => {
+    wrapFinanceRoute('warehouse.create', (req, res) => res.locals.createdId ? `warehouse:${res.locals.createdId}` : 'warehouse:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createWarehouse(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -672,9 +686,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/locations',
     requireTenant,
     requirePerm('finance.warehouse.create'),
-    wrapFinanceRoute('location.create', 'location:new', async (req, res) => {
+    wrapFinanceRoute('location.create', (req, res) => res.locals.createdId ? `location:${res.locals.createdId}` : 'location:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createLocation(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -711,9 +726,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/receive',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.receive', 'stock:move:receive', async (req, res) => {
+    wrapFinanceRoute('stock.receive', (req, res) => `stock_move:${res.locals.createdId}:receive`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await receiveStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -721,9 +737,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/deliver',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.deliver', 'stock:move:deliver', async (req, res) => {
+    wrapFinanceRoute('stock.deliver', (req, res) => `stock_move:${res.locals.createdId}:deliver`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await deliverStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -731,9 +748,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/transfer',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.transfer', 'stock:move:transfer', async (req, res) => {
+    wrapFinanceRoute('stock.transfer', (req, res) => `stock_move:${res.locals.createdId}:transfer`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await transferStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -741,9 +759,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/stock/adjust',
     requireTenant,
     requirePerm('finance.stock.move'),
-    wrapFinanceRoute('stock.adjust', 'stock:move:adjust', async (req, res) => {
+    wrapFinanceRoute('stock.adjust', (req, res) => `stock_move:${res.locals.createdId}:adjust`, async (req, res) => {
       const tenantId = req.tenantId;
       const out = await adjustStock(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -764,9 +783,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendors',
     requireTenant,
     requirePerm('finance.vendor.create'),
-    wrapFinanceRoute('vendor.create', 'vendor:new', async (req, res) => {
+    wrapFinanceRoute('vendor.create', (req, res) => res.locals.createdId ? `vendor:${res.locals.createdId}` : 'vendor:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createVendor(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -788,9 +808,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders',
     requireTenant,
     requirePerm('finance.purchase.create'),
-    wrapFinanceRoute('po.create', 'po:new', async (req, res) => {
+    wrapFinanceRoute('po.create', (req, res) => res.locals.createdId ? `purchase_order:${res.locals.createdId}` : 'po:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createPurchaseOrder(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -827,13 +848,14 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/receive',
     requireTenant,
     requirePerm('finance.purchase.receive'),
-    wrapFinanceRoute('po.receive', (req) => `purchase_order:${req.params.id}:receive`, async (req, res) => {
+    wrapFinanceRoute('po.receive', (req, res) => `purchase_order:${req.params.id}:receive:${res.locals.createdId}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
       }
       const tenantId = req.tenantId;
       const out = await receivePurchaseOrder(pgAdapter, id, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -856,7 +878,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills',
     requireTenant,
     requirePerm('finance.bill.create'),
-    wrapFinanceRoute('bill.create', 'bill:new', async (req, res) => {
+    wrapFinanceRoute('bill.create', (req, res) => res.locals.createdId ? `vendor_bill:${res.locals.createdId}` : 'bill:new', async (req, res) => {
       const tenantId = req.tenantId;
       const body = req.body || {};
       const orderId = Number(body.purchase_order_id);
@@ -864,6 +886,7 @@ export function registerFinanceRoutes(app, opts = {}) {
         return res.status(400).json({ error: 'bad_request', message: 'purchase_order_id must be a positive integer' });
       }
       const out = await createVendorBillFromReceipt(pgAdapter, orderId, body, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1204,9 +1227,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/crm/contacts',
     requireTenant,
     requirePerm('crm.contact.create'),
-    wrapFinanceRoute('crm.contact.create', 'crm_contact:new', async (req, res) => {
+    wrapFinanceRoute('crm.contact.create', (req, res) => res.locals.createdId ? `crm_contact:${res.locals.createdId}` : 'crm_contact:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createContact(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1236,9 +1260,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/crm/leads',
     requireTenant,
     requirePerm('crm.lead.create'),
-    wrapFinanceRoute('crm.lead.create', 'crm_lead:new', async (req, res) => {
+    wrapFinanceRoute('crm.lead.create', (req, res) => res.locals.createdId ? `crm_lead:${res.locals.createdId}` : 'crm_lead:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createLead(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1311,9 +1336,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/desk/cases',
     requireTenant,
     requirePerm('desk.case.create'),
-    wrapFinanceRoute('desk.case.create', 'desk_case:new', async (req, res) => {
+    wrapFinanceRoute('desk.case.create', (req, res) => res.locals.createdId ? `desk_case:${res.locals.createdId}` : 'desk_case:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createCase(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1355,7 +1381,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('desk.reply.create'),
     wrapFinanceRoute(
       'desk.reply.create',
-      (req) => `desk_case:${req.params.id}:reply`,
+      (req, res) => `desk_reply:${res.locals.createdId}`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const caseId = Number(req.params.id);
@@ -1417,9 +1443,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/projects',
     requireTenant,
     requirePerm('projects.project.create'),
-    wrapFinanceRoute('projects.project.create', 'project:new', async (req, res) => {
+    wrapFinanceRoute('projects.project.create', (req, res) => res.locals.createdId ? `project:${res.locals.createdId}` : 'project:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createProject(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1475,7 +1502,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/projects/:id/tasks',
     requireTenant,
     requirePerm('projects.task.create'),
-    wrapFinanceRoute('projects.task.create', (req) => `project:${req.params.id}:task:new`, async (req, res) => {
+    wrapFinanceRoute('projects.task.create', (req, res) => `project_task:${res.locals.createdId}`, async (req, res) => {
       const tenantId = req.tenantId;
       const projectId = Number(req.params.id);
       // Inject the project_id from the URL into the input
@@ -1484,6 +1511,7 @@ export function registerFinanceRoutes(app, opts = {}) {
       // not 500).
       const input = { ...(req.body || {}), project_id: projectId };
       const out = await createTask(pgAdapter, input, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1540,7 +1568,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('projects.time.create'),
     wrapFinanceRoute(
       'projects.time.create',
-      (req) => `project_task:${req.params.taskId}:time_entry:new`,
+      (req, res) => `project_time_entry:${res.locals.createdId}`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const taskId = Number(req.params.taskId);
@@ -1613,7 +1641,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('finance.category.create'),
     wrapFinanceRoute(
       'finance.category.create',
-      'catalog_category:new',
+      (req, res) => res.locals.createdId ? `catalog_category:${res.locals.createdId}` : 'catalog_category:new',
       async (req, res) => {
         const tenantId = req.tenantId;
         const out = await createCategory(pgAdapter, req.body || {}, tenantId);
@@ -1705,7 +1733,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('finance.variant.create'),
     wrapFinanceRoute(
       'finance.variant.create',
-      (req) => `catalog_item:${req.params.itemId}:variant:new`,
+      (req, res) => `catalog_variant:${res.locals.createdId}`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const itemId = Number(req.params.itemId);
@@ -1781,9 +1809,10 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/catalog/bundles',
     requireTenant,
     requirePerm('finance.bundle.create'),
-    wrapFinanceRoute('finance.bundle.create', 'catalog_bundle:new', async (req, res) => {
+    wrapFinanceRoute('finance.bundle.create', (req, res) => res.locals.createdId ? `catalog_bundle:${res.locals.createdId}` : 'catalog_bundle:new', async (req, res) => {
       const tenantId = req.tenantId;
       const out = await createBundle(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
@@ -1838,10 +1867,11 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/catalog/bundles/:id/items',
     requireTenant,
     requirePerm('finance.bundle_item.create'),
-    wrapFinanceRoute('finance.bundle_item.create', 'catalog_bundle_item:new', async (req, res) => {
+    wrapFinanceRoute('finance.bundle_item.create', (req, res) => res.locals.createdId ? `catalog_bundle_item:${res.locals.createdId}` : 'catalog_bundle_item:new', async (req, res) => {
       const tenantId = req.tenantId;
       const bundleId = Number(req.params.id);
       const out = await addBundleItem(pgAdapter, bundleId, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
   );
