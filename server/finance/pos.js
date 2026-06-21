@@ -8,7 +8,9 @@
 //   - openShift / listShifts / getShift / closeShift
 //   - addSale / addSaleLine / addPayment
 //
-// Wave 2 (future) scope:
+// Wave 2 (W88-1) scope:
+//   - addRegister / listRegisters / getRegister (completes
+//     the data model: a register is the parent of a shift)
 //   - route wiring + perm keys + smoke checks
 //
 // Wave 3 (future) scope:
@@ -347,6 +349,81 @@ export async function closeShift(db, shiftId, input, tenantId = 0) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Registers
+// ────────────────────────────────────────────────────────────────────────
+
+function validateAddRegisterInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('register input is required');
+  }
+  _assertString(input.code, 'code', { min: 1, max: 64 });
+  _assertString(input.name, 'name', { min: 1, max: 255 });
+  assertOptionalString(input.location, 'location', { max: 255 });
+}
+
+export async function addRegister(db, input, tenantId = 0) {
+  validateAddRegisterInput(input);
+  // Verify uniqueness: code is per-tenant (the migration has a
+  // UNIQUE INDEX pos_registers_tenant_code_idx on (tenant_id,
+  // code)). The pure-function check gives a clean 400 instead
+  // of a 500 from the UNIQUE violation.
+  const existing = await runQuery(
+    db,
+    `SELECT id FROM finance.pos_registers
+      WHERE tenant_id = $1 AND code = $2`,
+    [tenantId, input.code],
+  );
+  if (existing.rows && existing.rows.length > 0) {
+    throw new ValueError(
+      `register with code '${input.code}' already exists in tenant ${tenantId}`,
+    );
+  }
+  const ins = await runQuery(
+    db,
+    `INSERT INTO finance.pos_registers
+       (tenant_id, code, name, location, active)
+     VALUES ($1, $2, $3, $4, 1)
+     RETURNING id`,
+    [tenantId, input.code, input.name, input.location ?? null],
+  );
+  let id;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    id = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    id = Number(lastId.rows[0].id);
+  }
+  return { id };
+}
+
+export async function listRegisters(db, tenantId = 0) {
+  const result = await runQuery(
+    db,
+    `SELECT id, code, name, location, active, created_at, updated_at
+       FROM finance.pos_registers
+      WHERE tenant_id = $1
+      ORDER BY id ASC`,
+    [tenantId],
+  );
+  return result.rows;
+}
+
+export async function getRegister(db, registerId, tenantId = 0) {
+  assertPositiveInt(registerId, 'registerId');
+  const result = await runQuery(
+    db,
+    `SELECT id, code, name, location, active, created_at, updated_at
+       FROM finance.pos_registers
+      WHERE id = $1 AND tenant_id = $2`,
+    [registerId, tenantId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    throw new ValueError(`register ${registerId} not found in tenant ${tenantId}`);
+  }
+  return result.rows[0];
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Sales
 // ────────────────────────────────────────────────────────────────────────
 
@@ -467,6 +544,9 @@ export async function addSaleLine(db, input, tenantId = 0) {
   // Recompute the sale's total_amd by summing all line totals.
   // This keeps total_amd in sync with the line items (the
   // materialized column is a query-speed optimization).
+  // The production schema (0017_pos_basics.sql) does NOT have
+  // an updated_at column on pos_sales (the audit trail is via
+  // created_at + completed_at). The test harness mirrors this.
   await runQuery(
     db,
     `UPDATE finance.pos_sales
@@ -474,8 +554,7 @@ export async function addSaleLine(db, input, tenantId = 0) {
           SELECT COALESCE(SUM(line_total_amd), 0)
             FROM finance.pos_sale_lines
            WHERE sale_id = $1 AND tenant_id = $2
-        ),
-        updated_at = datetime('now')
+        )
       WHERE id = $3 AND tenant_id = $4`,
     [input.sale_id, tenantId, input.sale_id, tenantId],
   );

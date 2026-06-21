@@ -1,4 +1,4 @@
-// Phase 3 POS basics — wave 1 unit tests (schema + pure functions).
+// Phase 3 POS basics — wave 1 + wave 2 unit tests (schema + pure functions).
 // The test harness uses a minimal in-memory sqlite-shaped adapter
 // that mimics the production pgAdapter shape (db.query() returns
 // { rows: [...] }).
@@ -22,6 +22,9 @@ import {
   addSale,
   addSaleLine,
   addPayment,
+  addRegister,
+  listRegisters,
+  getRegister,
   ValueError,
 } from './pos.js';
 
@@ -69,7 +72,6 @@ function makeMemoryDb() {
       tax_amd INTEGER,
       status TEXT NOT NULL DEFAULT 'open',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       completed_at TEXT
     );
     CREATE TABLE pos_sale_lines (
@@ -591,4 +593,61 @@ test('pos: addPayment accepts cash with non-zero change', async () => {
   assert.equal(r.amount_amd, 4500);
   assert.equal(r.tendered_amd, 5000);
   assert.equal(r.change_amd, 500);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Registers (W88-1) — completes the data model: register is
+// the parent of a shift. Without these, a cashier cannot
+// open a shift on a freshly-created register via the API.
+// ────────────────────────────────────────────────────────────────────────
+
+test('pos: addRegister inserts a row + returns the id', async () => {
+  const db = makeMemoryDb();
+  const out = await addRegister(
+    db,
+    { code: 'REG-A', name: 'Front Counter', location: 'Store 1' },
+    0,
+  );
+  assert.equal(typeof out.id, 'number');
+  assert.ok(out.id > 0);
+});
+
+test('pos: addRegister throws ValueError on duplicate code', async () => {
+  const db = makeMemoryDb();
+  await addRegister(db, { code: 'REG-DUP', name: 'First' }, 0);
+  await assert.rejects(
+    addRegister(db, { code: 'REG-DUP', name: 'Second' }, 0),
+    /already exists/,
+  );
+});
+
+test('pos: addRegister throws ValueError when required fields missing', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    addRegister(db, { name: 'No Code' }, 0),
+    /code must be a string/,
+  );
+  await assert.rejects(
+    addRegister(db, { code: 'NO-NAME' }, 0),
+    /name must be a string/,
+  );
+});
+
+test('pos: listRegisters returns all registers for the tenant (ordered by id ASC)', async () => {
+  const db = makeMemoryDb();
+  await addRegister(db, { code: 'REG-1', name: 'First' }, 0);
+  await addRegister(db, { code: 'REG-2', name: 'Second' }, 0);
+  const rows = await listRegisters(db, 0);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].code, 'REG-1');
+  assert.equal(rows[1].code, 'REG-2');
+});
+
+test('pos: getRegister returns the register or throws ValueError', async () => {
+  const db = makeMemoryDb();
+  const out = await addRegister(db, { code: 'REG-G', name: 'Get' }, 0);
+  const r = await getRegister(db, out.id, 0);
+  assert.equal(r.code, 'REG-G');
+  assert.equal(r.active, 1);
+  await assert.rejects(getRegister(db, 999, 0), /register 999 not found in tenant 0/);
 });

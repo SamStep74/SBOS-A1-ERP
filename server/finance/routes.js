@@ -80,6 +80,16 @@
 //   GET    /api/finance/catalog/bundles/:id
 //   GET    /api/finance/catalog/bundles/:id/items
 //   POST   /api/finance/catalog/bundles/:id/items
+//   GET    /api/finance/pos/registers           (Phase 3 W88-1)
+//   POST   /api/finance/pos/registers
+//   GET    /api/finance/pos/registers/:id
+//   GET    /api/finance/pos/shifts
+//   POST   /api/finance/pos/shifts
+//   GET    /api/finance/pos/shifts/:id
+//   POST   /api/finance/pos/shifts/:id/close
+//   POST   /api/finance/pos/sales
+//   POST   /api/finance/pos/sales/:id/lines
+//   POST   /api/finance/pos/sales/:id/payments
 //
 // All routes accept `opts.pgAdapter` from createApp({ pgAdapter }) —
 // the pg-style adapter is what the finance pure functions speak.
@@ -174,6 +184,18 @@ import {
   addBundleItem,
   listBundleItems,
 } from './catalog.js';
+import {
+  openShift,
+  listShifts,
+  getShift,
+  closeShift,
+  addSale,
+  addSaleLine,
+  addPayment,
+  addRegister,
+  listRegisters,
+  getRegister,
+} from './pos.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -2287,6 +2309,188 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const bundleId = Number(req.params.id);
       const out = await addBundleItem(pgAdapter, bundleId, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 POS basics (W88-1) — register / shift / sale / line /
+  // payment endpoints. The pure functions in server/finance/pos.js
+  // own all the validation + state-machine guards (open → closed
+  // for shifts; open → completed | voided for sales). The routes
+  // are thin wrappers that:
+  //   - inject req.tenantId
+  //   - convert "not found in tenant" ValueErrors to 404
+  //   - convert other ValueErrors (validation failures, state-
+  //     machine guards, duplicate codes) to 400
+  //   - record the action in finance.audit (write routes only)
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/pos/registers
+  //   List registers for the caller's tenant. Ordered by id ASC.
+  app.get('/api/finance/pos/registers', requireTenant, requirePerm('pos.cash.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const items = await listRegisters(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/pos/registers
+  //   Create a new register. Body: { code, name, location? }.
+  //   code + name are required; location is optional. code is
+  //   unique per tenant.
+  app.post(
+    '/api/finance/pos/registers',
+    requireTenant,
+    requirePerm('pos.session.open'),
+    wrapFinanceRoute('pos.session.open', (req, res) => res.locals.createdId ? `pos_register:${res.locals.createdId}` : 'pos_register:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await addRegister(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/pos/registers/:id
+  //   Get a single register. Returns 404 if missing or
+  //   cross-tenant (the pure function throws ValueError on
+  //   "not found in tenant").
+  app.get('/api/finance/pos/registers/:id', requireTenant, requirePerm('pos.cash.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const registerId = Number(req.params.id);
+      const item = await getRegister(pgAdapter, registerId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/pos/shifts
+  //   List shifts for the caller's tenant. Optional filters:
+  //   ?register_id=N, ?status=open|closed. Ordered by id DESC.
+  app.get('/api/finance/pos/shifts', requireTenant, requirePerm('pos.cash.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const registerId = req.query.register_id ? Number(req.query.register_id) : null;
+      const status = req.query.status ?? null;
+      const items = await listShifts(pgAdapter, tenantId, { registerId, status });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/pos/shifts
+  //   Open a new shift on a register. Body: { register_id,
+  //   opened_by, opening_cash_amd? }. register_id + opened_by
+  //   are required. Returns 400 if the register is missing,
+  //   retired, or already has an open shift.
+  app.post(
+    '/api/finance/pos/shifts',
+    requireTenant,
+    requirePerm('pos.session.open'),
+    wrapFinanceRoute('pos.session.open', (req, res) => res.locals.createdId ? `pos_shift:${res.locals.createdId}` : 'pos_shift:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await openShift(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/pos/shifts/:id
+  //   Get a single shift. Returns 404 if missing or
+  //   cross-tenant.
+  app.get('/api/finance/pos/shifts/:id', requireTenant, requirePerm('pos.cash.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const shiftId = Number(req.params.id);
+      const item = await getShift(pgAdapter, shiftId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/pos/shifts/:id/close
+  //   Close a shift. Body: { closed_by, closing_cash_amd? }.
+  //   Returns 400 if the shift is already closed (state-
+  //   machine guard open → closed).
+  app.post(
+    '/api/finance/pos/shifts/:id/close',
+    requireTenant,
+    requirePerm('pos.session.close'),
+    wrapFinanceRoute('pos.session.close', (req) => `pos_shift:${req.params.id}:close`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const shiftId = Number(req.params.id);
+      const out = await closeShift(pgAdapter, shiftId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/pos/sales
+  //   Create a new sale under an open shift. Body: {
+  //   shift_id, register_id, cashier_id, customer_id? }.
+  //   shift_id + register_id + cashier_id are required.
+  //   The shift must exist + be 'open' + match register_id.
+  app.post(
+    '/api/finance/pos/sales',
+    requireTenant,
+    requirePerm('pos.sale.create'),
+    wrapFinanceRoute('pos.sale.create', (req, res) => res.locals.createdId ? `pos_sale:${res.locals.createdId}` : 'pos_sale:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await addSale(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // POST /api/finance/pos/sales/:id/lines
+  //   Add a line item to an open sale. Body: { sale_id?,
+  //   catalog_item_id, quantity, unit_price_amd }. sale_id
+  //   is injected from the URL (the URL value wins). The
+  //   sale must be 'open'; the catalog item must exist.
+  //   Recomputes the sale's total_amd on success.
+  app.post(
+    '/api/finance/pos/sales/:id/lines',
+    requireTenant,
+    requirePerm('pos.sale.create'),
+    wrapFinanceRoute('pos.sale.create', (req, res) => `pos_sale:${req.params.id}:line:${res.locals.createdId}`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const body = { ...(req.body || {}), sale_id: saleId };
+      const out = await addSaleLine(pgAdapter, body, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // POST /api/finance/pos/sales/:id/payments
+  //   Add a payment to an open sale. Body: { sale_id?,
+  //   payment_method, amount_amd, tendered_amd,
+  //   change_amd?, reference? }. sale_id is injected from
+  //   the URL. payment_method must be cash | card | mobile
+  //   | bank_transfer | other. tendered_amd >= amount_amd;
+  //   change_amd must be 0 for non-cash payments.
+  app.post(
+    '/api/finance/pos/sales/:id/payments',
+    requireTenant,
+    requirePerm('pos.sale.create'),
+    wrapFinanceRoute('pos.sale.create', (req, res) => `pos_sale:${req.params.id}:payment:${res.locals.createdId}`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const saleId = Number(req.params.id);
+      const body = { ...(req.body || {}), sale_id: saleId };
+      const out = await addPayment(pgAdapter, body, tenantId);
       res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
