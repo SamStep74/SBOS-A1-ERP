@@ -1,4 +1,4 @@
--- 0009_replenishment.sql
+-- 0019_replenishment.sql
 -- Adds the `reorder_point` field to catalog_items so the replenishment
 -- report can flag items whose total stock (across all locations) is
 -- below the operator-defined threshold.

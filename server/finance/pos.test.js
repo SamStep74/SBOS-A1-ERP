@@ -1,4 +1,4 @@
-// Phase 3 POS basics — wave 1 + wave 2 unit tests (schema + pure functions).
+// Phase 3 POS basics — wave 1 + wave 2 + wave 3 unit tests (schema + pure functions).
 // The test harness uses a minimal in-memory sqlite-shaped adapter
 // that mimics the production pgAdapter shape (db.query() returns
 // { rows: [...] }).
@@ -25,6 +25,10 @@ import {
   addRegister,
   listRegisters,
   getRegister,
+  completeSale,
+  voidSale,
+  refundSale,
+  listRefunds,
   ValueError,
 } from './pos.js';
 
@@ -94,6 +98,16 @@ function makeMemoryDb() {
       tendered_amd INTEGER NOT NULL,
       change_amd INTEGER NOT NULL DEFAULT 0,
       reference TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE pos_refunds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      sale_id INTEGER NOT NULL,
+      payment_method TEXT NOT NULL,
+      amount_amd INTEGER NOT NULL,
+      reason TEXT,
+      created_by INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE catalog_items (
@@ -650,4 +664,323 @@ test('pos: getRegister returns the register or throws ValueError', async () => {
   assert.equal(r.code, 'REG-G');
   assert.equal(r.active, 1);
   await assert.rejects(getRegister(db, 999, 0), /register 999 not found in tenant 0/);
+});
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — addSale re-validates the customer's HVVH at
+// sale-create time. Same fail-soft pattern as customer + vendor +
+// invoice + contact + lead. Drift detection: the customer's HVVH
+// could have become invalid since the customer was created.
+// ────────────────────────────────────────────────────────────────────────
+
+async function makeCustomerWithHvhh(db, name, hvhh) {
+  const stmt = db._db.prepare(
+    `INSERT INTO customers (tenant_id, name, hvhh) VALUES (0, ?, ?) RETURNING id`,
+  );
+  const r = stmt.get(name, hvhh);
+  return { id: Number(r.id) };
+}
+
+test('addSale: customer with valid 8-digit HVVH → sale created (happy path)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const cust = await makeCustomerWithHvhh(db, 'GoodCo', '00123456');
+  const out = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, customer_id: cust.id, cashier_id: 1 },
+    0,
+  );
+  assert.ok(Number.isInteger(out.id) && out.id > 0);
+});
+
+test('addSale: customer with invalid 9-digit HVVH → ValueError (drift detection)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  // Create customer with valid hvhh, then mutate to invalid to simulate drift
+  const cust = await makeCustomerWithHvhh(db, 'GoodCo', '00123456');
+  db._db.prepare('UPDATE customers SET hvhh = ? WHERE id = ?').run('NOT_AN_HVVH', cust.id);
+  await assert.rejects(
+    addSale(
+      db,
+      { shift_id: shift.id, register_id: reg.id, customer_id: cust.id, cashier_id: 1 },
+      0,
+    ),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('addSale: customer with no HVVH (walk-in customer) → sale created', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const cust = await makeCustomer(db, 'NoHvhhCo'); // makeCustomer doesn't set hvhh
+  const out = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, customer_id: cust.id, cashier_id: 1 },
+    0,
+  );
+  assert.ok(Number.isInteger(out.id) && out.id > 0);
+});
+
+test('addSale: customer_id=null (anonymous walk-in) → sale created without A1-Validator check', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const out = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, customer_id: null, cashier_id: 1 },
+    0,
+  );
+  assert.ok(Number.isInteger(out.id) && out.id > 0);
+});
+// ────────────────────────────────────────────────────────────────────────
+// Sale lifecycle: complete / void / refund (W89-1)
+// ────────────────────────────────────────────────────────────────────────
+
+test('pos: completeSale flips open → completed + sets completed_at', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  const out = await completeSale(db, sale.id, 0);
+  assert.equal(out.id, sale.id);
+  const refreshed = db._db.prepare('SELECT status, completed_at FROM pos_sales WHERE id = ?').get(sale.id);
+  assert.equal(refreshed.status, 'completed');
+  assert.ok(refreshed.completed_at != null);
+});
+
+test('pos: completeSale throws ValueError on already-completed sale', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await completeSale(db, sale.id, 0);
+  await assert.rejects(
+    completeSale(db, sale.id, 0),
+    /already completed/,
+  );
+});
+
+test('pos: voidSale flips open → voided', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  const out = await voidSale(db, sale.id, { voided_by: 1 }, 0);
+  assert.equal(out.id, sale.id);
+  const refreshed = db._db.prepare('SELECT status FROM pos_sales WHERE id = ?').get(sale.id);
+  assert.equal(refreshed.status, 'voided');
+});
+
+test('pos: voidSale throws ValueError on completed sale (must use refundSale)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await completeSale(db, sale.id, 0);
+  await assert.rejects(
+    voidSale(db, sale.id, { voided_by: 1 }, 0),
+    /use refundSale to refund a completed sale/,
+  );
+});
+
+test('pos: voidSale throws ValueError on already-voided sale', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await voidSale(db, sale.id, { voided_by: 1 }, 0);
+  await assert.rejects(
+    voidSale(db, sale.id, { voided_by: 1 }, 0),
+    /already voided/,
+  );
+});
+
+test('pos: voidSale does NOT insert a pos_refunds row (refund-only)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await voidSale(db, sale.id, { voided_by: 1 }, 0);
+  const refunds = await listRefunds(db, 0);
+  assert.equal(refunds.length, 0);
+});
+
+test('pos: refundSale inserts pos_refunds + flips completed → voided', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await completeSale(db, sale.id, 0);
+  const out = await refundSale(
+    db,
+    sale.id,
+    {
+      refunded_by: 1,
+      amount_amd: 3000,
+      payment_method: 'cash',
+      reason: 'customer changed mind',
+    },
+    0,
+  );
+  assert.ok(Number.isInteger(out.id) && out.id > 0);
+  const refreshed = db._db.prepare('SELECT status FROM pos_sales WHERE id = ?').get(sale.id);
+  assert.equal(refreshed.status, 'voided');
+  const refunds = await listRefunds(db, 0, { saleId: sale.id });
+  assert.equal(refunds.length, 1);
+  assert.equal(refunds[0].amount_amd, 3000);
+  assert.equal(refunds[0].payment_method, 'cash');
+  assert.equal(refunds[0].reason, 'customer changed mind');
+});
+
+test('pos: refundSale throws ValueError on open sale (must voidSale instead)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await assert.rejects(
+    refundSale(
+      db,
+      sale.id,
+      { refunded_by: 1, amount_amd: 1000, payment_method: 'cash' },
+      0,
+    ),
+    /only completed sales can be refunded/,
+  );
+});
+
+test('pos: refundSale throws ValueError on voided sale', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await voidSale(db, sale.id, { voided_by: 1 }, 0);
+  await assert.rejects(
+    refundSale(
+      db,
+      sale.id,
+      { refunded_by: 1, amount_amd: 1000, payment_method: 'cash' },
+      0,
+    ),
+    /only completed sales can be refunded/,
+  );
+});
+
+test('pos: listRefunds returns all refunds for the tenant (chronological)', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  // Create + complete + refund two sales
+  for (let i = 0; i < 2; i++) {
+    const sale = await addSale(
+      db,
+      { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+      0,
+    );
+    await completeSale(db, sale.id, 0);
+    await refundSale(
+      db,
+      sale.id,
+      { refunded_by: 1, amount_amd: 1000 + i * 500, payment_method: 'cash' },
+      0,
+    );
+  }
+  const all = await listRefunds(db, 0);
+  assert.equal(all.length, 2);
+  assert.equal(all[0].amount_amd, 1000);
+  assert.equal(all[1].amount_amd, 1500);
+});
+
+test('pos: listRefunds filters by saleId', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const s1 = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  const s2 = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await completeSale(db, s1.id, 0);
+  await completeSale(db, s2.id, 0);
+  await refundSale(
+    db,
+    s1.id,
+    { refunded_by: 1, amount_amd: 1000, payment_method: 'cash' },
+    0,
+  );
+  await refundSale(
+    db,
+    s2.id,
+    { refunded_by: 1, amount_amd: 2000, payment_method: 'cash' },
+    0,
+  );
+  const s1Refunds = await listRefunds(db, 0, { saleId: s1.id });
+  assert.equal(s1Refunds.length, 1);
+  assert.equal(s1Refunds[0].amount_amd, 1000);
+  const s2Refunds = await listRefunds(db, 0, { saleId: s2.id });
+  assert.equal(s2Refunds.length, 1);
+  assert.equal(s2Refunds[0].amount_amd, 2000);
+});
+
+test('pos: refundSale throws ValueError on bad payment_method', async () => {
+  const db = makeMemoryDb();
+  const reg = await makeRegister(db);
+  const shift = await openShift(db, { register_id: reg.id, opened_by: 1 }, 0);
+  const sale = await addSale(
+    db,
+    { shift_id: shift.id, register_id: reg.id, cashier_id: 1 },
+    0,
+  );
+  await completeSale(db, sale.id, 0);
+  await assert.rejects(
+    refundSale(
+      db,
+      sale.id,
+      { refunded_by: 1, amount_amd: 1000, payment_method: 'crypto' },
+      0,
+    ),
+    /payment method must be one of/,
+  );
 });

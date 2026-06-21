@@ -735,6 +735,64 @@ Three changes on top of v0.7.0:
 - 0 dependencies added.
 
 
+
+## v0.9.0 — A1-Validator on POS sales + migration renumber cleanup
+
+Three changes on top of v0.8.0:
+
+1. **A1-Validator on POS sales** (`POST /api/finance/pos/sales`)
+   - When `customer_id` is provided (walk-in sales with `null` skip the
+     check), the customer's HVVH is re-validated at sale-create time.
+     Same fail-soft drift-detection pattern as invoice-create
+     (v0.6.0) and vendor-bill-create (v0.7.0): re-fetches the live
+     value from `finance.customers`, validates via the A1-Validator
+     wrapper, throws 400 on invalid.
+   - The FK check now reads `SELECT id, hvhh FROM finance.customers`
+     (was `SELECT id FROM finance.customers`) — one round-trip for
+     both existence and TIN re-validation.
+   - Smoke step 7i: valid customer HVVH → sale succeeds, walk-in
+     sale (customer_id=null) → succeeds without check, mutate
+     customer's HVVH in sqlite → restart server → next sale-create
+     against the now-invalid customer returns **400**. End-to-end
+     proof of the drift-detection value.
+
+2. **Migration renumber cleanup** — finish the work started in v0.8.0:
+   - `0009_replenishment.sql` → `0019_replenishment.sql` (was colliding
+     with `0009_crm.sql`)
+   - `0014_lots_serials.sql` → `0020_lots_serials.sql` (was colliding
+     with `0014_catalog_bundles.sql`)
+   - All 20 migration prefixes are now unique. Migration sort order
+     preserved (each renumbered file lands in its natural position).
+
+3. **Version bump + release notes** — `package.json` 0.8.0 → 0.9.0.
+
+**Stats:**
+- 1397/1397 tests pass (was 1242 at v0.6.0; +155 across all waves).
+- All 88 endpoint smoke checks + STEP 5b/5c/5d/5e/5f/5g/5h/5i/5j/5k/7/
+  7b/7c/7d/7e/7f/7g/7h/**7i** pass.
+- `npm run check` clean, boundary 0.
+- 0 dependencies added.
+
+**New deploy smoke step:**
+- **STEP 7i**: POS sale customer HVVH drift detection. Valid persists,
+  walk-in (customer_id=null) succeeds without check, drifted customer
+  HVVH returns 400.
+
+**Migration list (20 migrations total in v0.9.0, all unique prefixes):**
+
+```
+0001_init.sql               0010_journal.sql               0017_pos_basics.sql
+0002_invoice_status_tracking   0011_desk.sql              0018_crm_leads_hvhh.sql
+0003_vat_carry_forward         0012_projects.sql          0019_replenishment.sql
+0004_invoice_adjustments       0013_catalog_v2.sql        0020_lots_serials.sql
+0005_tenant_id                 0014_catalog_bundles.sql
+0006_finance_audit             0015_catalog_pricing.sql
+0007_inventory                 0016_crm_contacts_hvhh.sql
+0008_purchase
+0009_crm
+```
+
+
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See
 `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.

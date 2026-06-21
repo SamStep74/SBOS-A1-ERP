@@ -1,4 +1,4 @@
--- 0017_recall_status.sql
+-- 0022_recall_status.sql
 --
 -- Phase 2 ERP — extend the serials.status CHECK constraint to allow
 -- the new 'recalled' status (Wave 41).

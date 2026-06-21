@@ -1,4 +1,4 @@
--- 0014_lots_serials.sql
+-- 0020_lots_serials.sql
 --
 -- Phase 2 ERP — lot + serial tracking for the inventory module.
 --

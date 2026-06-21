@@ -18,6 +18,26 @@
 //   - refunds / voids / exchanges
 //   - register transfer (cashier A → cashier B mid-shift)
 
+import { validateHvhh as _a1ValidateHvhh } from './hvhh-validator.js';
+
+/**
+ * Async HVVH validation for POS sale customers — re-validates the
+ * customer's HVVH at sale-create time. Mirrors the customer + vendor +
+ * invoice + contact + lead patterns (drift detection).
+ *
+ * Returns the normalized form (whitespace stripped) on success.
+ * Throws ValueError on invalid input (caught by the route handler as 400).
+ * For customers without an hvhh (null/undefined/empty), returns null
+ * without throwing.
+ */
+export async function assertValidSaleCustomerHvhhAsync(input) {
+  const r = await _a1ValidateHvhh(input);
+  if (r.ok) {
+    return r.normalized ?? null;
+  }
+  throw new ValueError(r.error || 'customer hvhh is invalid');
+}
+
 export class ValueError extends Error {
   constructor(message) {
     super(message);
@@ -448,10 +468,14 @@ export async function addSale(db, input, tenantId = 0) {
   // Optional customer FK check (the customer_id may be null for
   // a walk-in customer; we don't enforce the FK at the DB layer
   // because customer is in a different migration).
+  // We also fetch hvhh in the same query so the A1-Validator pass
+  // below can re-validate it without an extra round-trip (drift
+  // detection: the customer's hvhh could have become invalid since
+  // the customer was created).
   if (input.customer_id !== null && input.customer_id !== undefined) {
     const cust = await runQuery(
       db,
-      `SELECT id FROM finance.customers
+      `SELECT id, hvhh FROM finance.customers
         WHERE id = $1 AND tenant_id = $2`,
       [input.customer_id, tenantId],
     );
@@ -460,6 +484,10 @@ export async function addSale(db, input, tenantId = 0) {
         `customer ${input.customer_id} not found in tenant ${tenantId}`,
       );
     }
+    // A1-Validator pass — same fail-soft pattern as createInvoice.
+    // (1) A1_VALIDATOR_URL unset → skip; (2) URL set but unreachable
+    // → skip; (3) URL set + reachable + invalid → throw 400.
+    await assertValidSaleCustomerHvhhAsync({ hvhh: cust.rows[0].hvhh });
   }
   const ins = await runQuery(
     db,
@@ -617,4 +645,173 @@ export async function addPayment(db, input, tenantId = 0) {
     id = Number(lastId.rows[0].id);
   }
   return { id };
+}// ────────────────────────────────────────────────────────────────────────
+// Sale lifecycle: complete / void / refund (W89-1)
+// ────────────────────────────────────────────────────────────────────────
+
+function validateVoidSaleInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('void input is required');
+  }
+  assertPositiveInt(input.voided_by, 'voided_by');
+}
+
+function validateRefundSaleInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('refund input is required');
+  }
+  assertPositiveInt(input.refunded_by, 'refunded_by');
+  assertPositiveInt(input.amount_amd, 'amount_amd');
+  assertPaymentMethod(input.payment_method);
+  assertOptionalString(input.reason, 'reason', { max: 1024 });
+}
+
+export async function completeSale(db, saleId, tenantId = 0) {
+  assertPositiveInt(saleId, 'saleId');
+  const sale = await fetchSale(db, saleId, tenantId);
+  // State-machine guard: only 'open' sales can be completed.
+  // 'completed' is rejected (already done). 'voided' is
+  // rejected (a voided sale cannot be revived).
+  if (sale.status === 'completed') {
+    throw new ValueError(`sale ${saleId} is already completed`);
+  }
+  if (sale.status === 'voided') {
+    throw new ValueError(
+      `sale ${saleId} is voided (cannot complete a voided sale)`,
+    );
+  }
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.pos_sales
+        SET status = 'completed',
+            completed_at = datetime('now')
+      WHERE id = $1 AND tenant_id = $2 AND status = 'open'`,
+    [saleId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `sale ${saleId} is no longer open (concurrent update?)`,
+    );
+  }
+  return { id: saleId };
+}
+
+export async function voidSale(db, saleId, input, tenantId = 0) {
+  assertPositiveInt(saleId, 'saleId');
+  validateVoidSaleInput(input);
+  const sale = await fetchSale(db, saleId, tenantId);
+  // State-machine guard: only 'open' sales can be voided via
+  // the cashier-cancel path. A 'completed' sale cannot be
+  // voided (it must be refunded instead — refundSale handles
+  // that path with a pos_refunds row). A 'voided' sale is
+  // already voided (rejected to catch double-voids).
+  if (sale.status === 'completed') {
+    throw new ValueError(
+      `sale ${saleId} is completed (use refundSale to refund a completed sale)`,
+    );
+  }
+  if (sale.status === 'voided') {
+    throw new ValueError(`sale ${saleId} is already voided`);
+  }
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.pos_sales
+        SET status = 'voided'
+      WHERE id = $1 AND tenant_id = $2 AND status = 'open'`,
+    [saleId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `sale ${saleId} is no longer open (concurrent update?)`,
+    );
+  }
+  return { id: saleId };
+}
+
+export async function refundSale(db, saleId, input, tenantId = 0) {
+  assertPositiveInt(saleId, 'saleId');
+  validateRefundSaleInput(input);
+  const sale = await fetchSale(db, saleId, tenantId);
+  // State-machine guard: only 'completed' sales can be
+  // refunded. An 'open' sale has no payment to refund (use
+  // voidSale instead). A 'voided' sale is already finalized.
+  if (sale.status !== 'completed') {
+    throw new ValueError(
+      `sale ${saleId} is ${sale.status} (only completed sales can be refunded)`,
+    );
+  }
+  // Insert the refund row first (so the audit trail captures
+  // the refund attempt even if the sale-state UPDATE fails
+  // concurrently — the next cashier can see the orphan
+  // refund + the still-completed sale and reconcile).
+  const ins = await runQuery(
+    db,
+    `INSERT INTO finance.pos_refunds
+       (tenant_id, sale_id, payment_method, amount_amd, reason, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id`,
+    [
+      tenantId,
+      saleId,
+      input.payment_method,
+      input.amount_amd,
+      input.reason ?? null,
+      input.refunded_by,
+    ],
+  );
+  let refundId;
+  if (ins.rows && ins.rows.length > 0 && ins.rows[0].id != null) {
+    refundId = Number(ins.rows[0].id);
+  } else {
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    refundId = Number(lastId.rows[0].id);
+  }
+  // Then flip the sale status: completed → voided. The DB
+  // CHECK constraint on status enforces 'voided' is valid.
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.pos_sales
+        SET status = 'voided'
+      WHERE id = $1 AND tenant_id = $2 AND status = 'completed'`,
+    [saleId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `sale ${saleId} is no longer completed (concurrent refund?)`,
+    );
+  }
+  return { id: refundId };
+}
+
+export async function listRefunds(
+  db,
+  tenantId = 0,
+  { saleId = null } = {},
+) {
+  // Order by id ASC (chronological — refunds are recorded
+  // in the order they're issued, consistent with listShifts
+  // / listCases / listBundles).
+  let result;
+  if (saleId !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, sale_id, payment_method, amount_amd, reason,
+              created_by, created_at
+         FROM finance.pos_refunds
+        WHERE tenant_id = $1 AND sale_id = $2
+        ORDER BY id ASC`,
+      [tenantId, saleId],
+    );
+  } else {
+    result = await runQuery(
+      db,
+      `SELECT id, sale_id, payment_method, amount_amd, reason,
+              created_by, created_at
+         FROM finance.pos_refunds
+        WHERE tenant_id = $1
+        ORDER BY id ASC`,
+      [tenantId],
+    );
+  }
+  return result.rows;
 }

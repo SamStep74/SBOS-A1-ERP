@@ -2031,6 +2031,123 @@ fi
 
 
 echo
+echo "=== STEP 7i: POS sale customer HVVH drift detection via A1-Validator (v0.9.0) ==="
+# Same drift-detection rationale as STEP 7e (invoice customer HVVH) and
+# STEP 7f (vendor bill HVVH), but for POS sales. The walk-in sale case
+# (customer_id=null) is allowed; the customer-attached case re-validates
+# the customer's HVVH at sale-create time.
+LOG7I="$TESTDIR/server-7i.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7I" 2>&1 &
+SERVER_PID_7I=$!
+SMOKE_RC=0
+cleanup_7i() { kill -9 $SERVER_PID_7I 2>/dev/null; wait $SERVER_PID_7I 2>/dev/null; }
+trap cleanup_7i EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7i"
+    tail -20 "$LOG7I"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7I=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7I" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7I" ]; then
+    echo "  FAIL: STEP 7i server did not print admin session token"
+    tail -20 "$LOG7I"
+    SMOKE_RC=1
+  else
+    # Setup: create a register, open a shift, create a customer with valid hvhh
+    REG_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/pos/registers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"code":"REG-7I","name":"Register 7I"}')
+    REG_ID=$(echo "$REG_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    SHIFT_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/pos/shifts" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"register_id\":$REG_ID,\"opened_by\":1,\"opening_cash_amd\":100000}")
+    SHIFT_ID=$(echo "$SHIFT_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    CUST_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"POSCo","hvhh":"00123456"}')
+    CUST_ID=$(echo "$CUST_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+
+    if [ -z "$REG_ID" ] || [ -z "$SHIFT_ID" ] || [ -z "$CUST_ID" ]; then
+      echo "  FAIL: setup incomplete (REG_ID=$REG_ID, SHIFT_ID=$SHIFT_ID, CUST_ID=$CUST_ID)"
+      SMOKE_RC=1
+    else
+      # 1. Sale with valid customer HVVH (happy path)
+      SALE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/pos/sales" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"shift_id\":$SHIFT_ID,\"register_id\":$REG_ID,\"customer_id\":$CUST_ID,\"cashier_id\":1}")
+      if echo "$SALE_OUT" | grep -q '"id"'; then
+        echo "  OK POS sale created with valid customer hvhh"
+      else
+        echo "  FAIL: POS sale create failed: $SALE_OUT"
+        SMOKE_RC=1
+      fi
+
+      # 2. Walk-in sale (customer_id=null) — should succeed
+      WALK_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/pos/sales" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"shift_id\":$SHIFT_ID,\"register_id\":$REG_ID,\"customer_id\":null,\"cashier_id\":1}")
+      if echo "$WALK_OUT" | grep -q '"id"'; then
+        echo "  OK walk-in sale (customer_id=null) succeeds"
+      else
+        echo "  FAIL: walk-in sale failed: $WALK_OUT"
+        SMOKE_RC=1
+      fi
+
+      # 3. Mutate customer's HVVH to invalid (simulate drift), restart server
+      kill -TERM $SERVER_PID_7I 2>/dev/null
+      wait $SERVER_PID_7I 2>/dev/null
+      trap - EXIT
+      sqlite3 "$DB" "UPDATE customers SET hvhh = 'NOT_AN_HVVH' WHERE id = $CUST_ID" 2>/dev/null
+
+      LOG7I2="$TESTDIR/server-7i2.log"
+      PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7I2" 2>&1 &
+      SERVER_PID_7I=$!
+      cleanup_7i() { kill -9 $SERVER_PID_7I 2>/dev/null; wait $SERVER_PID_7I 2>/dev/null; }
+      trap cleanup_7i EXIT
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+          break
+        fi
+        sleep 1
+      done
+      ADMIN_TOKEN_7I=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7I2" | head -1 | awk '{print $NF}')
+
+      # 4. Sale with drifted customer — should return 400
+      SALE_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/pos/sales" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7I" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"shift_id\":$SHIFT_ID,\"register_id\":$REG_ID,\"customer_id\":$CUST_ID,\"cashier_id\":1}")
+      if [ "$SALE_BAD" = "400" ]; then
+        echo "  OK POS sale correctly rejects customer with drifted hvhh"
+      else
+        echo "  FAIL: POS sale with drifted customer hvhh returned $SALE_BAD (expected 400)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7I 2>/dev/null
+wait $SERVER_PID_7I 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
