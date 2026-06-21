@@ -311,6 +311,68 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     — no new test surface needed.
   - 1190/1190 tests pass. Smoke 78 endpoints + STEP 5b + 5c
     all pass. `npm run check` clean, boundary 0.
+- **Wave 29 (Audit resource_id — capture the actual entity id)** — DONE.
+  - The audit GET (Wave 26, perm-gated) and the audit
+    record-on-write (in `wrapFinanceRoute`) were both working
+    — every write was recorded, every read was perm-gated.
+    But the audit `resource` field was a hardcoded string
+    per route: `wrapFinanceRoute('invoice.update',
+    'invoice:id', handler)` recorded the literal `invoice:id`,
+    not the actual `invoice:42`. The 19 id-based write routes
+    (PATCH/POST with `:id` in the path) all suffered from this.
+    Consequence: "what happened to invoice 42?" couldn't be
+    answered with a simple filter — you had to use a string
+    match on `resource LIKE 'invoice:%'` and then eyeball
+    which ones were the actual invoice 42.
+  - Fix:
+    1. Made `wrapFinanceRoute`'s `resource` arg accept
+       either a string (backward compatible) or a function
+       `(req) => 'invoice:' + req.params.id`. The wrapper
+       resolves the function at audit-record time so the
+       actual id is captured.
+    2. Updated 19 id-based write routes to use the function
+       form. Includes: PATCH /invoices/:id, PATCH
+       /customers/:id, PATCH /catalog/categories/:id, PATCH
+       /catalog/variants/:id, POST /invoices/:id/{payments,
+       void, reconcile, lines}, POST /purchase-orders/:id/
+       {confirm, cancel, receive}, POST /vendor-bills/:id/
+       {confirm, post, pay, void}, POST /desk/cases/:id/
+       replies, POST /projects/:id/tasks, POST
+       /projects/:id/tasks/:taskId/time-entries, POST
+       /catalog/items/:itemId/variants.
+    3. Added a new `?resource_id=N` query param to
+       `GET /api/finance/audit`. The filter is a substring
+       match (`resource LIKE '%:<N>%'`) so it matches
+       `invoice:42` AND `invoice:42:void` AND
+       `invoice:42:reconcile` etc. — the "what happened
+       to invoice 42" use case. Combine with
+       `?action=` or `?resource=` for precision.
+  - **Limitation documented**: the create routes still
+    record `'customer:new'` instead of `'customer:<newId>'`.
+    The new id lives in the response body, not in
+    `req.params.id`, so the function form needs a way to
+    read the response. Closing this needs a small
+    `res.locals.createdId = out.id` change in each create
+    handler + a `(req, res) => string` resource function.
+    Defer to a follow-up wave if needed.
+  - 3 new tests:
+    - `audit.test.js` — listAudit with `?resource_id=42`
+      matches `'invoice:42'` AND `'invoice:42:void'`
+      (substring match) but not `'invoice:new'` (no id)
+      or `'invoice:43'` (different id).
+    - `server.test.js` 36a — PATCH /customers/:id records
+      audit with `resource='customer:<id>'` (the actual
+      behavior, not the literal).
+    - `server.test.js` 36b — `GET /api/finance/audit?resource_id=<id>`
+      finds the PATCH row.
+  - 1 new deploy smoke step (STEP 5d): creates a customer
+    via the admin token, PATCHes it, then GETs
+    `/api/finance/audit?resource_id=<custId>` and asserts
+    the response includes a row with
+    `resource = 'customer:<custId>'` AND `action = 'customer.update'`.
+  - 1216/1216 tests pass (was 1213; +3 new). Smoke 78
+    endpoints + STEP 5b + 5c + 5d all pass. `npm run check`
+    clean, boundary 0.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels, POS). See

@@ -252,6 +252,19 @@ function defaultSupplier() {
 // ────────────────────────────────────────────────────────────────────────
 
 function wrapFinanceRoute(action, resource, handler) {
+  // Resolve the resource string for a given request. The route
+  // table passes either:
+  //   - a static string like 'invoice:new' or 'journal:reconcile'
+  //     (the resource is constant per route), OR
+  //   - a function (req) => 'invoice:' + req.params.id
+  //     (the resource includes the URL parameter — Wave 29
+  //     change so the audit row records the actual entity id).
+  // The function form lets every id-based write route
+  // (PATCH /invoices/:id, POST /invoices/:id/void, etc.)
+  // record 'invoice:42' instead of the literal 'invoice:id'.
+  const resolveResource = typeof resource === 'function'
+    ? resource
+    : () => resource;
   return async function w(req, res, next) {
     try {
       await handler(req, res, next);
@@ -281,7 +294,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource,
+          resource: resolveResource(req),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: status,
@@ -301,7 +314,7 @@ function wrapFinanceRoute(action, resource, handler) {
           user_id: req.user && req.user.id,
           username: req.user && req.user.username,
           action,
-          resource,
+          resource: resolveResource(req),
           method: req.method,
           path: req.originalUrl || req.url,
           status_code: res.statusCode,
@@ -394,7 +407,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.update', 'invoice:id', async (req, res) => {
+    wrapFinanceRoute('invoice.update', (req) => `invoice:${req.params.id}`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -411,7 +424,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/payments',
     requireTenant,
     requirePerm('finance.payment.create'),
-    wrapFinanceRoute('payment.create', 'invoice:payment', async (req, res) => {
+    wrapFinanceRoute('payment.create', (req) => `invoice:${req.params.id}:payment`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -428,7 +441,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/void',
     requireTenant,
     requirePerm('finance.invoice.void'),
-    wrapFinanceRoute('invoice.void', 'invoice:void', async (req, res) => {
+    wrapFinanceRoute('invoice.void', (req) => `invoice:${req.params.id}:void`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -448,7 +461,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/reconcile',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.reconcile', 'invoice:reconcile', async (req, res) => {
+    wrapFinanceRoute('invoice.reconcile', (req) => `invoice:${req.params.id}:reconcile`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -487,7 +500,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/customers/:id',
     requireTenant,
     requirePerm('finance.customer.update'),
-    wrapFinanceRoute('customer.update', 'customer:id', async (req, res) => {
+    wrapFinanceRoute('customer.update', (req) => `customer:${req.params.id}`, async (req, res) => {
       const id = parseCustomerId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -549,7 +562,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/invoices/:id/lines',
     requireTenant,
     requirePerm('finance.invoice.update'),
-    wrapFinanceRoute('invoice.update', 'invoice:lines', async (req, res) => {
+    wrapFinanceRoute('invoice.update', (req) => `invoice:${req.params.id}:lines`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -575,17 +588,18 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('security.audit.read'),
     async (req, res, next) => {
       try {
-        const tenantId = req.tenantId;
-        const filters = {
-          tenant_id: tenantId,
-          user_id: req.query.user_id,
-          action: req.query.action,
-          resource_prefix: req.query.resource,
-          since: req.query.since,
-          until: req.query.until,
-          limit: req.query.limit,
-          offset: req.query.offset,
-        };
+      const tenantId = req.tenantId;
+      const filters = {
+        tenant_id: tenantId,
+        user_id: req.query.user_id,
+        action: req.query.action,
+        resource_prefix: req.query.resource,
+        resource_id: req.query.resource_id,
+        since: req.query.since,
+        until: req.query.until,
+        limit: req.query.limit,
+        offset: req.query.offset,
+      };
         const rawDb = req.app && req.app.locals && req.app.locals.db;
         const items = await listAudit(rawDb, filters);
         res.status(200).json({ items });
@@ -784,7 +798,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/confirm',
     requireTenant,
     requirePerm('finance.purchase.confirm'),
-    wrapFinanceRoute('po.confirm', 'po:confirm', async (req, res) => {
+    wrapFinanceRoute('po.confirm', (req) => `purchase_order:${req.params.id}:confirm`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -798,7 +812,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/cancel',
     requireTenant,
     requirePerm('finance.purchase.cancel'),
-    wrapFinanceRoute('po.cancel', 'po:cancel', async (req, res) => {
+    wrapFinanceRoute('po.cancel', (req) => `purchase_order:${req.params.id}:cancel`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -813,7 +827,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/purchase-orders/:id/receive',
     requireTenant,
     requirePerm('finance.purchase.receive'),
-    wrapFinanceRoute('po.receive', 'po:receive', async (req, res) => {
+    wrapFinanceRoute('po.receive', (req) => `purchase_order:${req.params.id}:receive`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -857,7 +871,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/confirm',
     requireTenant,
     requirePerm('finance.bill.update'),
-    wrapFinanceRoute('bill.confirm', 'bill:confirm', async (req, res) => {
+    wrapFinanceRoute('bill.confirm', (req) => `vendor_bill:${req.params.id}:confirm`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -871,7 +885,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/post',
     requireTenant,
     requirePerm('finance.bill.approve'),
-    wrapFinanceRoute('bill.post', 'bill:post', async (req, res) => {
+    wrapFinanceRoute('bill.post', (req) => `vendor_bill:${req.params.id}:post`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -885,7 +899,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/pay',
     requireTenant,
     requirePerm('finance.bill.pay'),
-    wrapFinanceRoute('bill.pay', 'bill:pay', async (req, res) => {
+    wrapFinanceRoute('bill.pay', (req) => `vendor_bill:${req.params.id}:pay`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -899,7 +913,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/vendor-bills/:id/void',
     requireTenant,
     requirePerm('finance.bill.void'),
-    wrapFinanceRoute('bill.void', 'bill:void', async (req, res) => {
+    wrapFinanceRoute('bill.void', (req) => `vendor_bill:${req.params.id}:void`, async (req, res) => {
       const id = parseInvoiceId(req.params.id);
       if (id === null) {
         return res.status(404).json({ error: 'not_found' });
@@ -1341,7 +1355,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('desk.reply.create'),
     wrapFinanceRoute(
       'desk.reply.create',
-      'desk_reply:new',
+      (req) => `desk_case:${req.params.id}:reply`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const caseId = Number(req.params.id);
@@ -1461,7 +1475,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     '/api/finance/projects/:id/tasks',
     requireTenant,
     requirePerm('projects.task.create'),
-    wrapFinanceRoute('projects.task.create', 'project_task:new', async (req, res) => {
+    wrapFinanceRoute('projects.task.create', (req) => `project:${req.params.id}:task:new`, async (req, res) => {
       const tenantId = req.tenantId;
       const projectId = Number(req.params.id);
       // Inject the project_id from the URL into the input
@@ -1526,7 +1540,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('projects.time.create'),
     wrapFinanceRoute(
       'projects.time.create',
-      'project_time:new',
+      (req) => `project_task:${req.params.taskId}:time_entry:new`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const taskId = Number(req.params.taskId);
@@ -1691,7 +1705,7 @@ export function registerFinanceRoutes(app, opts = {}) {
     requirePerm('finance.variant.create'),
     wrapFinanceRoute(
       'finance.variant.create',
-      'catalog_variant:new',
+      (req) => `catalog_item:${req.params.itemId}:variant:new`,
       async (req, res) => {
         const tenantId = req.tenantId;
         const itemId = Number(req.params.itemId);

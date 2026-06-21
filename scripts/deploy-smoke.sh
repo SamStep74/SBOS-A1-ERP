@@ -484,7 +484,7 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
     }
     console.log('  PASS 200 GET /api/finance/invoices (admin sanity)');
     process.exit(0);
-  })();
+   })();
   " 2>&1
   if [ $? = 0 ]; then
     echo "  GET perm gate OK"
@@ -492,6 +492,84 @@ DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
     SMOKE_RC=1
   fi
 echo
+
+echo "=== STEP 5d: Audit resource captures the actual entity id (Wave 29) ==="
+# Wave 29 makes wrapFinanceRoute record the actual entity id in
+# the audit resource field. Before: PATCH /invoices/42 recorded
+# 'invoice:id' (the literal). After: 'invoice:42'.
+#
+# Test: PATCH a customer, then GET the audit filtered by the
+# customer id, and assert the row's resource field is
+# 'customer:<id>' (not 'customer:id' or 'customer:new').
+DB_PATH="$DB" PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  function call(method, path, body, token) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT), path, method,
+        headers: Object.assign(
+          { 'content-type': 'application/json' },
+          token ? { 'authorization': 'Bearer ' + token } : {},
+          data ? { 'content-length': Buffer.byteLength(data) } : {},
+        ),
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  (async () => {
+    const tok = process.env.ADMIN_TOKEN;
+    // 1) Create a customer
+    const c = await call('POST', '/api/finance/customers', { name: 'Wave29Audit', hvhh: '11111111' }, tok);
+    if (c.status !== 201) {
+      console.log('  FAIL create customer:', c.status, JSON.stringify(c.body).slice(0, 200));
+      process.exit(1);
+    }
+    const custId = c.body.id;
+    // 2) PATCH the customer (this is the write that should record
+    //    the dynamic resource)
+    const p = await call('PATCH', '/api/finance/customers/' + custId, { name: 'Wave29AuditRenamed' }, tok);
+    if (p.status !== 200) {
+      console.log('  FAIL patch customer:', p.status, JSON.stringify(p.body).slice(0, 200));
+      process.exit(1);
+    }
+    // 3) GET audit filtered by resource_id — the PATCH row should be in there
+    const a = await call('GET', '/api/finance/audit?resource_id=' + custId + '&limit=20', null, tok);
+    if (a.status !== 200) {
+      console.log('  FAIL get audit:', a.status);
+      process.exit(1);
+    }
+    const expected = 'customer:' + custId;
+    const found = a.body.items.find((r) => r.resource === expected);
+    if (!found) {
+      console.log('  FAIL resource_id filter: expected to find resource=\"' + expected + '\", got: ' +
+        JSON.stringify(a.body.items.map((r) => r.resource)));
+      process.exit(1);
+    }
+    if (found.action !== 'customer.update') {
+      console.log('  FAIL audit row action: expected customer.update, got', found.action);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/audit?resource_id=' + custId + ' returns the PATCH row with resource=\"' + expected + '\"');
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  audit resource_id OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")

@@ -969,6 +969,44 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     }
   });
 
+  // ─── Wave 29: audit resource captures the actual entity id ───
+
+  test('36a. PATCH /api/finance/customers/:id records audit with resource=customer:<id> (not the literal customer:id)', async () => {
+    // Wave 29 wraps the customer.update resource as a function so
+    // the actual entity id is captured. Before this wave the audit
+    // row recorded 'customer:id' (the literal string). After the
+    // wave it records 'customer:1' for PATCH /api/finance/customers/1.
+    // Create a customer first, then PATCH it, then check the audit.
+    const c = await postJson(server, '/api/finance/customers', { name: 'AuditWave29' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    const p = await patchJson(server, `/api/finance/customers/${custId}`, { name: 'AuditWave29-renamed' });
+    assert.equal(p.status, 200);
+    // The audit row should have resource = 'customer:<id>'.
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const expected = `customer:${custId}`;
+    const found = body.items.find((r) => r.resource === expected);
+    assert.ok(found, `expected to find audit row with resource="${expected}", got: ${JSON.stringify(body.items.map((r) => r.resource))}`);
+    assert.equal(found.action, 'customer.update');
+  });
+
+  test('36b. GET /api/finance/audit?resource_id=<id> returns all rows for that id (update + create)', async () => {
+    // The previous test PATCHed customer 1 (well, the latest one).
+    // The create row records 'customer:new' (no id yet) so it
+    // wouldn't match. But the update records 'customer:<id>'
+    // which DOES match. This test asserts the filter finds
+    // the update row.
+    const c = await postJson(server, '/api/finance/customers', { name: 'AuditWave29b' });
+    assert.equal(c.status, 201);
+    const custId = c.body.id;
+    await patchJson(server, `/api/finance/customers/${custId}`, { name: 'AuditWave29b-rename' });
+    const { status, body } = await get(server, `/api/finance/audit?resource_id=${custId}&limit=20`);
+    assert.equal(status, 200);
+    const updateRow = body.items.find((r) => r.resource === `customer:${custId}`);
+    assert.ok(updateRow, 'expected to find the PATCH audit row by resource_id');
+  });
+
   // ─── Deferred item: per-permission endpoint guards ───
 
   test('37. The per-permission guard is wired on POST /api/finance/invoices (sanity: admin has the perm)', async () => {
