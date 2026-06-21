@@ -124,7 +124,7 @@ export async function listAudit(db, filters = {}) {
                   FROM finance.audit
                  WHERE ${where.join(' AND ')}
                  ORDER BY id DESC
-                 LIMIT $${i++} OFFSET $${i++}`;
+                 LIMIT $${i++} OFFSET $${i}`;
   params.push(limit, offset);
 
   // The audit table is application infrastructure, not a domain

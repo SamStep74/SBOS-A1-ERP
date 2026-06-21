@@ -168,7 +168,6 @@ export async function reconcileJournal(db, tenantId = 0, opts = {}) {
       summary.errors.push({ move_id, source, error: message });
       // Log the failure so the operator can see it in the server log.
       // (The boot-time call wraps this in try/catch and just logs.)
-      // eslint-disable-next-line no-console
       console.warn(`[reconcileJournal] failed to post ${source}#${move_id}: ${message}`);
     }
   }

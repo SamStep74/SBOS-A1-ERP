@@ -585,7 +585,7 @@ export async function listPurchaseOrders(db, tenantId = 0, { vendorId, status } 
     params.push(Number(vendorId));
   }
   if (status != null) {
-    where.push(`status = $${i++}`);
+    where.push(`status = $${i}`);
     params.push(String(status));
   }
   const res = await runQuery(
@@ -906,7 +906,7 @@ export async function listVendorBills(db, tenantId = 0, { vendorId, status, purc
     params.push(String(status));
   }
   if (purchaseOrderId != null) {
-    where.push(`purchase_order_id = $${i++}`);
+    where.push(`purchase_order_id = $${i}`);
     params.push(Number(purchaseOrderId));
   }
   const res = await runQuery(

@@ -836,7 +836,7 @@ export async function listBalances(db, tenantId = 0, { itemId, locationId } = {}
     params.push(Number(itemId));
   }
   if (locationId != null) {
-    where.push(`location_id = $${i++}`);
+    where.push(`location_id = $${i}`);
     params.push(Number(locationId));
   }
   const res = await runQuery(

@@ -85,7 +85,7 @@ function createWorktree(branchName, baseRef = 'HEAD') {
   }
 
   // Ensure the branch exists. If not, create it from baseRef.
-  let hasBranch = false;
+  let hasBranch;
   try {
     git(['rev-parse', '--verify', `refs/heads/${branchName}`]);
     hasBranch = true;

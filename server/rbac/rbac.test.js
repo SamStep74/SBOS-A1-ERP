@@ -3248,7 +3248,7 @@ describe('Wave 8 — RBAC seed installer (server/rbac/seed.js) via node:sqlite',
     // runInTx is taken.
     const statements = [];
     let inTx = false;
-    let txRolledBack = false;
+    let txRolledBack;
     const db = {
       prepare(sql) {
         const stmt = real.prepare(sql);
