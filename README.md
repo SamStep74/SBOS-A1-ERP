@@ -32,16 +32,29 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
 
 ## Current state
 
-Wave 0 (bootstrap) is in progress — 4 workers run in parallel via the
-`sbos-a1-erp-bootstrap` plan. See `.orchestration/sbos-a1-erp-bootstrap.json`
-and `docs/PROJECT_STATUS.md` for the live state.
+- **Phase 0 (foundation)** — DONE. RBAC seeded (28 roles, 435 perms, 73 sets),
+  finance core (invoices, customers, payments, VAT, e-invoice) wired.
+- **Wave 11 (ship-it-2day)** — DONE. All 5 producer branches integrated, real
+  auth (scrypt + bearer session), audit log, per-permission route guards, 4
+  deferred items.
+- **Wave 14 (deploy)** — DONE. Dockerfile, systemd unit, pm2 ecosystem, online-safe
+  backup, admin token persistence. Production pg adapter fixed. Deploy smoke
+  covers 35 endpoints.
+- **Wave 16 (Phase 1 ERP — Inventory + Purchase Core)** — DONE.
+  - Inventory: warehouses, stock locations, catalog items, weighted-average-cost
+    stock moves (receive / deliver / transfer / adjust).
+  - Purchase: vendors, POs (rfq → confirmed → partial → received → billed),
+    3-way match vendor bills (draft → confirmed → posted → paid / void).
+  - All wired to the HTTP layer under `/api/finance/{catalog,warehouses,
+    stock,vendors,purchase-orders,vendor-bills}/*` with per-permission guards
+    and audit-log integration.
+  - 985/985 tests pass. Deploy smoke exercises the full
+    warehouse → location → item → receive → vendor → PO → confirm → receive →
+    bill flow on a fresh DB.
 
-| Worker                | Scope                                                              | Status   |
-| --------------------- | ------------------------------------------------------------------ | -------- |
-| `repo-foundation`     | package.json, tsconfig, eslint, prettier, CI, sanity test          | starting |
-| `seed-from-a1-erp-hy` | Mirror canonical docs (RBAC, DMUX, ERP-comparison, project status) | starting |
-| `rbac-port`           | Port `server/rbac/*` from A1-ERP-HY with brand-strip + hardening   | starting |
-| `dmux-docs`           | SBOS-A1-ERP-tuned DMUX_WORKFLOWS, PROJECT_STATUS, AGENT_BRIEF      | starting |
+Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
+to GL, customer 360 + vendor 360 panels). See
+`docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
 
 ## How to run
 
@@ -52,6 +65,122 @@ npm test                # node --test
 npm run lint
 npm run format:check
 ```
+
+## Phase 1 ERP API surface
+
+The Phase 1 ERP release adds the **Inventory** + **Purchase Core** modules
+under `/api/finance/*`. All endpoints are tenant-scoped (via `X-Tenant-Id`
+header or `req.user.tenant_id`) and gated by `requirePerm(...)` (see
+`server/rbac/permissions.js`).
+
+### Inventory (`finance.product.*`, `finance.warehouse.*`, `finance.stock.*`)
+
+| Method | Path                                     | Perm key                  | Body / Notes                              |
+| ------ | ---------------------------------------- | ------------------------- | ----------------------------------------- |
+| GET    | `/api/finance/catalog/items`             | `finance.product.read`    | List catalog items in the caller's tenant |
+| POST   | `/api/finance/catalog/items`             | `finance.product.create`  | `{sku, name, unit_of_measure, unit_cost_amd}` |
+| GET    | `/api/finance/warehouses`                | `finance.warehouse.read`  | List warehouses                           |
+| POST   | `/api/finance/warehouses`                | `finance.warehouse.create`| `{code, name, address?}`                  |
+| GET    | `/api/finance/stock/locations`           | `finance.warehouse.read`  | `?warehouse_id=` filter                   |
+| POST   | `/api/finance/stock/locations`           | `finance.warehouse.create`| `{warehouse_id, code, name, location_type}` (`INTERNAL`/`CUSTOMER`/`SUPPLIER`) |
+| GET    | `/api/finance/stock/balances`            | `finance.stock.read`      | `?item_id=&location_id=` filters           |
+| GET    | `/api/finance/stock/moves`               | `finance.stock.read`      | `?item_id=&move_type=&limit=` filters (audit log of every move) |
+| POST   | `/api/finance/stock/receive`             | `finance.stock.move`      | `{catalog_item_id, destination_location_id, quantity, unit_cost}` — updates weighted-average cost |
+| POST   | `/api/finance/stock/deliver`             | `finance.stock.move`      | `{catalog_item_id, source_location_id, quantity, unit_price}` — reduces stock + records COGS at source avg |
+| POST   | `/api/finance/stock/transfer`            | `finance.stock.move`      | `{catalog_item_id, source_location_id, destination_location_id, quantity}` — same-tenant transfer, average cost recalc at dest |
+| POST   | `/api/finance/stock/adjust`              | `finance.stock.move`      | `{catalog_item_id, location_id, new_quantity, reason}` — absolute new qty (set + record delta) |
+
+### Purchase (`finance.vendor.*`, `finance.purchase.*`, `finance.bill.*`)
+
+| Method | Path                                          | Perm key                  | Body / Notes                              |
+| ------ | --------------------------------------------- | ------------------------- | ----------------------------------------- |
+| GET    | `/api/finance/vendors`                        | `finance.vendor.read`     | List vendors                              |
+| POST   | `/api/finance/vendors`                        | `finance.vendor.create`   | `{code, name, hvhh?, address?, email?}` (hvhh = 8-digit Armenian tax ID) |
+| GET    | `/api/finance/purchase-orders`                | `finance.purchase.read`   | `?vendor_id=&status=` filters              |
+| POST   | `/api/finance/purchase-orders`                | `finance.purchase.create` | `{vendor_id, order_number, order_date, expected_date?, lines:[{catalog_item_id, quantity, unit_cost, description?}]}` — status starts in `rfq` |
+| POST   | `/api/finance/purchase-orders/:id/confirm`    | `finance.purchase.confirm`| Locks in unit_cost. `rfq` → `confirmed`   |
+| POST   | `/api/finance/purchase-orders/:id/cancel`     | `finance.purchase.cancel` | `{reason}`. Allowed in `rfq`/`confirmed`/`partial` only |
+| POST   | `/api/finance/purchase-orders/:id/receive`    | `finance.purchase.receive`| `{destination_location_id, lines:[{order_line_id, received_quantity}]}` — 3-way match guard (no over-receive), creates a stock receipt per line, transitions `confirmed`/`partial` |
+| GET    | `/api/finance/vendor-bills`                   | `finance.bill.read`       | `?vendor_id=&status=&purchase_order_id=`   |
+| POST   | `/api/finance/vendor-bills`                   | `finance.bill.create`     | `{purchase_order_id, bill_number, bill_date, due_date?}` — auto-builds 3-way match lines (sum received qty × unit_cost per item) + 20% VAT |
+| POST   | `/api/finance/vendor-bills/:id/confirm`       | `finance.bill.update`     | `draft` → `confirmed`                      |
+| POST   | `/api/finance/vendor-bills/:id/post`          | `finance.bill.approve`    | `confirmed` → `posted` (PO transitions to `billed`) |
+| POST   | `/api/finance/vendor-bills/:id/pay`           | `finance.bill.pay`        | `posted` → `paid`                          |
+| POST   | `/api/finance/vendor-bills/:id/void`          | `finance.bill.void`       | `{reason}`. Only before payment            |
+
+### Typical end-to-end flow
+
+```bash
+# 1. Master data
+WAREHOUSE_ID=$(curl -sX POST http://localhost:3000/api/finance/warehouses \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d '{"code":"WH-1","name":"Main Warehouse"}' | jq -r .id)
+
+LOC_ID=$(curl -sX POST http://localhost:3000/api/finance/stock/locations \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d "{\"warehouse_id\":$WAREHOUSE_ID,\"code\":\"BIN-A1\",\"name\":\"Aisle 1\",\"location_type\":\"INTERNAL\"}" | jq -r .id)
+
+ITEM_ID=$(curl -sX POST http://localhost:3000/api/finance/catalog/items \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d '{"sku":"WIDGET-1","name":"Widget","unit_of_measure":"pcs","unit_cost_amd":500}' | jq -r .id)
+
+# 2. Buy from a supplier
+VENDOR_ID=$(curl -sX POST http://localhost:3000/api/finance/vendors \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d '{"code":"ACME","name":"ACME Corp","hvhh":"12345678"}' | jq -r .id)
+
+PO_ID=$(curl -sX POST http://localhost:3000/api/finance/purchase-orders \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d "{\"vendor_id\":$VENDOR_ID,\"order_number\":\"PO-1\",\"order_date\":\"2026-06-21\",\"lines\":[{\"catalog_item_id\":$ITEM_ID,\"quantity\":10,\"unit_cost\":500}]}" | jq -r .id)
+
+curl -sX POST http://localhost:3000/api/finance/purchase-orders/$PO_ID/confirm \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' -H 'content-type: application/json' -d '{}'
+
+curl -sX POST http://localhost:3000/api/finance/purchase-orders/$PO_ID/receive \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d "{\"destination_location_id\":$LOC_ID,\"lines\":[{\"order_line_id\":1,\"received_quantity\":10}]}"
+
+# 3. Pay the supplier — creates the AP bill (3-way match) and posts it.
+BILL_ID=$(curl -sX POST http://localhost:3000/api/finance/vendor-bills \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' \
+  -H 'content-type: application/json' \
+  -d "{\"purchase_order_id\":$PO_ID,\"bill_number\":\"BILL-1\",\"bill_date\":\"2026-06-21\"}" | jq -r .id)
+
+curl -sX POST http://localhost:3000/api/finance/vendor-bills/$BILL_ID/post \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' -H 'content-type: application/json' -d '{}'
+
+curl -sX POST http://localhost:3000/api/finance/vendor-bills/$BILL_ID/pay \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' -H 'content-type: application/json' -d '{}'
+```
+
+### Stock valuation model
+
+`receiveStock` uses **weighted-average cost** (the most common small-business
+valuation method, equivalent to Odoo's "average costing"):
+
+```
+new_avg_cost = (current_qty * current_avg + received_qty * new_unit_cost) / new_qty
+```
+
+`deliverStock` records COGS at the source location's current average cost. This
+is the same number that flows into the financial reports; no implicit
+LIFO/FIFO/HIFO guessing.
+
+The full audit trail is in `stock_moves` (filterable by `?item_id=&move_type=`)
+and exposed to operators via `GET /api/finance/stock/moves`.
+
+### Out of Phase 1 scope (Phase 2+)
+
+Lot / serial tracking, replenishment reports, automatic stock-valuation
+journal entries (vendor bill → GL), vendor pricelists, blanket orders, RFQ
+flow with multiple suppliers, landed-cost allocation, customer 360 + vendor
+360 panels, UI apps. See `docs/ERP_COMPARISON_IMPLEMENTATION_PLAN.md`.
 
 ## How to deploy (single-node, self-hosted)
 
