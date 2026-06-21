@@ -143,6 +143,8 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/account-balances/216', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/account-balances/216 (Wave 19 — single account)' },
   // Phase 1 ERP — GL reconciliation (Wave 20)
   { method: 'GET', path: '/api/finance/journal/reconcile?dryRun=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/journal/reconcile?dryRun=true (Wave 20 — fresh install should report 0 gap)' },
+  // Phase 1 ERP — Trial balance (Wave 22)
+  { method: 'GET', path: '/api/finance/trial-balance?locale=hy', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/trial-balance (Wave 22 — JSON form, Armenian locale, 216+521+711+226 populated by the e2e flow above)' },
   // Phase 2 CRM (W71-2) — contacts + leads writes.
   { method: 'POST', path: '/api/finance/crm/contacts', body: { name: 'Smoke Contact', email: 'smoke@example.com', role: 'CEO' }, expect: 201, name: 'POST /api/finance/crm/contacts (returns id > 0)' },
   { method: 'POST', path: '/api/finance/crm/leads', body: { name: 'Smoke Lead', company: 'Smoke Corp', source: 'website', status: 'qualified', estimated_value_amd: 1000000 }, expect: 201, name: 'POST /api/finance/crm/leads (returns id > 0)' },

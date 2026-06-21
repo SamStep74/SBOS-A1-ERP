@@ -110,6 +110,43 @@ See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
     not throwing on a per-move failure.
   - 1082/1082 tests pass (was 1054; +28). Deploy smoke at 47
     endpoints.
+- **Wave 21 (Phase 1 ERP — bug-prevention refactor)** — DONE.
+  - server/finance/_pgStyle.js: shared pg-style adapter
+    helpers (stripFinancePrefix, runQuery, numberedParams).
+    The numberedParams helper makes the recurring "$N
+    placeholder reuse under the pg → sqlite translation" bug
+    impossible at the call site: each `#{...}` occurrence
+    gets a unique $N placeholder, so subqueries with the same
+    tenant_id filter on both sides no longer silently bind
+    the wrong value.
+  - 22 tests for the helpers (prefix strip edge cases,
+    numberedParams single/multiple/reuse, runQuery pipeline).
+  - Refactored journal.js + reconciliation.js to use the
+    shared helper. inventory.js / purchase.js / poTemplate.js
+    / stockPosting.js keep their inline helpers (out of
+    scope; the new helper is opt-in for the new files).
+  - 1104/1104 tests pass (was 1082; +22). Deploy smoke at 47
+    endpoints.
+- **Wave 22 (Phase 1 ERP — Trial balance report)** — DONE.
+  - server/finance/trialBalance.js: joins
+    listAccountBalances (journal.js) with the RA chart of
+    accounts (l10n-am/chartOfAccounts) to produce a balanced
+    CFO report. Each account's balance is projected into the
+    natural sign of the account (debit-natural for asset /
+    expense / management, credit-natural for liability /
+    equity / revenue). The report asserts that total debits
+    == total credits (the books balance) and surfaces
+    is_balanced + delta so the operator can see the gap.
+  - formatTrialBalanceText: server-rendered text report
+    (text/plain; charset=utf-8) for the Armenian print
+    workflow. JSON form is the default.
+  - Route: GET /api/finance/trial-balance?asOfDate=&locale=hy|en|ru&format=json|text
+  - 10 new tests cover: empty DB, single entry, complex flow,
+    out-of-balance detection, off-chart account fallback,
+    cross-tenant isolation, chart-order sort, Armenian +
+    English text formatting, malformed input rejection.
+  - 1114/1114 tests pass (was 1104; +10). Deploy smoke at 48
+    endpoints.
 
 Next: Phase 2 (lots / serials, replenishment reports, stock-valuation handoff
 to GL, customer 360 + vendor 360 panels). See
@@ -309,6 +346,63 @@ The reconciliation is **safe to run at boot** (no destructive
 operation; the only state change is new journal rows). Future work:
 a scheduled job that runs the reconciliation every N minutes as
 defense in depth.
+
+#### Trial balance report
+
+The classic CFO snapshot: every account in the Armenian chart of
+accounts that has any activity, with its debit and credit totals
+in the natural sign of the account, and the assertion that
+**total debits == total credits** (the books balance).
+
+| Method | Path                                  | Query                                              | Returns                                                                              |
+| ------ | ------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| GET    | `/api/finance/trial-balance`          | `?asOfDate=&locale=hy\|en\|ru&format=json\|text`  | `{"accounts":[{code, label, class, type, natural_sign, debit, credit}], total_debit, total_credit, is_balanced, delta, account_count}` |
+
+The `natural_sign` is one of `debit` (asset, expense, management)
+or `credit` (liability, equity, revenue) — the column where the
+account's positive balance shows up. `is_balanced: true` is the
+healthy state; `is_balanced: false` (or `delta != 0`) means the
+books are out of balance and the operator should investigate.
+
+Example:
+
+```bash
+# JSON form (for a UI or a downstream service)
+curl -s "http://localhost:3000/api/finance/trial-balance?locale=hy" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0' | jq
+# -> {
+#      "tenant_id": 0,
+#      "as_of_date": "latest",
+#      "locale": "hy",
+#      "accounts": [
+#        { "code": "216", "label": "Ապdelays", "class": 2, "type": "asset",
+#          "natural_sign": "debit", "debit": 3500, "credit": 0 },
+#        { "code": "521", "label": "Kreditorakan pardaqner", "class": 5, "type": "liability",
+#          "natural_sign": "credit", "debit": 0, "credit": 3000 },
+#        { "code": "711", "label": "COGS", "class": 7, "type": "expense",
+#          "natural_sign": "debit", "debit": 1500, "credit": 0 },
+#        ...
+#      ],
+#      "total_debit": 6000, "total_credit": 6000,
+#      "is_balanced": true, "delta": 0, "account_count": 4
+#    }
+
+# Text form (for the Armenian print workflow)
+curl -s "http://localhost:3000/api/finance/trial-balance?locale=hy&format=text" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-Tenant-Id: 0'
+# -> Արdelays հdelays
+#    Ays mekum: latest
+#
+#    Kod   Հdelays                                       Debit        Credit
+#    --------------------------------------------------------------
+#    216   Ապdelays                                     3500             0
+#    521   Kreditorakan pardaqner gnmanqeri gitsvox          0           3000
+#    711   COGS                                          1500             0
+#    --------------------------------------------------------------
+#          Endelutyun                                    5000          5000
+#
+#    BALANCED
+```
 
 ### Typical end-to-end flow
 

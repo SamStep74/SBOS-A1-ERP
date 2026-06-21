@@ -50,6 +50,7 @@
 //   GET    /api/finance/journal-entries?since=&until=&source=&limit=&offset=
 //   POST   /api/finance/journal/reconcile  (Wave 20)
 //   GET    /api/finance/account-balances?asOfDate=
+//   GET    /api/finance/trial-balance?asOfDate=&locale=&format=  (Wave 22)
 //   GET    /api/finance/crm/contacts
 //   POST   /api/finance/crm/contacts
 //   GET    /api/finance/crm/leads?status=
@@ -133,6 +134,7 @@ import {
   getAccountBalance,
 } from './journal.js';
 import { findUnpostedMoves, reconcileJournal } from './reconciliation.js';
+import { renderTrialBalance, formatTrialBalanceText } from './trialBalance.js';
 import { requirePerm } from '../rbac/express-adapter.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1084,6 +1086,38 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.status(200).json({ dry_run: false, ...result });
     }),
   );
+
+  // ─── Phase 1 ERP: Trial balance (Wave 22) ───
+  //
+  // GET /api/finance/trial-balance?asOfDate=&locale=&format=
+  //   The classic CFO report: every account in the RA chart of
+  //   accounts that has any activity, with its debit and credit
+  //   totals in the natural sign of the account, and the
+  //   assertion that total debits == total credits (i.e. the
+  //   books balance). Optional asOfDate scopes the calculation
+  //   to a financial date inclusive.
+  //   The report format is JSON by default; pass format=text
+  //   to get a server-rendered text report (useful for the
+  //   Armenian print workflow).
+  app.get('/api/finance/trial-balance', async (req, res, next) => {
+    try {
+      const tenantId = readTenant(req);
+      const opts = {
+        asOfDate: req.query.asOfDate,
+        locale: String(req.query.locale || 'en'),
+      };
+      const report = await renderTrialBalance(pgAdapter, tenantId, opts);
+      const format = String(req.query.format || 'json');
+      if (format === 'text') {
+        const text = formatTrialBalanceText(report, opts.locale);
+        res.status(200).type('text/plain; charset=utf-8').send(text);
+        return;
+      }
+      res.status(200).json(report);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // ────────────────────────────────────────────────────────────────────
   // Phase 2 CRM (W71-1) — contacts + leads.
