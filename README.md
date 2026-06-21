@@ -973,6 +973,12 @@ SBOS-A1-ERP/
     └── sbos-a1-erp-bootstrap.json  ← wave 0 plan
 ```
 
+## Related
+
+- [Armosphera/autoresearch-sboss](https://github.com/Armosphera/autoresearch-sboss) — the eval-loop harness the validators come from
+- [Armosphera/A1-Validator](https://github.com/Armosphera/A1-Validator) — Python lib for the 37 business-ID validators; consumed via `lib/a1-validator-client.js`
+- [Armosphera/A1-Platform](https://github.com/Armosphera/A1-Platform) — the SBOSS product line
+
 ## License
 
 TBD (open-core proposal — see `docs/SBOS_VS_A1_ERP_HY.md`).
