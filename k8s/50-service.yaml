@@ -1,0 +1,30 @@
+# Service for the SBOS-A1-ERP.
+# ClusterIP by default; pair with
+# the Ingress (k8s/60-ingress.yaml)
+# for external access. The Service
+# routes traffic to any healthy pod
+# (the readinessProbe gates the
+# pod's membership in the Service).
+apiVersion: v1
+kind: Service
+metadata:
+  name: sbos-a1-erp
+  namespace: sbos-a1-erp
+  labels:
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio
+spec:
+  # ClusterIP: only reachable
+  # from inside the cluster. Use
+  # the Ingress for external
+  # access. Change to LoadBalancer
+  # for a single-replica test
+  # deploy (no Ingress).
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sbos-a1-erp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

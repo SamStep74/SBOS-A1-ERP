@@ -1,0 +1,34 @@
+# ConfigMap for non-secret env vars.
+# The operator tunes these per
+# environment; the secret values
+# (admin token, DB URL) live in a
+# Secret (k8s/20-secret.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sbos-a1-erp-config
+  namespace: sbos-a1-erp
+  labels:
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio
+data:
+  # Production settings. Override
+  # per-environment in a dev /
+  # staging cluster.
+  NODE_ENV: "production"
+  PORT: "3000"
+  # Listen on all interfaces in the
+  # pod (the Service routes to it).
+  HOST: "0.0.0.0"
+  # Real auth (not stub; stub is
+  # for tests only).
+  SBOS_AUTH_MODE: "real"
+  # The data dir is the PVC mount
+  # point; the SQLite file + admin
+  # token file live here.
+  SBOS_DB: "/var/lib/sbos-a1-erp/sbos.db"
+  SBOS_ADMIN_TOKEN_FILE: "/var/lib/sbos-a1-erp/admin-token"
+  # Default locale (Armenian-primary
+  # for the public release; override
+  # to en / ru for other locales).
+  SBOS_LOCALE: "en"

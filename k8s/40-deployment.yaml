@@ -1,0 +1,149 @@
+# Deployment for the SBOS-A1-ERP
+# bootable HTTP server.
+#
+# 3 replicas for HA. The PVC is
+# mounted at /var/lib/sbos-a1-erp
+# on every pod; the first pod to
+# boot mints the admin session
+# token and writes it to the PVC.
+# Subsequent pods reuse the token.
+#
+# Image: replace `:dev` with the
+# real tag for production
+# (e.g., `:v0.1.0`). The image is
+# published to GHCR
+# (ghcr.io/armosphera/sbos-a1-erp).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sbos-a1-erp
+  namespace: sbos-a1-erp
+  labels:
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  # 3 replicas for HA. The
+  # anti-affinity rule spreads the
+  # pods across nodes (when the
+  # cluster has multiple nodes).
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sbos-a1-erp
+  strategy:
+    # Rolling update: 1 pod at a
+    # time. Safer for a single-writer
+    # sqlite backend (each pod is
+    # read-only on the shared PVC;
+    # writes go to the same file
+    # via sqlite's locking).
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sbos-a1-erp
+        app.kubernetes.io/part-of: armosphera-portfolio
+    spec:
+      # Spread pods across nodes.
+      # Requires a cluster with 2+
+      # nodes; on a single-node
+      # cluster this is a no-op.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sbos-a1-erp
+      # The server has no in-cluster
+      # permissions. We could
+      # explicitly set
+      # serviceAccountName: default
+      # but that's the default.
+      containers:
+        - name: sbos-a1-erp
+          # Replace `:dev` with the
+          # real tag for production.
+          # The image is multi-arch
+          # (linux/amd64 + linux/arm64);
+          # see docs/ADR-0010 for the
+          # current single-arch status
+          # and the v0.3.0 multi-arch
+          # plan.
+          image: ghcr.io/armosphera/sbos-a1-erp:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          # env from ConfigMap + Secret.
+          envFrom:
+            - configMapRef:
+                name: sbos-a1-erp-config
+            - secretRef:
+                name: sbos-a1-erp-admin-token
+                # Only the admin token
+                # value is injected; the
+                # filename (key) is
+                # ignored (the server
+                # reads the SBOS_ADMIN_TOKEN_FILE
+                # path from the ConfigMap).
+                optional: true
+          # Mount the PVC at the
+          # configured data dir.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sbos-a1-erp
+          # Liveness + readiness probes.
+          # /api/health is the
+          # unauthenticated health
+          # endpoint (matches the
+          # Dockerfile HEALTHCHECK).
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Resource requests + limits.
+          # 256Mi / 500m is enough for
+          # the bootable product with
+          # a few thousand finance rows.
+          # Raise for larger deploys.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # SecurityContext: same
+          # hardening as the systemd
+          # unit (see scripts/sbos-a1-erp.service).
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sbos-a1-erp-data

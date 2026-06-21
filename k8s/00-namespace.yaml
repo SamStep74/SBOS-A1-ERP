@@ -1,0 +1,64 @@
+# SBOS-A1-ERP — Kubernetes manifests
+#
+# Multi-host / K8s deploy story for the
+# SBOS-A1-ERP. The 5 manifests below
+# are the production-grade K8s deploy
+# for a single-cluster, multi-replica
+# deploy.
+#
+# Why these specific patterns:
+# - **Deployment with 3 replicas** —
+#   HA in the face of a single-pod
+#   failure; the K8s scheduler
+#   spreads the pods across nodes
+#   when topologySpreadConstraints
+#   are set.
+# - **Shared PVC for the admin
+#   token file** — the admin
+#   session token is persisted to
+#   /var/lib/sbos-a1-erp/admin-token.
+#   All 3 pods mount the same PVC
+#   so the token is consistent
+#   across replicas. (For
+#   multi-cluster, use a RWX PVC
+#   or a shared secret backend —
+#   see k8s/README.md for the
+#   multi-cluster pattern.)
+# - **Liveness + readiness probes
+#   hit /api/health** — the
+#   unauthenticated health
+#   endpoint (matches the
+#   Dockerfile HEALTHCHECK).
+# - **No sidecars** — the
+#   bootable product is
+#   self-contained. Logs go to
+#   stdout (collected by the
+#   node's log driver).
+#
+# Why NOT Helm / Kustomize:
+# - The 5 manifests are small
+#   enough to read end-to-end
+#   in 5 min. Helm charts add
+#   templating that obscures
+#   the actual K8s resources.
+# - Kustomize overlays are useful
+#   when you have multiple
+#   environments (dev / staging /
+#   prod); the SBOS-A1-ERP is
+#   single-env per cluster.
+# - A single `kubectl apply -f
+#   k8s/` is the simplest deploy
+#   story.
+#
+# See k8s/README.md for the full
+# operator runbook (deploy,
+# upgrade, backup, troubleshoot).
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sbos-a1-erp
+  labels:
+    name: sbos-a1-erp
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio

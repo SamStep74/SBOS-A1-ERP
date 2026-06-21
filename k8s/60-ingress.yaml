@@ -1,0 +1,53 @@
+# Ingress for external access.
+#
+# This is a generic NGINX Ingress
+# manifest. Swap for your ingress
+# controller of choice (Traefik,
+# HAProxy, AWS ALB, etc.).
+#
+# TLS: the operator provisions a
+# cert-manager ClusterIssuer
+# + Certificate (or equivalent)
+# and references the secret here.
+# The annotation
+# `cert-manager.io/cluster-issuer`
+# tells cert-manager to mint a
+# Let's Encrypt cert.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sbos-a1-erp
+  namespace: sbos-a1-erp
+  labels:
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio
+  annotations:
+    # cert-manager: uncomment + set
+    # the ClusterIssuer name for TLS.
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # NGINX-specific: raise the body
+    # size limit for finance write
+    # endpoints (vendor bills, POs)
+    # which can have many lines.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  ingressClassName: nginx
+  # TLS: uncomment after
+  # cert-manager is set up.
+  # tls:
+  #   - hosts:
+  #       - sbos.example.com
+  #     secretName: sbos-a1-erp-tls
+  rules:
+    - host: sbos.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sbos-a1-erp
+                port:
+                  name: http

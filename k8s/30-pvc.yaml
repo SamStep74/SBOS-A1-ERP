@@ -1,0 +1,46 @@
+# Persistent storage for the SQLite
+# database + admin token file.
+#
+# The PVC is mounted at
+# /var/lib/sbos-a1-erp on every
+# pod. For a single-replica
+# deploy, ReadWriteOnce is enough.
+# For multi-replica, use a RWX
+# storage class (e.g., NFS /
+# Longhorn / EFS) so all replicas
+# can write to the same volume.
+#
+# Size: 10Gi is enough for
+# ~10,000 finance rows + the
+# admin token file. Grow as
+# needed; sqlite WAL files can
+# spike to ~2x the database size
+# during heavy writes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sbos-a1-erp-data
+  namespace: sbos-a1-erp
+  labels:
+    app.kubernetes.io/name: sbos-a1-erp
+    app.kubernetes.io/part-of: armosphera-portfolio
+spec:
+  accessModes:
+    # ReadWriteOnce for single-replica
+    # + multi-replica-with-RWX-storage
+    # (e.g., NFS / Longhorn / EFS).
+    # For multi-cluster, use a separate
+    # RWX storage class + driver.
+    - ReadWriteOnce
+  # Default 10Gi. Tune per
+  # environment; sqlite WAL can
+  # spike to 2x the DB size.
+  resources:
+    requests:
+      storage: 10Gi
+  # No storageClassName — uses the
+  # cluster's default. Override
+  # for environments with multiple
+  # storage classes (e.g., gp3 vs
+  # io2 on AWS).
+  # storageClassName: "gp3"
