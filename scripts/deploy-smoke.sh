@@ -795,6 +795,69 @@ else
 fi
 
 
+
+echo
+echo "=== STEP 7c: HVVH validation via A1-Validator wrapper (Wave 32) ==="
+# Verify that POST /api/finance/customers with a valid HHVH succeeds and
+# with an invalid HHVH returns 400. This exercises the new wiring
+# (server/finance/hvhh-validator.js + customer.js's async check).
+LOG7C="$TESTDIR/server-7c.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7C" 2>&1 &
+SERVER_PID_7C=$!
+SMOKE_RC=0
+cleanup_7c() { kill -9 $SERVER_PID_7C 2>/dev/null; wait $SERVER_PID_7C 2>/dev/null; }
+trap cleanup_7c EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7c"
+    tail -20 "$LOG7C"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7C=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7C" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7C" ]; then
+    echo "  FAIL: STEP 7c server did not print admin session token"
+    tail -20 "$LOG7C"
+    SMOKE_RC=1
+  else
+    CUST_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7C" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"SmokeCo","hvhh":"01234567"}')
+    if echo "$CUST_OUT" | grep -q '"hvhh":"01234567"'; then
+      echo "  OK customer create with valid hvhh persisted"
+    else
+      echo "  FAIL: valid hvhh did not persist: $CUST_OUT"
+      SMOKE_RC=1
+    fi
+
+    CUST_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/customers" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7C" \
+      -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"BadCo","hvhh":"123456789"}')
+    if [ "$CUST_BAD" = "400" ]; then
+      echo "  OK invalid 9-digit hvhh returns 400"
+    else
+      echo "  FAIL: invalid hvhh returned $CUST_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7C 2>/dev/null
+wait $SERVER_PID_7C 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
@@ -808,7 +871,8 @@ echo "=== STEP 8: Summary ==="
   echo "  - Graceful shutdown works (SIGTERM)"
   echo "  - Restart is idempotent"
   echo "  - Boot-time GL reconciliation ran (Wave 24)"
-  echo "  - A1-Validator client integration smoke (Wave 27)"
+  echo "  - A1-Validator client integration smoke (Wave 27)
+  - HVVH validation via A1-Validator wrapper (Wave 32)"
   exit 0
 # Pre-existing orphaned `else` from before my edit (no matching `if`).
 # The script always exits at the `exit 0` above, so the else was

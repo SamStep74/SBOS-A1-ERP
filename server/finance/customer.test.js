@@ -172,3 +172,53 @@ test('getCustomer: returns null for non-existent or cross-tenant id', async () =
   assert.equal(await getCustomer(db, c.id, 7), null);
   assert.notEqual(await getCustomer(db, c.id, 0), null);
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// A1-Validator wiring — the A1-Validator HTTP service is the new layer
+// between SBOS and the HHVH regex. With A1_VALIDATOR_URL unset, the
+// client is disabled and the local regex enforces 8 digits. The
+// integration tests below verify both: the default-disabled path
+// (no A1_VALIDATOR_URL → local regex) and the shape of the response.
+// ────────────────────────────────────────────────────────────────────────
+
+test('createCustomer: hvhh is validated via A1-Validator wrapper (disabled)', async () => {
+  // Default test env has no A1_VALIDATOR_URL → client disabled → local regex.
+  // 9 digits should be rejected.
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createCustomer(db, { name: 'BadCo', hvhh: '123456789' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createCustomer: hvhh with non-digit char is rejected', async () => {
+  const db = makeMemoryDb();
+  await assert.rejects(
+    createCustomer(db, { name: 'BadCo', hvhh: '1234567A' }, 0),
+    /hvhh must be exactly 8 digits/,
+  );
+});
+
+test('createCustomer: hvhh=null is allowed (optional field)', async () => {
+  const db = makeMemoryDb();
+  const out = await createCustomer(db, { name: 'NoHvhh', hvhh: null }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createCustomer: hvhh="" is allowed (empty string = absent)', async () => {
+  const db = makeMemoryDb();
+  const out = await createCustomer(db, { name: 'Empty', hvhh: '' }, 0);
+  assert.equal(out.hvhh, '');
+});
+
+test('createCustomer: hvhh omitted is allowed', async () => {
+  const db = makeMemoryDb();
+  const out = await createCustomer(db, { name: 'Omitted' }, 0);
+  assert.equal(out.hvhh, null);
+});
+
+test('createCustomer: valid 8-digit hvhh persists', async () => {
+  const db = makeMemoryDb();
+  const out = await createCustomer(db, { name: 'GoodCo', hvhh: '00123456' }, 0);
+  assert.equal(out.hvhh, '00123456');
+});
