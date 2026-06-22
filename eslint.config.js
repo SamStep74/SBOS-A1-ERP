@@ -56,6 +56,13 @@ export default [
         fetch: 'readonly',
         // AbortSignal is a global in Node 18+ (used by fetch with AbortSignal.timeout).
         AbortSignal: 'readonly',
+        // AbortController is a global in Node 18+; the lint
+        // config didn't list it explicitly, so any code that
+        // uses `new AbortController()` (e.g. for fetch timeouts)
+        // was getting no-undef false positives. AbortController
+        // isn't in core ECMA but is in the WHATWG Fetch spec —
+        // same provenance as fetch itself.
+        AbortController: 'readonly',
       },
     },
     rules: {

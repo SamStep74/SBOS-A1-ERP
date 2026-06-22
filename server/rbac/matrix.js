@@ -259,6 +259,11 @@ const PERMISSION_SETS = Object.freeze({
       'finance.purchase.receive',
       'finance.purchase.cancel',
       'finance.bill.void',
+      // Phase 2 catalog v2 wave 3d (f7fba19) — pricing
+      // rules. Read is the common case; create is the
+      // 'define a new discount' path (medium-sensitivity).
+      'finance.pricing_rule.read',
+      'finance.pricing_rule.create',
     ]),
   },
   FinancePeriodAdmin: {

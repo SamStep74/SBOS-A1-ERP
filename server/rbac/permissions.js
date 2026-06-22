@@ -596,6 +596,18 @@ const PERMISSIONS = Object.freeze({
     label: 'Create catalog bundle item',
     description: 'Add a new bundle item (a child row referencing a catalog item + quantity).',
   },
+  'finance.pricing_rule.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'Read catalog pricing rule',
+    description: 'View pricing rules (volume discounts, time-based discounts, category discounts).',
+  },
+  'finance.pricing_rule.create': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Create catalog pricing rule',
+    description: 'Define a new pricing rule (volume discount, time-based discount, category discount).',
+  },
   'finance.warehouse.read': {
     category: 'finance',
     sensitivity: 'low',

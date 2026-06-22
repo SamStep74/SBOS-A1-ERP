@@ -130,6 +130,10 @@ const checks = [
   { path: '/api/finance/catalog/bundles?archived=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/bundles?archived=true tenant=0' },
   { path: '/api/finance/catalog/bundles/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1 (404 for missing bundle)' },
   { path: '/api/finance/catalog/bundles/1/items', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/bundles/1/items (404 for missing bundle)' },
+  // Phase 2 catalog v2 wave 3d (f7fba19) — pricing rules
+  { path: '/api/finance/catalog/pricing-rules', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/pricing-rules tenant=0' },
+  { path: '/api/finance/catalog/pricing-rules?archived=true', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/catalog/pricing-rules?archived=true tenant=0' },
+  { path: '/api/finance/catalog/pricing-rules/1', headers: { 'X-Tenant-Id': '0' }, expect: 404, name: 'finance/catalog/pricing-rules/1 (404 for missing rule)' },
   // Phase 3 POS basics (W88-1) — registers + shifts reads
   // (empty DB → 200, items: []; 404 for missing register/shift)
   { path: '/api/finance/pos/registers', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'finance/pos/registers tenant=0' },

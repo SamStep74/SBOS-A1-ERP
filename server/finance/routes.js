@@ -198,6 +198,9 @@ import {
   getBundle,
   addBundleItem,
   listBundleItems,
+  createPricingRule,
+  listPricingRules,
+  getPricingRule,
 } from './catalog.js';
 import {
   openShift,
@@ -238,6 +241,7 @@ import {
   getDataQualityAlerts,
   applyCustomerMerge,
   listCustomerMergeLog,
+  undoCustomerMerge,
 } from './dataQuality.js';
 import {
   createReportSchedule,
@@ -3225,6 +3229,52 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // ────────────────────────────────────────────────────────────────────
+  // Phase 3 AI agents wave 4 (W102-1) — undo customer merge.
+  // ────────────────────────────────────────────────────────────────────
+
+  // POST /api/finance/ai/undo-merge
+  //   Inverse of apply-merge: re-assigns the listed invoices
+  //   back to the secondary, un-archives the secondary, and
+  //   stamps the audit row with the undo metadata.
+  //
+  //   Body: { merge_log_id, undone_reason?, undone_by_user_id? }
+  //     - merge_log_id: required positive integer (the audit
+  //       row id from the original apply-merge call)
+  //     - undone_reason: optional operator note (≤ 1024 chars)
+  //     - undone_by_user_id: optional; defaults to the current
+  //       user (req.user.id) if not provided in the body
+  //
+  //   Returns 200 with { merge_log_id, primary_id, secondary_id,
+  //   invoices_restored, payments_restored } on success.
+  //   Returns 404 if the merge log row doesn't exist in the tenant
+  //   or if the secondary was hard-deleted.
+  //   Returns 400 if the merge has already been undone, the
+  //   merge log row has no reassigned_invoice_ids (pre-W102-1),
+  //   or the secondary is not currently archived (state inconsistent).
+  app.post('/api/finance/ai/undo-merge', requireTenant, requirePerm('finance.customer.merge'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const body = req.body || {};
+      const input = {
+        merge_log_id: body.merge_log_id,
+        undone_reason: body.undone_reason ?? null,
+        undone_by_user_id: body.undone_by_user_id ?? (req.user && req.user.id) ?? null,
+      };
+      const result = await undoCustomerMerge(pgAdapter, input, tenantId);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        // Distinguish "not found" (404) from "bad input" (400).
+        if (/not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
   // Phase 3 reporting wave 3 (W96-1) — scheduled report runs.
   // ────────────────────────────────────────────────────────────────────
 
@@ -3358,6 +3408,69 @@ export function registerFinanceRoutes(app, opts = {}) {
     } catch (err) {
       if (err && err.name === 'ValueError') {
         return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Catalog pricing rules (Phase 2 catalog v2 wave 3d)
+  // Wires the createPricingRule / listPricingRules / getPricingRule
+  // pure functions (from W80-1) into 3 HTTP endpoints.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/catalog/pricing-rules
+  //   List pricing rules for the caller's tenant. Default
+  //   (archived=false) returns only non-archived rules;
+  //   ?archived=true returns all. ?type=volume_discount |
+  //   time_based | category_discount filters by rule type.
+  app.get('/api/finance/catalog/pricing-rules', requireTenant, requirePerm('finance.pricing_rule.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const archived = req.query.archived === 'true';
+      const type = typeof req.query.type === 'string' && req.query.type.length > 0 ? req.query.type : null;
+      const items = await listPricingRules(pgAdapter, tenantId, { archived, type });
+      res.status(200).json({ items });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/finance/catalog/pricing-rules
+  //   Create a new pricing rule. Body: { name, type,
+  //   config_json?, priority?, valid_from?, valid_to? }.
+  //   name + type are required. config_json is opaque
+  //   (≤8192 chars). priority defaults to 100.
+  app.post(
+    '/api/finance/catalog/pricing-rules',
+    requireTenant,
+    requirePerm('finance.pricing_rule.create'),
+    async (req, res, next) => {
+      try {
+        const tenantId = req.tenantId;
+        const out = await createPricingRule(pgAdapter, req.body || {}, tenantId);
+        res.status(201).json(out);
+      } catch (err) {
+        if (err && err.name === 'ValueError') {
+          return res.status(400).json({ error: 'bad_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/catalog/pricing-rules/:id
+  //   Get a single pricing rule. 404 if missing or
+  //   cross-tenant (W73-1 pattern).
+  app.get('/api/finance/catalog/pricing-rules/:id', requireTenant, requirePerm('finance.pricing_rule.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const ruleId = Number(req.params.id);
+      const item = await getPricingRule(pgAdapter, ruleId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
       }
       next(err);
     }
