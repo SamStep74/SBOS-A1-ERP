@@ -864,7 +864,35 @@ export async function transferStock(db, input, tenantId = 0) {
  * absolute value. Records the move with the `delta` column
  * storing the new absolute quantity (NOT the delta in/out).
  * Used for cycle counts, scrap, found stock, etc.
+ *
+ * Wave 54: the `reason` field is now MANDATORY (was optional
+ * before). A free-text reason is required by financial-control
+ * best practice: every variance must be explained. The reason
+ * is stored in `notes` and the controlled `reason_category` is
+ * stored in the dedicated column. Both are required: the
+ * category makes reporting/filtering possible, the free text
+ * captures the operator's explanation.
+ *
+ * Allowed reason_category values:
+ *   damage     — physical damage to the stock
+ *   loss       — stock that has gone missing (theft, unexplained)
+ *   found      — stock discovered during a count that wasn't on
+ *                the books (positive adjustment)
+ *   correction — operator error in a prior move
+ *   recount    — adjustment to reflect an actual physical count
+ *   writeoff   — formally retiring stock (e.g. expired, obsolete)
+ *   other      — anything else (the reason text is the explanation)
  */
+const ALLOWED_REASON_CATEGORIES = new Set([
+  'damage',
+  'loss',
+  'found',
+  'correction',
+  'recount',
+  'writeoff',
+  'other',
+]);
+
 export async function adjustStock(db, input, tenantId = 0) {
   if (!input || typeof input !== 'object') {
     throw new ValueError('input must be an object');
@@ -875,7 +903,34 @@ export async function adjustStock(db, input, tenantId = 0) {
     throw new ValueError('new_quantity must be a non-negative integer');
   }
   const newQty = input.new_quantity;
-  const reason = input.reason || null;
+  // Wave 54: reason is mandatory. Validate: non-empty after
+  // trim, min 5 chars, max 500 chars. The min-5 floor prevents
+  // single-letter or token-style reasons that don't actually
+  // explain anything; the max-500 keeps the audit log readable.
+  const rawReason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (rawReason.length < 5) {
+    throw new ValueError(
+      'reason is required and must be at least 5 characters (explains the variance)',
+    );
+  }
+  if (rawReason.length > 500) {
+    throw new ValueError('reason must be 500 characters or fewer');
+  }
+  const reason = rawReason;
+  // reason_category is also mandatory. Pick from the controlled
+  // list. The category makes the audit log filterable + reportable;
+  // the free-text reason captures the specific explanation.
+  const category = typeof input.reason_category === 'string' ? input.reason_category.trim() : '';
+  if (!category) {
+    throw new ValueError(
+      'reason_category is required (one of: damage, loss, found, correction, recount, writeoff, other)',
+    );
+  }
+  if (!ALLOWED_REASON_CATEGORIES.has(category)) {
+    throw new ValueError(
+      `reason_category must be one of: ${[...ALLOWED_REASON_CATEGORIES].join(', ')}`,
+    );
+  }
   const userId = input.user_id == null ? null : Number(input.user_id);
 
   const loc = await runQuery(
@@ -931,10 +986,10 @@ export async function adjustStock(db, input, tenantId = 0) {
   const moveRes = await runQuery(
     db,
     `INSERT INTO finance.stock_moves
-       (tenant_id, move_type, catalog_item_id, destination_location_id, quantity, unit_cost, delta, notes, created_by)
-     VALUES ($1, 'ADJUSTMENT', $2, $3, $4, $5, $6, $7, $8)
+       (tenant_id, move_type, catalog_item_id, destination_location_id, quantity, unit_cost, delta, notes, reason_category, created_by)
+     VALUES ($1, 'ADJUSTMENT', $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id`,
-    [tenantId, itemId, locationId, Math.abs(newQty - oldQty), currentAvg, newQty, reason, userId],
+    [tenantId, itemId, locationId, Math.abs(newQty - oldQty), currentAvg, newQty, reason, category, userId],
   );
   let moveId;
   if (moveRes.rows && moveRes.rows.length > 0 && moveRes.rows[0].id != null) {
@@ -1016,7 +1071,7 @@ export async function listMoves(db, tenantId = 0, { itemId, moveType, limit = 10
   const res = await runQuery(
     db,
     `SELECT id, move_type, catalog_item_id, source_location_id, destination_location_id,
-            quantity, unit_cost, reference, notes, delta, created_at
+            quantity, unit_cost, reference, notes, reason_category, delta, created_at
        FROM finance.stock_moves
       WHERE ${where.join(' AND ')}
       ORDER BY id DESC
@@ -1033,8 +1088,82 @@ export async function listMoves(db, tenantId = 0, { itemId, moveType, limit = 10
     unit_cost: Number(r.unit_cost),
     reference: r.reference,
     notes: r.notes,
+    // Wave 54: the controlled category for ADJUSTMENT moves
+    // (NULL for RECEIPT/DELIVERY/TRANSFER). Surfaced here so
+    // the standard listMoves endpoint can also be used for
+    // adjustment reporting.
+    reason_category: r.reason_category,
     delta: r.delta == null ? null : Number(r.delta),
     created_at: r.created_at,
+  }));
+}
+
+/**
+ * List inventory adjustments (move_type='ADJUSTMENT') with
+ * optional filters. Wave 54: a focused view on the adjustment
+ * subset, since these are the variance explanations the
+ * operator needs to review.
+ *
+ * Filters:
+ *   - category: filter by reason_category (e.g. 'damage')
+ *   - itemId:   filter by catalog_item_id
+ *   - locationId: filter by destination_location_id
+ *   - since:    ISO date string, return only moves on or after
+ *   - limit:    max rows (default 100, capped at 1000)
+ *
+ * Returns most-recent-first.
+ */
+export async function listAdjustments(db, tenantId = 0, opts = {}) {
+  const where = ["tenant_id = $1", "move_type = 'ADJUSTMENT'"];
+  const params = [tenantId];
+  let i = 2;
+  if (opts.category != null) {
+    where.push(`reason_category = $${i++}`);
+    params.push(String(opts.category));
+  }
+  if (opts.itemId != null) {
+    where.push(`catalog_item_id = $${i++}`);
+    params.push(Number(opts.itemId));
+  }
+  if (opts.locationId != null) {
+    where.push(`destination_location_id = $${i++}`);
+    params.push(Number(opts.locationId));
+  }
+  if (opts.since != null) {
+    // Date string compared lexicographically against the ISO
+    // timestamp stored in created_at. The format
+    // "YYYY-MM-DDTHH:MM:SS" sorts correctly.
+    where.push(`created_at >= $${i++}`);
+    params.push(String(opts.since));
+  }
+  const lim = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
+  const res = await runQuery(
+    db,
+    `SELECT id, move_type, catalog_item_id, destination_location_id,
+            quantity, unit_cost, reference, notes, reason_category, delta, created_at, created_by
+       FROM finance.stock_moves
+      WHERE ${where.join(' AND ')}
+      ORDER BY id DESC
+      LIMIT $${i}`,
+    [...params, lim],
+  );
+  return (res.rows || []).map((r) => ({
+    id: Number(r.id),
+    move_type: r.move_type,
+    catalog_item_id: Number(r.catalog_item_id),
+    location_id: r.destination_location_id == null ? null : Number(r.destination_location_id),
+    quantity: Number(r.quantity),
+    unit_cost: Number(r.unit_cost),
+    reference: r.reference,
+    // `notes` is the free-text reason; `reason` is the API
+    // alias so the operator doesn't have to know the column
+    // name. Both are returned for backwards compat.
+    reason: r.notes,
+    notes: r.notes,
+    reason_category: r.reason_category,
+    delta: r.delta == null ? null : Number(r.delta),
+    created_at: r.created_at,
+    created_by: r.created_by == null ? null : Number(r.created_by),
   }));
 }
 

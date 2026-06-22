@@ -194,7 +194,12 @@ async function main() {
   console.warn(`[sbos-server] admin session token: ${adminToken}`);
   console.warn(`[sbos-server] use: curl -H "Authorization: Bearer ${adminToken}" http://${host}:${port}/api/health`);
 
-  const pgAdapter = makePgAdapter(sqliteDb);
+  // Pass the live handle wrapped in a `{ current: ... }` ref so
+  // the pgAdapter follows the live handle after a swap (e.g. the
+  // restore route in Wave 52). Without the ref, the adapter
+  // captures the original handle and queries against it fail
+  // with "database is not open" after the swap.
+  const pgAdapter = makePgAdapter({ current: sqliteDb });
 
   // Boot-time GL reconciliation. The journal is a best-effort
   // projection of the operational moves (stock.receive /
@@ -251,9 +256,11 @@ async function main() {
     );
   }
   console.warn(`[sbos-server] listening on http://${host}:${port}`);
+  // Pass only `db`. createApp will construct the pgAdapter from
+  // the same dbRef that swapDb updates — that way the pgAdapter
+  // follows the live handle after a restore (Wave 52 live swap).
   const server = await start({
     db: sqliteDb,
-    pgAdapter,
     port,
     host,
     locale: process.env.SBOS_LOCALE || 'en',

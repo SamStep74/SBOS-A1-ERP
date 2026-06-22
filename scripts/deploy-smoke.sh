@@ -2271,6 +2271,171 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5u: Inventory adjustment reasons (Wave 54) ==="
+# Smoke coverage for the new mandatory reason + reason_category
+# on POST /api/finance/stock/adjust, and the new
+# GET /api/finance/stock/adjustments endpoint.
+#
+# The smoke needs a real catalog item + location to adjust. The
+# earlier steps in this smoke have already created at least one
+# catalog item + warehouse + location. We:
+#   1. Look up the first catalog item + location
+#   2. Receive some stock against it (so the adjustment has a non-zero base)
+#   3. Try POST /api/finance/stock/adjust without a reason → 400
+#   4. Try with a short reason → 400
+#   5. Try with a bad reason_category → 400
+#   6. Try with valid reason + category → 200/201
+#   7. GET /api/finance/stock/adjustments returns the new adjustment
+#   8. GET ?category=damage filters correctly
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  function postJson(p, body) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: {
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': 'application/json',
+        'content-length': body ? JSON.stringify(body).length : 2,
+      },
+    }, body ? JSON.stringify(body) : '{}');
+  }
+
+  (async () => {
+    // 1. Find a catalog item + location.
+    const items = await get('/api/finance/catalog/items?limit=1');
+    if (items.status !== 200 || !items.body.items || items.body.items.length === 0) {
+      console.log('  FAIL no catalog items available (items.status=' + items.status + ')');
+      process.exit(1);
+    }
+    const item = items.body.items[0];
+
+    const locs = await get('/api/finance/stock/locations?limit=1');
+    if (locs.status !== 200 || !locs.body.items || locs.body.items.length === 0) {
+      console.log('  FAIL no stock locations available (locs.status=' + locs.status + ')');
+      process.exit(1);
+    }
+    const loc = locs.body.items[0];
+
+    // 2. POST without reason → 400.
+    const noReason = await postJson('/api/finance/stock/adjust', {
+      catalog_item_id: item.id,
+      location_id: loc.id,
+      new_quantity: 5,
+      reason_category: 'recount',
+    });
+    if (noReason.status !== 400) {
+      console.log('  FAIL no reason: status=' + noReason.status + ' body=' + JSON.stringify(noReason.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 400 adjust without reason (mandatory reason validation)');
+
+    // 3. POST with reason < 5 chars → 400.
+    const shortReason = await postJson('/api/finance/stock/adjust', {
+      catalog_item_id: item.id,
+      location_id: loc.id,
+      new_quantity: 5,
+      reason: 'oops',
+      reason_category: 'recount',
+    });
+    if (shortReason.status !== 400) {
+      console.log('  FAIL short reason: status=' + shortReason.status);
+      process.exit(1);
+    }
+    console.log('  PASS 400 adjust with reason shorter than 5 chars');
+
+    // 4. POST with invalid category → 400.
+    const badCat = await postJson('/api/finance/stock/adjust', {
+      catalog_item_id: item.id,
+      location_id: loc.id,
+      new_quantity: 5,
+      reason: 'unit test reason',
+      reason_category: 'bogus',
+    });
+    if (badCat.status !== 400) {
+      console.log('  FAIL bad category: status=' + badCat.status);
+      process.exit(1);
+    }
+    console.log('  PASS 400 adjust with invalid reason_category');
+
+    // 5. POST with valid reason + category → 201.
+    const ok = await postJson('/api/finance/stock/adjust', {
+      catalog_item_id: item.id,
+      location_id: loc.id,
+      new_quantity: 42,
+      reason: 'W54 smoke test: cycle count correction',
+      reason_category: 'recount',
+    });
+    if (ok.status !== 201 && ok.status !== 200) {
+      console.log('  FAIL valid adjust: status=' + ok.status + ' body=' + JSON.stringify(ok.body).slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS ' + ok.status + ' adjust with valid reason + category (move_id=' + (ok.body.move_id || '?') + ', delta=' + (ok.body.delta || '?') + ')');
+
+    // 6. GET /api/finance/stock/adjustments returns the new row.
+    const list = await get('/api/finance/stock/adjustments');
+    if (list.status !== 200 || !Array.isArray(list.body.items)) {
+      console.log('  FAIL list: status=' + list.status);
+      process.exit(1);
+    }
+    const found = list.body.items.find((m) => m.reason === 'W54 smoke test: cycle count correction');
+    if (!found) {
+      console.log('  FAIL new adjustment not in list (items=' + list.body.items.length + ')');
+      process.exit(1);
+    }
+    if (found.reason_category !== 'recount') {
+      console.log('  FAIL reason_category not persisted: ' + found.reason_category);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/stock/adjustments includes the new row (category=' + found.reason_category + ')');
+
+    // 7. ?category=damage filters out the recount adjustment.
+    const damage = await get('/api/finance/stock/adjustments?category=damage');
+    if (damage.status !== 200) {
+      console.log('  FAIL category filter: status=' + damage.status);
+      process.exit(1);
+    }
+    if (damage.body.items.some((m) => m.reason === 'W54 smoke test: cycle count correction')) {
+      console.log('  FAIL category=damage should not include the recount row');
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/finance/stock/adjustments?category=damage filters correctly (n=' + damage.body.items.length + ')');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  inventory adjustment reasons OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

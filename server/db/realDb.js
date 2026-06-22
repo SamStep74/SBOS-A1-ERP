@@ -47,20 +47,40 @@ export function stripFinanceSchemaPrefix(sql) {
 /**
  * Wrap an existing DatabaseSync in a pg-style adapter.
  *
- * @param {DatabaseSync} sqliteDb
+ * @param {DatabaseSync | { current: DatabaseSync }} sqliteDbOrRef
+ *   Either a `DatabaseSync` handle (legacy path — captured at
+ *   construction time, breaks after a live db swap) or a
+ *   `{ current: handle }` ref (live-swap-safe — the adapter
+ *   dereferences `current` per query, so it follows the live
+ *   handle that createApp owns).
  * @returns {{ query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> }}
  */
-export function makePgAdapter(sqliteDb) {
-  if (!sqliteDb || typeof sqliteDb.prepare !== 'function') {
-    throw new TypeError('makePgAdapter requires a node:sqlite DatabaseSync handle');
+export function makePgAdapter(sqliteDbOrRef) {
+  if (!sqliteDbOrRef) {
+    throw new TypeError('makePgAdapter requires a DatabaseSync handle or a { current: ... } ref');
   }
+  // Resolve the live handle per call. The legacy path is a
+  // captured `DatabaseSync` (sqliteDbOrRef.prepare is a function).
+  // The live-swap path is a ref object (sqliteDbOrRef.current is
+  // the handle). Detect which by duck-typing.
+  const isRef = typeof sqliteDbOrRef.prepare !== 'function';
+  const getDb = isRef
+    ? () => {
+        const cur = sqliteDbOrRef.current;
+        if (!cur) {
+          throw new Error('pgAdapter: db is not open (mid-swap or not initialized)');
+        }
+        return cur;
+      }
+    : () => sqliteDbOrRef;
   return {
     async query(sql, params = []) {
+      const db = getDb();
       const translated = String(sql)
         .replace(/\$\d+/g, '?')
         .replace(/::\s*[a-zA-Z_][a-zA-Z0-9_]*/g, '')
         .replace(/(?<![A-Za-z0-9_'".])finance\.([A-Za-z_][A-Za-z0-9_]*)/g, '$1');
-      const stmt = sqliteDb.prepare(translated);
+      const stmt = db.prepare(translated);
       // node:sqlite's `Statement.all()` returns the result rows for
       // SELECTs, INSERT/UPDATE/DELETE-with-RETURNING, and WITH-CTE
       // queries. For a plain INSERT/UPDATE/DELETE (no RETURNING), it

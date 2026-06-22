@@ -30,7 +30,8 @@
 //   POST   /api/finance/stock/receive
 //   POST   /api/finance/stock/deliver
 //   POST   /api/finance/stock/transfer
-//   POST   /api/finance/stock/adjust
+//   POST   /api/finance/stock/adjust                  (finance.stock.move) — manual adjust with reason
+//   GET    /api/finance/stock/adjustments             (finance.stock.read) — list adjustments (Wave 54)
 //   GET    /api/finance/vendors
 //   POST   /api/finance/vendors
 //   GET    /api/finance/purchase-orders
@@ -146,6 +147,7 @@ import {
   adjustStock,
   listBalances,
   listMoves,
+  listAdjustments,
   getReplenishmentReport,
 } from './inventory.js';
 import {
@@ -1397,6 +1399,31 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.locals.createdId = out.id;
       res.status(201).json(out);
     }),
+  );
+
+  // GET /api/finance/stock/adjustments — list inventory
+  // adjustments (move_type='ADJUSTMENT') with filters. Wave 54
+  // addition: paired with the now-mandatory reason + category
+  // on POST /api/finance/stock/adjust, this lets the operator
+  // audit variance explanations.
+  //
+  // Filters: ?category, ?itemId, ?locationId, ?since, ?limit
+  // Perm: finance.stock.read (existing).
+  app.get(
+    '/api/finance/stock/adjustments',
+    requireTenant,
+    requirePerm('finance.stock.read'),
+    async (req, res) => {
+      const tenantId = req.tenantId;
+      const items = await listAdjustments(pgAdapter, tenantId, {
+        category: req.query.category,
+        itemId: req.query.itemId,
+        locationId: req.query.locationId,
+        since: req.query.since,
+        limit: req.query.limit,
+      });
+      res.json({ items });
+    },
   );
 
   // ─── Phase 1 ERP: Purchase module ───

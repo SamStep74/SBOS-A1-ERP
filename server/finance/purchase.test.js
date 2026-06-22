@@ -99,6 +99,7 @@ function makeMemoryDb() {
       reference TEXT,
       delta INTEGER,
       notes TEXT,
+      reason_category TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );

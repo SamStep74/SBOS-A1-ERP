@@ -128,6 +128,7 @@ function makeMemoryDb() {
       expected_date TEXT,
       received_quantity INTEGER NOT NULL DEFAULT 0,
       notes TEXT,
+      reason_category TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       cancelled_at TEXT,

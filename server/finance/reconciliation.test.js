@@ -83,6 +83,7 @@ function makeMemoryDb() {
       source_location_id INTEGER, destination_location_id INTEGER,
       quantity INTEGER NOT NULL, unit_cost INTEGER NOT NULL DEFAULT 0,
       reference TEXT, delta INTEGER, notes TEXT,
+      reason_category TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );

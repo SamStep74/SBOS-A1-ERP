@@ -24,6 +24,7 @@ import {
   adjustStock,
   listBalances,
   listMoves,
+  listAdjustments,
   getReplenishmentReport,
   ValueError,
 } from './inventory.js';
@@ -106,6 +107,7 @@ function makeMemoryDb() {
       reference TEXT,
       delta INTEGER,
       notes TEXT,
+      reason_category TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );
@@ -468,7 +470,7 @@ test('adjustStock: sets absolute quantity, records delta', async () => {
   await receiveStock(db, { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 10, unit_cost: 0 }, 0);
   const out = await adjustStock(
     db,
-    { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: 8, reason: 'cycle count' },
+    { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: 8, reason: 'cycle count correction', reason_category: 'recount' },
     0,
   );
   assert.equal(out.old_quantity, 10);
@@ -486,6 +488,212 @@ test('adjustStock: rejects negative new_quantity', async () => {
     adjustStock(db, { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: -1 }, 0),
     ValueError,
   );
+});
+
+// ─── Wave 54: mandatory reason + reason_category on adjustments ───
+
+test('adjustStock: rejects missing reason (Wave 54 mandatory reason)', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(db, { sku: 'W54a', name: 'W54a' }, 0);
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 10, unit_cost: 0 },
+    0,
+  );
+  // No reason at all → 400.
+  await assert.rejects(
+    adjustStock(
+      db,
+      { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: 8, reason_category: 'recount' },
+      0,
+    ),
+    (err) => /reason is required/.test(err.message),
+  );
+  // Empty string reason → 400.
+  await assert.rejects(
+    adjustStock(
+      db,
+      {
+        catalog_item_id: item.id,
+        location_id: stockLoc.id,
+        new_quantity: 8,
+        reason: '',
+        reason_category: 'recount',
+      },
+      0,
+    ),
+    (err) => /reason is required/.test(err.message),
+  );
+  // Whitespace-only reason → 400.
+  await assert.rejects(
+    adjustStock(
+      db,
+      {
+        catalog_item_id: item.id,
+        location_id: stockLoc.id,
+        new_quantity: 8,
+        reason: '   ',
+        reason_category: 'recount',
+      },
+      0,
+    ),
+    (err) => /reason is required/.test(err.message),
+  );
+});
+
+test('adjustStock: rejects reason shorter than 5 chars', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(db, { sku: 'W54b', name: 'W54b' }, 0);
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 5, unit_cost: 0 },
+    0,
+  );
+  await assert.rejects(
+    adjustStock(
+      db,
+      {
+        catalog_item_id: item.id,
+        location_id: stockLoc.id,
+        new_quantity: 3,
+        reason: 'oops',
+        reason_category: 'correction',
+      },
+      0,
+    ),
+    (err) => /at least 5 characters/.test(err.message),
+  );
+});
+
+test('adjustStock: rejects unknown reason_category', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(db, { sku: 'W54c', name: 'W54c' }, 0);
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 5, unit_cost: 0 },
+    0,
+  );
+  await assert.rejects(
+    adjustStock(
+      db,
+      {
+        catalog_item_id: item.id,
+        location_id: stockLoc.id,
+        new_quantity: 3,
+        reason: 'unit test',
+        reason_category: 'invalid_category',
+      },
+      0,
+    ),
+    (err) => /reason_category must be one of/.test(err.message),
+  );
+});
+
+test('adjustStock: accepts all 7 valid reason categories + writes reason_category to the move row', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(db, { sku: 'W54d', name: 'W54d' }, 0);
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 100, unit_cost: 0 },
+    0,
+  );
+  const categories = [
+    'damage',
+    'loss',
+    'found',
+    'correction',
+    'recount',
+    'writeoff',
+    'other',
+  ];
+  for (let i = 0; i < categories.length; i++) {
+    const cat = categories[i];
+    const newQty = 50 + i; // 50, 51, ..., 56 — distinguishable moves
+    const out = await adjustStock(
+      db,
+      {
+        catalog_item_id: item.id,
+        location_id: stockLoc.id,
+        new_quantity: newQty,
+        reason: 'W54 test for category ' + cat,
+        reason_category: cat,
+      },
+      0,
+    );
+    assert.ok(out.move_id, `expected move_id for category ${cat}`);
+  }
+  // Verify all 7 categories made it into the listAdjustments
+  // view (the move rows were persisted with reason_category).
+  const items = await listAdjustments(db, 0, { itemId: item.id });
+  const cats = items.map((m) => m.reason_category).sort();
+  assert.deepEqual(
+    cats,
+    [...categories].sort(),
+    'all 7 categories must be persisted on the move rows',
+  );
+  // Each item must also have the free-text reason.
+  for (const m of items) {
+    assert.ok(
+      m.reason && m.reason.startsWith('W54 test for category '),
+      `each adjustment must carry its free-text reason, got ${m.reason}`,
+    );
+  }
+});
+
+test('listAdjustments: returns ADJUSTMENT moves with the reason + category', async () => {
+  const db = makeMemoryDb();
+  const { stockLoc } = await setupWarehouseAndLocation(db);
+  const item = await createCatalogItem(db, { sku: 'W54e', name: 'W54e' }, 0);
+  await receiveStock(
+    db,
+    { catalog_item_id: item.id, destination_location_id: stockLoc.id, quantity: 50, unit_cost: 0 },
+    0,
+  );
+  // Create 2 adjustments with different categories.
+  await adjustStock(
+    db,
+    {
+      catalog_item_id: item.id,
+      location_id: stockLoc.id,
+      new_quantity: 40,
+      reason: 'unit test damage',
+      reason_category: 'damage',
+    },
+    0,
+  );
+  await adjustStock(
+    db,
+    {
+      catalog_item_id: item.id,
+      location_id: stockLoc.id,
+      new_quantity: 30,
+      reason: 'unit test recount',
+      reason_category: 'recount',
+    },
+    0,
+  );
+  // Unfiltered list returns both.
+  const all = await listAdjustments(db, 0);
+  assert.equal(all.length, 2);
+  for (const m of all) {
+    assert.equal(m.move_type, 'ADJUSTMENT');
+    assert.ok(m.reason && m.reason.length >= 5, 'reason must be present');
+    assert.ok(['damage', 'recount'].includes(m.reason_category));
+  }
+  // Filter by category.
+  const damage = await listAdjustments(db, 0, { category: 'damage' });
+  assert.equal(damage.length, 1);
+  assert.equal(damage[0].reason_category, 'damage');
+  const recount = await listAdjustments(db, 0, { category: 'recount' });
+  assert.equal(recount.length, 1);
+  assert.equal(recount[0].reason_category, 'recount');
+  // Filter with no matches.
+  const loss = await listAdjustments(db, 0, { category: 'loss' });
+  assert.equal(loss.length, 0);
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -529,7 +737,7 @@ test('end-to-end: receive → transfer → deliver cycle', async () => {
   // 4. Adjust stockLoc to 12 (cycle count says 12, not 15)
   const a1 = await adjustStock(
     db,
-    { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: 12, reason: 'cycle count' },
+    { catalog_item_id: item.id, location_id: stockLoc.id, new_quantity: 12, reason: 'cycle count correction', reason_category: 'recount' },
     0,
   );
   assert.equal(a1.delta, -3);

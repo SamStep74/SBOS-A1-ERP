@@ -310,8 +310,34 @@ export async function createApp({
   if (!db) {
     throw new TypeError('createApp requires a db (opts.db)');
   }
-  if (!pgAdapter) {
-    throw new TypeError('createApp requires a pgAdapter (opts.pgAdapter)');
+  // The db is held in a mutable ref (`dbRef.current`) so it can
+  // be swapped at runtime — POST /api/rbac/backup/restore closes
+  // the current handle, replaces the underlying file, and reopens.
+  // Finance routes pick up the new handle via the pgAdapter
+  // (which reads `dbRef.current` per query); RBAC routes use
+  // `dbRef.current` directly; auth middleware reads `dbRef.current`
+  // per request.
+  const dbRef = { current: db };
+  // Construct the pgAdapter from the SAME ref so a live swap
+  // propagates to every finance route. If the caller passed in
+  // a pgAdapter, it's a legacy adapter built from a captured
+  // handle — warn but allow it (callers upgrading from the old
+  // API get to migrate gradually). New code should pass only
+  // `db` and let createApp wire the pgAdapter.
+  if (pgAdapter) {
+    // Legacy path: the caller-provided pgAdapter is built from
+    // a captured handle. It's fine until a live swap happens
+    // (then it fails with "database is not open"). For
+    // background compat we keep it but emit a one-time warning.
+    process.emitWarning(
+      'createApp: pgAdapter is captured at construction time. ' +
+        'Pass `db` only and let createApp wire the pgAdapter ' +
+        'for live-swap support.',
+      'DeprecationWarning',
+    );
+  } else {
+    const { makePgAdapter } = await import('./db/realDb.js');
+    pgAdapter = makePgAdapter(dbRef);
   }
   const app = express();
 
@@ -326,9 +352,13 @@ export async function createApp({
   // The db is held in a mutable ref (`dbRef.current`) so it can
   // be swapped at runtime — POST /api/rbac/backup/restore closes
   // the current handle, replaces the underlying file, and reopens.
-  // Finance routes pick up the new handle via `req.app.locals.db`
-  // on the next request; RBAC routes use `dbRef.current` directly.
-  const dbRef = { current: db };
+  // Finance routes pick up the new handle via the pgAdapter
+  // (which reads `dbRef.current` per query); RBAC routes use
+  // `dbRef.current` directly; auth middleware reads `dbRef.current`
+  // per request.
+  // (dbRef is already constructed at the top of createApp; this
+  // assignment below is a no-op for clarity at this point in
+  // the function.)
   app.locals.db = dbRef.current;
   app.locals.pgAdapter = pgAdapter;
   // swapDb is the canonical way to replace the live handle.

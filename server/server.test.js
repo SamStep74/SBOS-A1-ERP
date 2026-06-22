@@ -228,6 +228,7 @@ function makeFinanceDb() {
       reference TEXT,
       delta INTEGER,
       notes TEXT,
+      reason_category TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );
@@ -1141,6 +1142,65 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     });
     assert.equal(r.status, 404);
     assert.equal(r.body.error, 'user_not_found');
+  });
+
+  // ─── Wave 54: inventory adjustment reasons (mandatory + categorized) ───
+
+  test('54a. POST /api/finance/stock/adjust without reason returns 400 (mandatory reason)', async () => {
+    // Wave 54: the reason field is now mandatory. The body must
+    // include a free-text explanation of why the stock is being
+    // adjusted, plus a controlled reason_category. Missing reason
+    // → 400.
+    const r = await postJson(server, '/api/finance/stock/adjust', {
+      catalog_item_id: 1,
+      location_id: 1,
+      new_quantity: 5,
+      reason_category: 'recount',
+    });
+    assert.equal(r.status, 400);
+    assert.ok(/reason/i.test(r.body.message || ''), 'error must mention reason');
+  });
+
+  test('54b. POST /api/finance/stock/adjust with reason shorter than 5 chars returns 400', async () => {
+    const r = await postJson(server, '/api/finance/stock/adjust', {
+      catalog_item_id: 1,
+      location_id: 1,
+      new_quantity: 5,
+      reason: 'oops',
+      reason_category: 'recount',
+    });
+    assert.equal(r.status, 400);
+    assert.ok(/at least 5 characters/i.test(r.body.message || ''));
+  });
+
+  test('54c. POST /api/finance/stock/adjust with invalid reason_category returns 400', async () => {
+    const r = await postJson(server, '/api/finance/stock/adjust', {
+      catalog_item_id: 1,
+      location_id: 1,
+      new_quantity: 5,
+      reason: 'unit test reason',
+      reason_category: 'bogus_category',
+    });
+    assert.equal(r.status, 400);
+    assert.ok(/reason_category/i.test(r.body.message || ''));
+  });
+
+  test('54d. GET /api/finance/stock/adjustments returns 200 with the items shape', async () => {
+    // The endpoint exists + accepts the finance.stock.read perm.
+    // Even with no adjustments, it returns {items: []}.
+    const r = await get(server, '/api/finance/stock/adjustments');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+  });
+
+  test('54e. GET /api/finance/stock/adjustments?category=damage accepts a category filter', async () => {
+    // The category filter is optional. With no matches the
+    // response is 200 + items=[]; with matches the items array
+    // is filtered. We just verify the endpoint accepts the
+    // query param without crashing.
+    const r = await get(server, '/api/finance/stock/adjustments?category=damage');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {
@@ -2112,10 +2172,15 @@ describe('createApp validation guards', () => {
     );
   });
 
-  test('rejects missing pgAdapter', async () => {
+  test('accepts missing pgAdapter (constructed from dbRef by default)', async () => {
     const { createApp } = await import('./index.js');
     const { sqliteDb } = makeFinanceDb();
-    await assert.rejects(() => createApp({ db: sqliteDb }), /createApp requires a pgAdapter/);
+    // Wave 54: pgAdapter is now optional. createApp constructs
+    // it from the same dbRef that swapDb updates, so the live
+    // swap propagates to every finance route. Old code required
+    // a caller-supplied pgAdapter; new code wires it internally.
+    const app = await createApp({ db: sqliteDb });
+    assert.ok(app, 'createApp must succeed with just `db`');
   });
 });
 
