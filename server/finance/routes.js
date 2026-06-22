@@ -230,6 +230,8 @@ import {
   findDuplicateCustomers,
   findHvhhDrift,
   getDataQualitySummary,
+  suggestMergeCandidates,
+  getDataQualityAlerts,
 } from './dataQuality.js';
 import {
   listJournalEntries,
@@ -2881,6 +2883,8 @@ export function registerFinanceRoutes(app, opts = {}) {
 //   GET    /api/finance/ai/duplicates               (Phase 3 W93-1)
 //   GET    /api/finance/ai/hvhh-drift
 //   GET    /api/finance/ai/data-quality
+//   GET    /api/finance/ai/merge-candidates        (Phase 3 W94-1)
+//   GET    /api/finance/ai/alerts?threshold=
   //   Add a per-employee pay line to a draft payroll run.
   //   Body: { employee_id, contract_id, base_salary_amd,
   //   bonus_amd?, deductions_amd?, tax_amd?, worked_days?,
@@ -3016,6 +3020,43 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const out = await getDataQualitySummary(pgAdapter, tenantId);
       res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 AI agents wave 2 (W94-1) — merge candidates + alerts.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/ai/merge-candidates
+  //   For each duplicate group, propose a primary + secondary
+  //   merge plan (the operator decides whether to apply).
+  app.get('/api/finance/ai/merge-candidates', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const items = await suggestMergeCandidates(pgAdapter, tenantId);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/ai/alerts?threshold=80
+  //   Data quality alerts: severity-sorted list of specific
+  //   issues that exceed the threshold. Default threshold 80.
+  app.get('/api/finance/ai/alerts', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const threshold = req.query.threshold ? Number(req.query.threshold) : 80;
+      const items = await getDataQualityAlerts(pgAdapter, tenantId, threshold);
+      res.status(200).json({ items });
     } catch (err) {
       if (err && err.name === 'ValueError') {
         return res.status(400).json({ error: 'bad_request', message: err.message });

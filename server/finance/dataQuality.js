@@ -382,3 +382,217 @@ export async function getDataQualitySummary(db, tenantId = 0) {
     },
   };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 2 (W94-1) — suggestMergeCandidates + getDataQualityAlerts.
+// These are ADVISORY functions — they propose what to do, they do
+// NOT mutate state. The operator must explicitly apply the merge
+// (via a future applyMerge function) or fix the data quality issues
+// (via direct DB updates + audit trail). This separation matters:
+// auto-correction would skip the audit trail + the operator's
+// judgment call on which record to keep.
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * For each duplicate group, propose a merge plan: pick the
+ * PRIMARY record to keep + the SECONDARY record to merge into
+ * the primary. The primary selection logic:
+ *   - Prefer the record with a non-null hvhh (legal entity is
+ *     the one with a TIN).
+ *   - On tie, prefer the OLDEST record (lower id; the one
+ *     that has been in the system longest — likely the
+ *     authoritative one).
+ *
+ * For each merge plan, also count the number of invoices and
+ * payments that would need to be re-assigned from the
+ * secondary to the primary. The COUNT(*) queries are read-
+ * only — no mutations are made by this function.
+ *
+ * Returns an array of merge plans. Each plan is:
+ *   { group_id, match_type, match_value, primary: { id, code,
+ *     name, hvhh, email, created_at }, secondary: { id, code,
+ *     name, hvhh, email, created_at }, invoice_count, payment_count,
+ *     reason }
+ *
+ * The group_id is a stable identifier (match_type + match_value
+ * joined with ':') so the UI can render the same plan after
+ * a page refresh.
+ *
+ * Empty array if no duplicates.
+ *
+ * @returns {Promise<Array<object>>}
+ */
+export async function suggestMergeCandidates(db, tenantId = 0) {
+  assertTenantId(tenantId);
+  const dups = await findDuplicateCustomers(db, tenantId);
+  const plans = [];
+  let planCounter = 0;
+  for (const group of dups) {
+    // Pick the primary: prefer hvhh; tie-break by lowest id.
+    const sorted = [...group.customers].sort((a, b) => {
+      // Both have hvhh: tie-break by id ASC
+      if ((a.hvhh != null) === (b.hvhh != null)) {
+        return a.id - b.id;
+      }
+      // Prefer the one with hvhh
+      return a.hvhh != null ? -1 : 1;
+    });
+    const primary = sorted[0];
+    const secondary = sorted[1];
+    // Count invoices + payments that would be re-assigned.
+    // We need a count per secondary, so the operator can see
+    // "this merge would re-assign 12 invoices and 8 payments".
+    const invCount = await runQuery(
+      db,
+      `SELECT COUNT(*) AS n FROM finance.invoices
+        WHERE tenant_id = $1 AND customer_id = $2`,
+      [tenantId, secondary.id],
+    );
+    // The payments table may not have a tenant_id column; for
+    // safety, count via JOIN to invoices. If a payment exists
+    // for an invoice of the secondary customer, it counts.
+    const payCount = await runQuery(
+      db,
+      `SELECT COUNT(*) AS n
+         FROM finance.payments p
+         JOIN finance.invoices i ON i.id = p.invoice_id
+        WHERE i.tenant_id = $1 AND i.customer_id = $2`,
+      [tenantId, secondary.id],
+    );
+    plans.push({
+      group_id: `${group.match_type}:${group.match_value}:${++planCounter}`,
+      match_type: group.match_type,
+      match_value: group.match_value,
+      primary: {
+        id: primary.id,
+        code: primary.code ?? null,
+        name: primary.name,
+        hvhh: primary.hvhh ?? null,
+        email: primary.email ?? null,
+        created_at: primary.created_at,
+      },
+      secondary: {
+        id: secondary.id,
+        code: secondary.code ?? null,
+        name: secondary.name,
+        hvhh: secondary.hvhh ?? null,
+        email: secondary.email ?? null,
+        created_at: secondary.created_at,
+      },
+      invoice_count: Number(invCount.rows?.[0]?.n ?? 0),
+      payment_count: Number(payCount.rows?.[0]?.n ?? 0),
+      reason: group.match_type === 'hvhh'
+        ? `Both customers share the same TIN (${group.match_value}); same legal entity.`
+        : `Both customers have the same normalized name (${group.match_value}); possible duplicate.`,
+    });
+  }
+  return plans;
+}
+
+/**
+ * Generate data quality alerts for the tenant. An alert is a
+ * specific issue that exceeds a threshold — the operator
+ * should fix it before it becomes a bigger problem.
+ *
+ * Each alert has:
+ *   - severity: 'critical' (score < 60) | 'warning' (60-79) |
+ *     'info' (80-89) | null (>= 90, no alert)
+ *   - code: a machine-readable identifier (e.g. 'duplicates',
+ *     'hvhh_drift', 'invoices_missing_hvhh', 'score_below_threshold')
+ *   - message: human-readable description
+ *   - count: the number of records affected (or null for the
+ *     overall score alert)
+ *   - recommended_action: what to do
+ *
+ * Sorted by severity (critical first) then by count DESC.
+ *
+ * The threshold is a 0-100 number below which the overall
+ * score is considered an alert. Default 80.
+ *
+ * @param {number} [threshold=80]
+ * @returns {Promise<Array<{ severity, code, message, count,
+ *   recommended_action }>>}
+ */
+export async function getDataQualityAlerts(db, tenantId = 0, threshold = 80) {
+  assertTenantId(tenantId);
+  if (!Number.isInteger(threshold) || threshold < 0 || threshold > 100) {
+    throw new ValueError(`threshold must be 0-100 (got ${String(threshold)})`);
+  }
+  const summary = await getDataQualitySummary(db, tenantId);
+  const alerts = [];
+
+  // Overall score alert
+  let overallSeverity = null;
+  if (summary.score < 60) overallSeverity = 'critical';
+  else if (summary.score < 80) overallSeverity = 'warning';
+  else if (summary.score < 90) overallSeverity = 'info';
+  if (overallSeverity !== null && summary.score < threshold) {
+    alerts.push({
+      severity: overallSeverity,
+      code: 'score_below_threshold',
+      message: `Data quality score is ${summary.score} (below threshold ${threshold})`,
+      count: null,
+      recommended_action: 'Run GET /api/finance/ai/duplicates and GET /api/finance/ai/hvhh-drift to identify the specific issues. Fix the highest-severity issues first.',
+    });
+  }
+
+  // Duplicate customers alert
+  if (summary.issues.duplicate_customers > 0) {
+    const sev = summary.issues.duplicate_customers >= 5 ? 'warning' : 'info';
+    alerts.push({
+      severity: sev,
+      code: 'duplicates',
+      message: `${summary.issues.duplicate_customers} duplicate customer group(s) detected`,
+      count: summary.issues.duplicate_customers,
+      recommended_action: 'Use GET /api/finance/ai/duplicates to see the affected groups, then merge or delete the duplicates.',
+    });
+  }
+
+  // HVHH drift alert
+  if (summary.issues.hvhh_drift > 0) {
+    alerts.push({
+      severity: 'info',
+      code: 'hvhh_drift',
+      message: `${summary.issues.hvhh_drift} invoice(s) with HVVH drift`,
+      count: summary.issues.hvhh_drift,
+      recommended_action: 'Use GET /api/finance/ai/hvhh-drift to see the affected invoices. Re-issue the invoice with the updated TIN or accept the stale snapshot for historical accuracy.',
+    });
+  }
+
+  // Invoices missing HVVH alert
+  if (summary.issues.invoices_missing_hvhh > 0) {
+    const sev = summary.issues.invoices_missing_hvhh >= 5 ? 'warning' : 'info';
+    alerts.push({
+      severity: sev,
+      code: 'invoices_missing_hvhh',
+      message: `${summary.issues.invoices_missing_hvhh} issued invoice(s) are missing customer HVVH`,
+      count: summary.issues.invoices_missing_hvhh,
+      recommended_action: 'Update the customer record to have a TIN, then re-issue the invoice. E-invoicing requires a TIN.',
+    });
+  }
+
+  // Per-module alerts (a single module with score < 50 is critical)
+  for (const mod of ['customers', 'vendors', 'employees', 'invoices']) {
+    const m = summary[mod];
+    if (m.total > 0 && m.score < 50) {
+      alerts.push({
+        severity: 'critical',
+        code: `${mod}_low_score`,
+        message: `${mod} module data quality score is ${m.score} (${m.with_hvhh}/${m.total} records have HVVH)`,
+        count: m.total - m.with_hvhh,
+        recommended_action: `Update ${mod} records with missing HVVH values.`,
+      });
+    }
+  }
+
+  // Sort: critical > warning > info; within severity, count DESC
+  const sevRank = { critical: 0, warning: 1, info: 2 };
+  alerts.sort((a, b) => {
+    const sa = sevRank[a.severity] ?? 9;
+    const sb = sevRank[b.severity] ?? 9;
+    if (sa !== sb) return sa - sb;
+    return (b.count ?? 0) - (a.count ?? 0);
+  });
+
+  return alerts;
+}

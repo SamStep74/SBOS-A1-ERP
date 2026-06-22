@@ -280,6 +280,9 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/ai/duplicates', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/duplicates (empty DB → 200, items: [])' },
   { method: 'GET', path: '/api/finance/ai/hvhh-drift', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/hvhh-drift (empty DB → 200, items: [])' },
   { method: 'GET', path: '/api/finance/ai/data-quality', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/data-quality (empty DB → 200, score: 100)' },
+  // Phase 3 AI agents wave 2 (W94-1) — merge candidates + alerts
+  { method: 'GET', path: '/api/finance/ai/merge-candidates', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/merge-candidates (empty DB → 200, items: [])' },
+  { method: 'GET', path: '/api/finance/ai/alerts?threshold=80', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/alerts (empty DB → 200, items: [])' },
 ];
 
 let done = 0, pass = 0, fail = 0;
