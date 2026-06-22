@@ -238,6 +238,14 @@ import {
   getDataQualityAlerts,
 } from './dataQuality.js';
 import {
+  createReportSchedule,
+  listReportSchedules,
+  getReportSchedule,
+  toggleReportSchedule,
+  recordReportExecution,
+  listReportExecutions,
+} from './reportScheduler.js';
+import {
   listJournalEntries,
   getJournalEntry,
   listAccountBalances,
@@ -2893,6 +2901,12 @@ export function registerFinanceRoutes(app, opts = {}) {
 //   GET    /api/finance/ai/data-quality
 //   GET    /api/finance/ai/merge-candidates        (Phase 3 W94-1)
 //   GET    /api/finance/ai/alerts?threshold=
+//   GET    /api/finance/reports/schedules           (Phase 3 W96-1)
+//   POST   /api/finance/reports/schedules
+//   GET    /api/finance/reports/schedules/:id
+//   POST   /api/finance/reports/schedules/:id/toggle
+//   POST   /api/finance/reports/executions
+//   GET    /api/finance/reports/executions
   //   Add a per-employee pay line to a draft payroll run.
   //   Body: { employee_id, contract_id, base_salary_amd,
   //   bonus_amd?, deductions_amd?, tax_amd?, worked_days?,
@@ -3130,6 +3144,108 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const threshold = req.query.threshold ? Number(req.query.threshold) : 80;
       const items = await getDataQualityAlerts(pgAdapter, tenantId, threshold);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 reporting wave 3 (W96-1) — scheduled report runs.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/reports/schedules
+  //   List report schedules. Optional filter by enabled.
+  app.get('/api/finance/reports/schedules', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const enabled = req.query.enabled != null ? Number(req.query.enabled) : null;
+      const items = await listReportSchedules(pgAdapter, tenantId, { enabled });
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/reports/schedules
+  //   Create a new schedule. Body: { name, report_type,
+  //   cron_expression, enabled?, params?, notify_email?,
+  //   created_by? }.
+  app.post(
+    '/api/finance/reports/schedules',
+    requireTenant,
+    requirePerm('reports.dashboard.read'),
+    wrapFinanceRoute('reports.schedule.create', (req, res) => res.locals.createdId ? `report_schedule:${res.locals.createdId}` : 'report_schedule:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await createReportSchedule(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/reports/schedules/:id
+  //   Get a single schedule. Returns 404 if missing or
+  //   cross-tenant.
+  app.get('/api/finance/reports/schedules/:id', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const scheduleId = Number(req.params.id);
+      const item = await getReportSchedule(pgAdapter, scheduleId, tenantId);
+      res.status(200).json(item);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/reports/schedules/:id/toggle
+  //   Toggle the enabled flag. Body: { enabled: 0 | 1 }.
+  app.post(
+    '/api/finance/reports/schedules/:id/toggle',
+    requireTenant,
+    requirePerm('reports.dashboard.read'),
+    wrapFinanceRoute('reports.schedule.update', (req) => `report_schedule:${req.params.id}:toggle`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const scheduleId = Number(req.params.id);
+      const out = await toggleReportSchedule(pgAdapter, scheduleId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/reports/executions
+  //   Record a report execution (called by the scheduler
+  //   worker when a run completes). Body: { schedule_id,
+  //   report_type, status, started_at?, completed_at?,
+  //   duration_ms?, result_json?, error_message? }.
+  app.post(
+    '/api/finance/reports/executions',
+    requireTenant,
+    requirePerm('reports.dashboard.read'),
+    wrapFinanceRoute('reports.execution.create', (req, res) => res.locals.createdId ? `report_execution:${res.locals.createdId}` : 'report_execution:new', async (req, res) => {
+      const tenantId = req.tenantId;
+      const out = await recordReportExecution(pgAdapter, req.body || {}, tenantId);
+      res.locals.createdId = out.id;
+      res.status(201).json(out);
+    }),
+  );
+
+  // GET /api/finance/reports/executions
+  //   List report executions. Optional filter by scheduleId
+  //   + status.
+  app.get('/api/finance/reports/executions', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const scheduleId = req.query.schedule_id ? Number(req.query.schedule_id) : null;
+      const status = req.query.status ?? null;
+      const items = await listReportExecutions(pgAdapter, tenantId, { scheduleId, status });
       res.status(200).json({ items });
     } catch (err) {
       if (err && err.name === 'ValueError') {

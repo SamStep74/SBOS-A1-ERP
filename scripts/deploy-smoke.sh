@@ -290,6 +290,10 @@ const writeChecks = [
   // Phase 3 AI agents wave 2 (W94-1) — merge candidates + alerts
   { method: 'GET', path: '/api/finance/ai/merge-candidates', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/merge-candidates (empty DB → 200, items: [])' },
   { method: 'GET', path: '/api/finance/ai/alerts?threshold=80', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET ai/alerts (empty DB → 200, items: [])' },
+  // Phase 3 reporting wave 3 (W96-1) — scheduled report runs
+  { method: 'POST', path: '/api/finance/reports/schedules', body: { name: 'Smoke Schedule', report_type: 'ar_aging', cron_expression: '0 9 * * 1', notify_email: 'cfo@example.com', created_by: 1 }, expect: 201, name: 'POST /api/finance/reports/schedules (returns id > 0)' },
+  { method: 'GET', path: '/api/finance/reports/schedules/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/reports/schedules/1 (returns the schedule created above)' },
+  { method: 'POST', path: '/api/finance/reports/schedules/1/toggle', body: { enabled: 0 }, expect: 200, name: 'POST toggle (state-machine: enabled → disabled)' },
 ];
 
 let done = 0, pass = 0, fail = 0;
