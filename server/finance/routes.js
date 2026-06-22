@@ -3465,6 +3465,48 @@ export function registerFinanceRoutes(app, opts = {}) {
   });
 
   // ────────────────────────────────────────────────────────────────────
+  // Phase 3 reporting wave 9 (W108-1) — scheduler observability.
+  // ────────────────────────────────────────────────────────────────────
+
+  // GET /api/finance/reports/scheduler
+  //   Return the W104-1 scheduler metrics + the email
+  //   mode. The operator's dashboard reads this to show
+  //   "is the worker healthy?" + "what's the email
+  //   mode?".
+  //
+  //   Returns 200 with the snapshot.
+  //   Returns 503 if the scheduler was disabled at boot
+  //   (createApp was called with { scheduler: false }).
+  app.get('/api/finance/reports/scheduler', requireTenant, requirePerm('reports.dashboard.read'), async (req, res) => {
+    const scheduler = req.app.locals.scheduler;
+    if (!scheduler) {
+      return res.status(503).json({
+        error: 'scheduler_disabled',
+        message: 'scheduler worker is not running (disabled at boot)',
+      });
+    }
+    const emailService = req.app.locals.emailService;
+    const emailMode = emailService ? emailService.mode : 'stub';
+    // The metrics object is a live getter bag — read it
+    // once and snapshot the values into a plain object.
+    const metrics = {
+      totalTicks: scheduler.metrics.totalTicks,
+      skippedTicks: scheduler.metrics.skippedTicks,
+      completedTicks: scheduler.metrics.completedTicks,
+      erroredTicks: scheduler.metrics.erroredTicks,
+      inProgress: scheduler.metrics.inProgress,
+      lastTickAt: scheduler.metrics.lastTickAt,
+      lastTickDurationMs: scheduler.metrics.lastTickDurationMs,
+      lastTickError: scheduler.metrics.lastTickError,
+    };
+    res.status(200).json({
+      tickMs: scheduler.tickMs,
+      emailMode,
+      scheduler: metrics,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
   // Phase 3 reporting wave 6 (W103-1) — run-now admin endpoint.
   // ────────────────────────────────────────────────────────────────────
 

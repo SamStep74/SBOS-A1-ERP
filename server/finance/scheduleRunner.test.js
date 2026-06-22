@@ -780,6 +780,49 @@ test('startScheduler: metrics.inProgress toggles true during tick', async () => 
 });
 
 // ────────────────────────────────────────────────────────────────────────
+// W108-1: scheduler observability surface (snapshot shape)
+// ────────────────────────────────────────────────────────────────────────
+
+test('startScheduler: metrics surface produces a JSON-serializable snapshot', async () => {
+  const db = makeMockDb();
+  const pgAdapter = makeMockPgAdapter({});
+  db.seedSchedule({ report_type: 'ar_aging', next_run_at: '2020-01-01 00:00:00' });
+  const handle = startScheduler({ db, pgAdapter, tickMs: 5000 });
+  // Run a successful tick + a failing tick to populate
+  // both completedTicks and erroredTicks.
+  await handle.tickOnce();
+  // JSON.stringify exercises every getter — if any
+  // getter throws or returns a non-serializable value,
+  // the test fails.
+  const snapshot = JSON.stringify({
+    tickMs: handle.tickMs,
+    scheduler: {
+      totalTicks: handle.metrics.totalTicks,
+      skippedTicks: handle.metrics.skippedTicks,
+      completedTicks: handle.metrics.completedTicks,
+      erroredTicks: handle.metrics.erroredTicks,
+      inProgress: handle.metrics.inProgress,
+      lastTickAt: handle.metrics.lastTickAt,
+      lastTickDurationMs: handle.metrics.lastTickDurationMs,
+      lastTickError: handle.metrics.lastTickError,
+    },
+  });
+  // The snapshot should be a valid JSON string with the
+  // expected keys.
+  const parsed = JSON.parse(snapshot);
+  assert.equal(parsed.tickMs, 5000);
+  assert.equal(parsed.scheduler.totalTicks, 1);
+  assert.equal(parsed.scheduler.completedTicks, 1);
+  assert.equal(parsed.scheduler.skippedTicks, 0);
+  assert.equal(parsed.scheduler.erroredTicks, 0);
+  assert.equal(parsed.scheduler.inProgress, false);
+  assert.ok(parsed.scheduler.lastTickAt);
+  assert.ok(parsed.scheduler.lastTickDurationMs >= 0);
+  assert.equal(parsed.scheduler.lastTickError, null);
+  handle.stop();
+});
+
+// ────────────────────────────────────────────────────────────────────────
 // W105-1: retry on failed report runs
 // ────────────────────────────────────────────────────────────────────────
 

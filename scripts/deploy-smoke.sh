@@ -3858,6 +3858,71 @@ fi
 
 
 
+echo "=== STEP 7p4: Scheduler observability (W108-1) ==="
+# Tests the W108-1 GET /api/finance/reports/scheduler
+# route. The response should include the W104-1 metrics
+# (totalTicks, completedTicks, erroredTicks, inProgress,
+# lastTickAt, lastTickDurationMs, lastTickError) plus
+# tickMs + emailMode. We boot the server with a stub
+# email mode (no SMTP host) so the worker is in
+# 'capture' mode.
+LOG7P4="$TESTDIR/server-7p4.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7P4" 2>&1 &
+SERVER_PID_7P4=$!
+SMOKE_RC=0
+cleanup_7p4() { kill -9 $SERVER_PID_7P4 2>/dev/null; wait $SERVER_PID_7P4 2>/dev/null; }
+trap cleanup_7p4 EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7p4"
+    tail -20 "$LOG7P4"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7P4=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7P4" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7P4" ]; then
+    echo "  FAIL: STEP 7p4 server did not print admin session token"
+    tail -20 "$LOG7P4"
+    SMOKE_RC=1
+  else
+    # GET /api/finance/reports/scheduler
+    SCHED_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/reports/scheduler" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7P4" -H "X-Tenant-Id: 0")
+    if echo "$SCHED_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert 'tickMs' in d, 'missing tickMs'
+assert 'emailMode' in d, 'missing emailMode'
+assert d['tickMs'] == 60000, f'expected tickMs=60000, got {d[\"tickMs\"]}'
+assert d['emailMode'] in ('capture', 'log', 'smtp', 'stub'), f'unexpected emailMode: {d[\"emailMode\"]}'
+assert 'scheduler' in d, 'missing scheduler key'
+s = d['scheduler']
+for k in ('totalTicks','skippedTicks','completedTicks','erroredTicks','inProgress','lastTickAt','lastTickDurationMs','lastTickError'):
+    assert k in s, f'missing scheduler.{k}'
+assert s['totalTicks'] >= 0
+assert s['inProgress'] == False
+print('OK', d['emailMode'], s['totalTicks'])
+" 2>/dev/null; then
+      echo "  OK GET /api/finance/reports/scheduler returns metrics snapshot"
+    else
+      echo "  FAIL: scheduler endpoint returned unexpected shape: $SCHED_OUT"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7P4 2>/dev/null
+wait $SERVER_PID_7P4 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 echo "=== STEP 7p3: Report schedule retry (W105-1) ==="
 # Tests the W105-1 retry mechanism. The schedule is created
 # with max_retries=2, then we POST /reset-retries (which
