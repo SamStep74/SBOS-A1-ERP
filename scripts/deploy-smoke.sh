@@ -3018,6 +3018,8 @@ if [ $SMOKE_RC != 0 ]; then
 fi
 
 
+
+
 echo "=== STEP 7m: Scheduler worker boot (W97-1) ==="
 # Tests that the scheduler worker starts on app boot. The
 # worker logs "[scheduler] worker started" on init. The
@@ -3182,6 +3184,132 @@ trap - EXIT
 if [ $SMOKE_RC != 0 ]; then
   exit 1
 fi
+
+
+echo "=== STEP 7n2: AI undo customer merge (W102-1) ==="
+# Tests the inverse of STEP 7n: undo the merge that was
+# just applied, verify the secondary is un-archived + the
+# invoice is restored, then try to undo again (idempotency).
+LOG7N2="$TESTDIR/server-7n2.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7N2" 2>&1 &
+SERVER_PID_7N2=$!
+SMOKE_RC=0
+cleanup_7n2() { kill -9 $SERVER_PID_7N2 2>/dev/null; wait $SERVER_PID_7N2 2>/dev/null; }
+trap cleanup_7n2 EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7n2"
+    tail -20 "$LOG7N2"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7N2=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7N2" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7N2" ]; then
+    echo "  FAIL: STEP 7n2 server did not print admin session token"
+    tail -20 "$LOG7N2"
+    SMOKE_RC=1
+  else
+    # Seed: 2 customers with the same HVVH + 1 invoice on the secondary.
+    PRIMARY_ID=$(sqlite3 "$DB" "INSERT INTO customers (tenant_id, name, hvhh, archived) VALUES (0, 'Undo Primary', '222222222', 0); SELECT last_insert_rowid();" 2>/dev/null)
+    SECONDARY_ID=$(sqlite3 "$DB" "INSERT INTO customers (tenant_id, name, hvhh, archived) VALUES (0, 'Undo Duplicate', '222222222', 0); SELECT last_insert_rowid();" 2>/dev/null)
+    INVOICE_ID=$(sqlite3 "$DB" "INSERT INTO invoices (tenant_id, customer_id, invoice_number, issue_date, due_date, subtotal_amd, vat_amd, total_amd, status) VALUES (0, $SECONDARY_ID, 'INV-UNDO-001', '2026-06-22', '2026-07-22', 10000, 2000, 12000, 'sent'); SELECT last_insert_rowid();" 2>/dev/null)
+
+    # Apply a merge first
+    MERGE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/ai/apply-merge" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N2" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"primary_id\":$PRIMARY_ID,\"secondary_id\":$SECONDARY_ID,\"reason\":\"undo smoke setup\"}")
+    MERGE_ID=$(echo "$MERGE_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('merge_log_id',''))" 2>/dev/null)
+    if [ -z "$MERGE_ID" ]; then
+      echo "  FAIL: setup apply-merge failed: $MERGE_OUT"
+      SMOKE_RC=1
+    else
+      echo "  OK setup: applied merge (id=$MERGE_ID)"
+
+      # Undo the merge
+      UNDO_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/ai/undo-merge" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7N2" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"merge_log_id\":$MERGE_ID,\"undone_reason\":\"smoke test\"}")
+      if echo "$UNDO_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['merge_log_id'] == $MERGE_ID, f'wrong merge_log_id: {d[\"merge_log_id\"]}'
+assert d['invoices_restored'] == 1, f'expected 1 restored, got {d[\"invoices_restored\"]}'
+assert d['secondary_id'] == $SECONDARY_ID
+print('OK', d['invoices_restored'])
+" 2>/dev/null; then
+        echo "  OK undo-merge: 1 invoice restored"
+      else
+        echo "  FAIL: undo-merge happy path failed: $UNDO_OUT"
+        SMOKE_RC=1
+      fi
+
+      # Verify the invoice is back on the secondary
+      NEW_OWNER=$(sqlite3 "$DB" "SELECT customer_id FROM invoices WHERE id = $INVOICE_ID;" 2>/dev/null)
+      if [ "$NEW_OWNER" = "$SECONDARY_ID" ]; then
+        echo "  OK invoice restored to secondary"
+      else
+        echo "  FAIL: invoice owner is $NEW_OWNER, expected $SECONDARY_ID"
+        SMOKE_RC=1
+      fi
+
+      # Verify the secondary is un-archived
+      ARCHIVED=$(sqlite3 "$DB" "SELECT archived FROM customers WHERE id = $SECONDARY_ID;" 2>/dev/null)
+      if [ "$ARCHIVED" = "0" ]; then
+        echo "  OK secondary customer is un-archived"
+      else
+        echo "  FAIL: secondary archived flag is $ARCHIVED, expected 0"
+        SMOKE_RC=1
+      fi
+
+      # Verify the audit log row has the undo metadata
+      UNDONE_AT=$(sqlite3 "$DB" "SELECT undone_at FROM customer_merge_log WHERE id = $MERGE_ID;" 2>/dev/null)
+      if [ -n "$UNDONE_AT" ] && [ "$UNDONE_AT" != "" ]; then
+        echo "  OK audit row stamped with undone_at=$UNDONE_AT"
+      else
+        echo "  FAIL: audit row undone_at is empty"
+        SMOKE_RC=1
+      fi
+
+      # Idempotency: second undo returns 400
+      REPLAY=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/ai/undo-merge" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7N2" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"merge_log_id\":$MERGE_ID}")
+      if [ "$REPLAY" = "400" ]; then
+        echo "  OK re-undo on already-undone merge returns 400"
+      else
+        echo "  FAIL: re-undo returned $REPLAY (expected 400)"
+        SMOKE_RC=1
+      fi
+
+      # 404 on non-existent merge log id
+      NOT_FOUND=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/ai/undo-merge" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7N2" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d "{\"merge_log_id\":99999}")
+      if [ "$NOT_FOUND" = "404" ]; then
+        echo "  OK undo-merge non-existent merge_log_id returns 404"
+      else
+        echo "  FAIL: undo-merge non-existent returned $NOT_FOUND (expected 404)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7N2 2>/dev/null
+wait $SERVER_PID_7N2 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
 
 
 echo "=== STEP 7o: Email service capture mode (W101-1) ==="

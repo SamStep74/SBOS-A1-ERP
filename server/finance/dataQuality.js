@@ -688,6 +688,39 @@ export async function applyCustomerMerge(db, input, tenantId = 0) {
     );
   }
 
+  // Collect the list of invoice IDs that will be re-assigned.
+  // This is the source of truth for the undo function
+  // (W102-1) — without this list, undo can't know which
+  // invoices to move back. The query is the same shape as
+  // the count query, but returns ids instead of COUNT(*).
+  const invListResult = await runQuery(
+    db,
+    `SELECT id
+       FROM finance.invoices
+      WHERE tenant_id = $1 AND customer_id = $2`,
+    [tenantId, secondaryId],
+  );
+  const reassignedInvoiceIds = (invListResult.rows || []).map((r) => Number(r.id));
+
+  // Same for payments — the list of payment IDs whose
+  // invoice currently belongs to the secondary. The payments
+  // table doesn't have a direct customer_id; we go through
+  // the invoice join. The list is the set of payment IDs
+  // that the undo function will re-bind back to the
+  // secondary (well, it doesn't actually re-bind payments —
+  // payments don't have customer_id. It restores the
+  // INVOICE ownership, which transitively restores the
+  // payment ownership via the FK).
+  const payListResult = await runQuery(
+    db,
+    `SELECT p.id
+       FROM finance.payments p
+       JOIN finance.invoices i ON i.id = p.invoice_id
+      WHERE i.tenant_id = $1 AND i.customer_id = $2`,
+    [tenantId, secondaryId],
+  );
+  const reassignedPaymentIds = (payListResult.rows || []).map((r) => Number(r.id));
+
   // Re-assign invoices from secondary to primary. We count
   // BEFORE + AFTER, then the delta is the re-assigned count.
   // This is adapter-agnostic (works for both pg and sqlite
@@ -755,14 +788,16 @@ export async function applyCustomerMerge(db, input, tenantId = 0) {
   );
 
   // Record the audit row. The audit is append-only — no
-  // UPDATE on this table from any code path.
+  // UPDATE on this table from any code path (except the
+  // undo function, which stamps the undone_* fields).
   const auditIns = await runQuery(
     db,
     `INSERT INTO finance.customer_merge_log
        (tenant_id, primary_customer_id, secondary_customer_id,
         invoices_reassigned_count, payments_reassigned_count,
-        applied_by_user_id, reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+        applied_by_user_id, reason,
+        reassigned_invoice_ids, reassigned_payment_ids)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id`,
     [
       tenantId,
@@ -772,6 +807,8 @@ export async function applyCustomerMerge(db, input, tenantId = 0) {
       paymentsReassigned,
       appliedByUserId,
       reason,
+      JSON.stringify(reassignedInvoiceIds),
+      JSON.stringify(reassignedPaymentIds),
     ],
   );
   let mergeLogId;
@@ -789,6 +826,8 @@ export async function applyCustomerMerge(db, input, tenantId = 0) {
     secondary_id: secondaryId,
     invoices_reassigned: invoicesReassigned,
     payments_reassigned: paymentsReassigned,
+    reassigned_invoice_ids: reassignedInvoiceIds,
+    reassigned_payment_ids: reassignedPaymentIds,
   };
 }
 
@@ -862,4 +901,243 @@ export async function listCustomerMergeLog(
     );
   }
   return result.rows || [];
+}
+
+
+// ────────────────────────────────────────────────────────────────────────
+// undoCustomerMerge — W102-1 inverse of applyCustomerMerge.
+//
+// W99-1 ships the merge (one-way soft delete + re-assign).
+// W102-1 ships the undo. The audit log row is the source of
+// truth — the undo function reads the row, restores the
+// secondary to active, re-binds the listed invoices back
+// to the secondary, and stamps the row with the undo
+// metadata (undone_at, undone_by_user_id, undone_reason).
+//
+// Errors:
+//   404 if the merge log row doesn't exist in the tenant
+//   400 if the merge has already been undone (idempotency check)
+//   400 if the merge log row doesn't have reassigned_invoice_ids
+//        (pre-W102-1 merges — those can't be undone, only
+//        manually reversed via direct SQL by an operator)
+//
+// Returns:
+//   { merge_log_id, primary_id, secondary_id,
+//     invoices_restored, payments_restored }
+//
+// The "invoices_restored" count may be less than the original
+// "invoices_reassigned" count if the operator has done other
+// work since (e.g. voided some of the invoices). The undo
+// only restores invoices that still exist AND still belong
+// to the primary.
+export async function undoCustomerMerge(db, input, tenantId = 0) {
+  assertTenantId(tenantId);
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input is required');
+  }
+  const mergeLogId = Number(input.merge_log_id);
+  assertPositiveInt(mergeLogId, 'merge_log_id');
+
+  // Optional: undone_reason (operator note), undone_by_user_id.
+  let undoneReason = null;
+  if (input.undone_reason !== null && input.undone_reason !== undefined) {
+    if (typeof input.undone_reason !== 'string') {
+      throw new ValueError('undone_reason must be a string or null');
+    }
+    if (input.undone_reason.length > 1024) {
+      throw new ValueError('undone_reason must be at most 1024 characters');
+    }
+    undoneReason = input.undone_reason;
+  }
+  let undoneByUserId = null;
+  if (input.undone_by_user_id !== null && input.undone_by_user_id !== undefined) {
+    assertPositiveInt(input.undone_by_user_id, 'undone_by_user_id');
+    undoneByUserId = input.undone_by_user_id;
+  }
+
+  // 1. Look up the merge log row. Tenant-scoped.
+  const lookup = await runQuery(
+    db,
+    `SELECT id, primary_customer_id, secondary_customer_id,
+            reassigned_invoice_ids, reassigned_payment_ids,
+            invoices_reassigned_count, payments_reassigned_count,
+            undone_at
+       FROM finance.customer_merge_log
+      WHERE id = $1 AND tenant_id = $2`,
+    [mergeLogId, tenantId],
+  );
+  if (!lookup.rows || lookup.rows.length === 0) {
+    throw new ValueError(
+      `merge log ${mergeLogId} not found in tenant ${tenantId}`,
+    );
+  }
+  const row = lookup.rows[0];
+
+  // 2. Idempotency check: if already undone, refuse.
+  if (row.undone_at != null) {
+    throw new ValueError(
+      `merge log ${mergeLogId} has already been undone at ${row.undone_at}`,
+    );
+  }
+
+  // 3. Pre-W102-1 check: if the row has no reassigned_invoice_ids,
+  // it was inserted before the W102-1 schema migration. The
+  // list of invoice IDs to restore is unknown, so we can't
+  // safely undo. The operator must restore manually via SQL.
+  if (!row.reassigned_invoice_ids) {
+    throw new ValueError(
+      `merge log ${mergeLogId} has no reassigned_invoice_ids (pre-W102-1 merge); cannot undo automatically`,
+    );
+  }
+
+  const primaryId = Number(row.primary_customer_id);
+  const secondaryId = Number(row.secondary_customer_id);
+
+  // 4. Parse the JSON list of invoice IDs. We trust the
+  // INSERT path (applyCustomerMerge) wrote valid JSON; if
+  // it didn't, this throws and the function returns 400.
+  let invoiceIds;
+  try {
+    invoiceIds = JSON.parse(row.reassigned_invoice_ids);
+  } catch (e) {
+    throw new ValueError(
+      `merge log ${mergeLogId} has malformed reassigned_invoice_ids: ${e.message}`,
+    );
+  }
+  if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+    // The original merge moved 0 invoices — undoing it
+    // restores 0 invoices but still flips the archived
+    // flag. We proceed.
+  }
+  // Sanity: each ID should be an integer.
+  for (const id of invoiceIds) {
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+      throw new ValueError(
+        `merge log ${mergeLogId} has non-integer reassigned_invoice_ids entry: ${id}`,
+      );
+    }
+  }
+
+  // 5. Verify the secondary customer still exists and is
+  // archived (the original merge state). If the secondary
+  // was unarchived by some other path, undo is meaningless.
+  const secondaryLookup = await runQuery(
+    db,
+    `SELECT id, archived
+       FROM finance.customers
+      WHERE id = $1 AND tenant_id = $2`,
+    [secondaryId, tenantId],
+  );
+  if (!secondaryLookup.rows || secondaryLookup.rows.length === 0) {
+    throw new ValueError(
+      `secondary customer ${secondaryId} not found in tenant ${tenantId}; cannot undo merge`,
+    );
+  }
+  if (Number(secondaryLookup.rows[0].archived) !== 1) {
+    throw new ValueError(
+      `secondary customer ${secondaryId} is not archived; the merge may have already been undone or the state is inconsistent`,
+    );
+  }
+
+  // 6. Re-assign the listed invoices back to the secondary.
+  // We only re-assign invoices that CURRENTLY belong to
+  // the primary (the operator may have voided some in the
+  // meantime; voided invoices are filtered by the tenant
+  // scope here).
+  //
+  // Build a parameterized UPDATE. With many invoice IDs,
+  // a single bulk UPDATE with a WHERE id IN (...) clause
+  // is the most efficient shape. We use comma-separated
+  // placeholders and pass the IDs as individual params.
+  if (invoiceIds.length > 0) {
+    const placeholders = invoiceIds.map((_, i) => `$${i + 3}`).join(', ');
+    const updRes = await runQuery(
+      db,
+      `UPDATE finance.invoices
+          SET customer_id = $1,
+              updated_at = datetime('now')
+        WHERE tenant_id = $2 AND customer_id = $3 AND id IN (${placeholders})`,
+      [secondaryId, tenantId, primaryId, ...invoiceIds],
+    );
+    // We don't return the rowCount from the UPDATE (adapter-
+    // specific); the count is computed via a follow-up SELECT
+    // on the secondary. Below, we do a per-id SELECT to
+    // count how many were actually moved.
+    void updRes;
+  }
+
+  // 7. Count how many invoices are now back on the secondary.
+  // This may be less than invoiceIds.length if some of
+  // those invoices were voided, hard-deleted, or moved
+  // elsewhere in the meantime.
+  let invoicesRestored = 0;
+  if (invoiceIds.length > 0) {
+    const placeholders = invoiceIds.map((_, i) => `$${i + 2}`).join(', ');
+    const afterCount = await runQuery(
+      db,
+      `SELECT COUNT(*) AS n
+         FROM finance.invoices
+        WHERE tenant_id = $1 AND customer_id = $2 AND id IN (${placeholders})`,
+      [tenantId, secondaryId, ...invoiceIds],
+    );
+    invoicesRestored = Number(afterCount.rows?.[0]?.n ?? 0);
+  }
+
+  // 8. Payments are transitively restored: the payment
+  // table doesn't have a direct customer_id, it has
+  // invoice_id. By moving the invoices back to the
+  // secondary, the payments "follow" automatically. We
+  // report the count of payments whose invoice was just
+  // restored, but it's a derived value (not a state change
+  // we make).
+  let paymentsRestored = 0;
+  if (invoiceIds.length > 0) {
+    const placeholders = invoiceIds.map((_, i) => `$${i + 2}`).join(', ');
+    const payCount = await runQuery(
+      db,
+      `SELECT COUNT(*) AS n
+         FROM finance.payments p
+         JOIN finance.invoices i ON i.id = p.invoice_id
+        WHERE i.tenant_id = $1 AND i.customer_id = $2 AND i.id IN (${placeholders})`,
+      [tenantId, secondaryId, ...invoiceIds],
+    );
+    paymentsRestored = Number(payCount.rows?.[0]?.n ?? 0);
+  }
+
+  // 9. Un-archive the secondary. The original archive
+  // flag is cleared, so the secondary is fully active
+  // again (the operator can re-merge if they want).
+  await runQuery(
+    db,
+    `UPDATE finance.customers
+        SET archived = 0,
+            updated_at = datetime('now')
+      WHERE id = $1 AND tenant_id = $2`,
+    [secondaryId, tenantId],
+  );
+
+  // 10. Stamp the audit log row with the undo metadata.
+  // This is the ONE place where the merge log is mutated
+  // after the original INSERT. The undone_at + undone_by
+  // fields make the row self-documenting: any operator
+  // looking at the row can see "this merge was undone at
+  // X by Y for reason Z".
+  const now = new Date().toISOString();
+  await runQuery(
+    db,
+    `UPDATE finance.customer_merge_log
+        SET undone_at = $1,
+            undone_by_user_id = $2,
+            undone_reason = $3
+      WHERE id = $4 AND tenant_id = $5`,
+    [now, undoneByUserId, undoneReason, mergeLogId, tenantId],
+  );
+
+  return {
+    merge_log_id: mergeLogId,
+    primary_id: primaryId,
+    secondary_id: secondaryId,
+    invoices_restored: invoicesRestored,
+    payments_restored: paymentsRestored,
+  };
 }
