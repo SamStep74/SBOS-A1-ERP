@@ -1171,6 +1171,7 @@ export function registerFinanceRoutes(app, opts = {}) {
         action: req.query.action,
         resource_prefix: req.query.resource,
         resource_id: req.query.resource_id,
+        q: req.query.q, // full-text search across action/resource/payload
         since: req.query.since,
         until: req.query.until,
         limit: req.query.limit,

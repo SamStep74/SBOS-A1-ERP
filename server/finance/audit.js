@@ -107,6 +107,28 @@ export async function listAudit(db, filters = {}) {
     where.push(`resource LIKE $${i++}`);
     params.push('%:' + String(filters.resource_id) + '%');
   }
+  if (filters.q != null && String(filters.q).length > 0) {
+    // Full-text search across the action, resource, and payload_json
+    // columns. Escapes LIKE special chars (% and _) in the search
+    // term so a search for "100%" doesn't accidentally match
+    // everything (the % is a LIKE wildcard). Case-insensitive
+    // (SQLite's LIKE is case-insensitive for ASCII by default).
+    //
+    // IMPORTANT: SQLite binds positional `?` placeholders by position,
+    // NOT by name. Each `?` needs its own value in the params array.
+    // So we push the q value 3 times (once per LIKE clause) — pushing
+    // it once would cause "datatype mismatch" because the 2nd and 3rd
+    // `?` would have no value.
+    //
+    // The ESCAPE '\' clause tells SQLite to treat \ as the escape
+    // character. In the JS string, '\\' = 1 literal backslash, so
+    // ESCAPE '\\' = the SQL string '\' (1 backslash) which is the
+    // escape character.
+    const q = '%' + String(filters.q).replace(/[%_\\]/g, '\\$&') + '%';
+    where.push(`(action LIKE $${i} ESCAPE '\\' OR resource LIKE $${i + 1} ESCAPE '\\' OR payload_json LIKE $${i + 2} ESCAPE '\\')`);
+    params.push(q, q, q);
+    i += 3;
+  }
   if (filters.since) {
     where.push(`created_at >= $${i++}`);
     params.push(String(filters.since));

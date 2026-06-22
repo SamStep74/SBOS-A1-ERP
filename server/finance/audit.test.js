@@ -278,3 +278,112 @@ test('streamAuditCsv: chunk size controls the number of yields (rows > chunkSize
   }
   assert.equal(yields, 4);
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Wave 50 — full-text search (?q=...)
+// ────────────────────────────────────────────────────────────────────────
+
+test('listAudit: ?q matches against the action column', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'invoice.create',
+      resource: 'invoice:1', method: 'POST', path: '/p', status_code: 201,
+      payload_json: '{}', request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'vendor.create',
+      resource: 'vendor:1', method: 'POST', path: '/p', status_code: 201,
+      payload_json: '{}', request_id: 'r2', created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  const out = await listAudit(db, { tenant_id: 0, q: 'invoice' });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].action, 'invoice.create');
+});
+
+test('listAudit: ?q matches against the resource column', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'customer:42', method: 'PATCH', path: '/p', status_code: 200,
+      payload_json: '{}', request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'invoice:99', method: 'PATCH', path: '/p', status_code: 200,
+      payload_json: '{}', request_id: 'r2', created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  const out = await listAudit(db, { tenant_id: 0, q: 'customer:42' });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].resource, 'customer:42');
+});
+
+test('listAudit: ?q matches against the payload_json column (compliance drill-down)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'customer:42', method: 'PATCH', path: '/p', status_code: 200,
+      payload: { email: 'alice@example.com', hvhh: '12345678' },
+      request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'customer:99', method: 'PATCH', path: '/p', status_code: 200,
+      payload: { email: 'bob@example.com' },
+      request_id: 'r2', created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  // Search by payload content (the HVVH field — useful for "show me everywhere
+  // HVVH 12345678 appears in audit" investigations).
+  const out = await listAudit(db, { tenant_id: 0, q: '12345678' });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].resource, 'customer:42');
+});
+
+test('listAudit: ?q escapes LIKE special characters (% and _)', async () => {
+  // If the escaping is wrong, a search for "100%" would match everything
+  // (the % is a LIKE wildcard). The escape must neutralize it.
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/p', status_code: 201,
+      payload: { amount: '100%' },
+      request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:2', method: 'POST', path: '/p', status_code: 201,
+      payload: { amount: '50%' },
+      request_id: 'r2', created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  // Search for "100%" must match ONLY the 100% row, not the 50% row.
+  const out = await listAudit(db, { tenant_id: 0, q: '100%' });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].resource, 'invoice:1');
+});
+
+test('listAudit: empty ?q returns all rows (matches when q is missing)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/p', status_code: 201,
+      payload_json: null, request_id: null, created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'update',
+      resource: 'invoice:1', method: 'PATCH', path: '/p', status_code: 200,
+      payload_json: null, request_id: null, created_at: '2026-06-21T10:01:00Z' },
+  ]);
+  const out = await listAudit(db, { tenant_id: 0, q: '' });
+  assert.equal(out.length, 2, 'empty q should behave like no q filter');
+});
+
+test('listAudit: ?q is tenant-scoped (does not leak across tenants)', async () => {
+  const db = makeAuditDb();
+  seedAudit(db, [
+    { tenant_id: 0, user_id: 1, username: 'a', action: 'create',
+      resource: 'invoice:1', method: 'POST', path: '/p', status_code: 201,
+      payload: { note: 'shared-keyword' },
+      request_id: 'r1', created_at: '2026-06-21T10:00:00Z' },
+    { tenant_id: 7, user_id: 2, username: 'b', action: 'create',
+      resource: 'invoice:99', method: 'POST', path: '/p', status_code: 201,
+      payload: { note: 'shared-keyword' },
+      request_id: 'r2', created_at: '2026-06-21T10:00:00Z' },
+  ]);
+  // Tenant 0 searching for "shared-keyword" should see only its own row.
+  const out0 = await listAudit(db, { tenant_id: 0, q: 'shared-keyword' });
+  assert.equal(out0.length, 1);
+  assert.equal(Number(out0[0].tenant_id), 0);
+  // Tenant 7 sees only its own.
+  const out7 = await listAudit(db, { tenant_id: 7, q: 'shared-keyword' });
+  assert.equal(out7.length, 1);
+  assert.equal(Number(out7[0].tenant_id), 7);
+});
