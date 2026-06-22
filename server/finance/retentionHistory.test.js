@@ -14,6 +14,7 @@ import {
   listRetentionHistory,
   startRetentionSnapshot,
   streamRetentionHistoryCsv,
+  diffRetentionSnapshots,
 } from './retentionHistory.js';
 
 function makeHistoryDb() {
@@ -231,4 +232,77 @@ test('streamRetentionHistoryCsv: respects the limit option', async () => {
   const lines = text.trim().split('\n');
   // 1 header + 3 data rows.
   assert.equal(lines.length, 4);
+});
+
+// ─── W68: retention history diff ───
+
+function seedSnapshot(db, { tenantId, snapshotAt, retentionDays, hasExplicit, auditRows, lastPurgeCount = null }) {
+  db.prepare(
+    `INSERT INTO retention_history
+     (tenant_id, snapshot_at, retention_days, has_explicit_config, audit_row_count, last_purge_count)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(tenantId, snapshotAt, retentionDays, hasExplicit ? 1 : 0, auditRows, lastPurgeCount);
+}
+
+test('diffRetentionSnapshots: returns added, removed, and changed tenants', () => {
+  const db = makeHistoryDb();
+  // Baseline snapshot (t0): tenant 0 with 90d, tenant 5 default.
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  seedSnapshot(db, { tenantId: 5, snapshotAt: '2026-06-01 10:00:00', retentionDays: 365, hasExplicit: false, auditRows: 50 });
+  // Current snapshot (t1): tenant 0 changed retention_days,
+  // tenant 5 unchanged, tenant 7 added.
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-08 10:00:00', retentionDays: 180, hasExplicit: true, auditRows: 120 });
+  seedSnapshot(db, { tenantId: 5, snapshotAt: '2026-06-08 10:00:00', retentionDays: 365, hasExplicit: false, auditRows: 60 });
+  seedSnapshot(db, { tenantId: 7, snapshotAt: '2026-06-08 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 30 });
+
+  const diff = diffRetentionSnapshots(db, {
+    from: '2026-06-01 10:00:00',
+    to: '2026-06-08 10:00:00',
+  });
+  // Tenant 0: changed (retention_days 90→180, rows 100→120).
+  const t0 = diff.changed.find((c) => c.tenant_id === 0);
+  assert.ok(t0, 'tenant 0 should be in changed');
+  assert.equal(t0.retention_days.from, 90);
+  assert.equal(t0.retention_days.to, 180);
+  assert.equal(t0.audit_row_count.from, 100);
+  assert.equal(t0.audit_row_count.to, 120);
+  // Tenant 5: unchanged (same values on both sides).
+  // We classify as "unchanged" — not in added/removed/changed.
+  // Tenant 7: added.
+  assert.deepEqual(diff.added, [7]);
+  // No tenants were removed.
+  assert.equal(diff.removed.length, 0);
+});
+
+test('diffRetentionSnapshots: classifies a removed tenant correctly', () => {
+  const db = makeHistoryDb();
+  // t0: tenant 0 + tenant 7
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  seedSnapshot(db, { tenantId: 7, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 30 });
+  // t1: tenant 0 only (tenant 7 had its data purged; no rows)
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-08 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  const diff = diffRetentionSnapshots(db, {
+    from: '2026-06-01 10:00:00',
+    to: '2026-06-08 10:00:00',
+  });
+  assert.deepEqual(diff.removed, [7]);
+  assert.equal(diff.added.length, 0);
+});
+
+test('diffRetentionSnapshots: returns 400-equivalent error when from/to missing', () => {
+  const db = makeHistoryDb();
+  assert.throws(() => diffRetentionSnapshots(db, {}), /from/);
+  assert.throws(() => diffRetentionSnapshots(db, { from: 'x' }), /to/);
+});
+
+test('diffRetentionSnapshots: returns empty diffs when from === to', () => {
+  const db = makeHistoryDb();
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  const diff = diffRetentionSnapshots(db, {
+    from: '2026-06-01 10:00:00',
+    to: '2026-06-01 10:00:00',
+  });
+  assert.equal(diff.added.length, 0);
+  assert.equal(diff.removed.length, 0);
+  assert.equal(diff.changed.length, 0);
 });

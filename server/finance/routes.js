@@ -31,6 +31,7 @@
 //   GET    /api/finance/audit/retention/history         (security.audit.read)          — W66 per-tenant snapshot history
 //   POST   /api/finance/audit/retention/history/snapshot (security.audit.retention.update) — W66 manual snapshot
 //   GET    /api/finance/audit/retention/history/export  (security.audit.read)          — W67 CSV export
+//   GET    /api/finance/audit/retention/history/diff    (security.audit.read)          — W68 per-tenant diff between two snapshots
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -170,6 +171,7 @@ import {
   listRetentionHistory,
   snapshotRetentionDashboard,
   streamRetentionHistoryCsv,
+  diffRetentionSnapshots,
 } from './retentionHistory.js';
 import {
   createCatalogItem,
@@ -1845,6 +1847,79 @@ export function registerFinanceRoutes(app, opts = {}) {
         }
         res.end();
       } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/history/diff —
+  // compare two retention snapshots and return per-tenant
+  // deltas. The CFO can ask "what changed between last
+  // Tuesday and this Tuesday?" without writing SQL.
+  //
+  // Query params (required):
+  //   from: ISO timestamp (baseline)
+  //   to:   ISO timestamp (current)
+  //
+  // Returns: { from, to, added[], removed[], changed[] }
+  //   added:   tenant_ids that appeared in (from, to]
+  //   removed: tenant_ids that existed at-or-before from
+  //            but have no new snapshot in the window
+  //   changed: per-tenant diffs with { from, to } pairs
+  //
+  // The diff is tenant-scoped: only tenants in the
+  // calling tenant's history are surfaced. The history
+  // is per-tenant by design (we don't snapshot across
+  // tenants).
+  //
+  // Perm gate: `security.audit.read` (same as the
+  // history GET).
+  app.get(
+    '/api/finance/audit/retention/history/diff',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        // Scope the diff to the calling tenant. The
+        // underlying diff function operates on the full
+        // history table; we filter to the calling tenant
+        // by passing tenantId-prefixed queries. Simpler
+        // approach: pass the tenantId to the diff function
+        // via a "tenant filter" — but the diff function
+        // is cross-tenant by design (operator may want
+        // a multi-tenant view). For now we filter the
+        // result by req.tenantId.
+        const diff = diffRetentionSnapshots(rawDb, {
+          from: req.query.from,
+          to: req.query.to,
+        });
+        // Filter to the calling tenant. The diff is
+        // cross-tenant by design (operator may want a
+        // multi-tenant view in a future CFO-perm-gated
+        // endpoint), but the W68 endpoint is tenant-
+        // scoped for now.
+        const scoped = {
+          from: diff.from,
+          to: diff.to,
+          added: diff.added.filter((t) => t === req.tenantId),
+          removed: diff.removed.filter((t) => t === req.tenantId),
+          changed: diff.changed.filter((c) => c.tenant_id === req.tenantId),
+        };
+        res.status(200).json(scoped);
+      } catch (err) {
+        // diffRetentionSnapshots throws RangeError on
+        // missing from/to. Map to 400.
+        if (err instanceof RangeError) {
+          return res
+            .status(400)
+            .json({ error: 'invalid_request', message: err.message });
+        }
         next(err);
       }
     },

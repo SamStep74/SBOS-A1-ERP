@@ -2235,6 +2235,45 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(lines.length >= 2, 'expected header + at least 1 data row');
   });
 
+  // ─── Wave 68: retention history diff ───
+
+  test('68a. GET /api/finance/audit/retention/history/diff returns 400 when from/to missing', async () => {
+    // Missing both → 400.
+    const r1 = await get(server, '/api/finance/audit/retention/history/diff');
+    assert.equal(r1.status, 400);
+    assert.equal(r1.body.error, 'invalid_request');
+    // Missing to → 400.
+    const r2 = await get(
+      server,
+      '/api/finance/audit/retention/history/diff?from=2026-06-01%2010:00:00',
+    );
+    assert.equal(r2.status, 400);
+  });
+
+  test('68b. GET diff returns the documented shape (from, to, added, removed, changed)', async () => {
+    // Take a baseline snapshot for tenant 0, then a
+    // second snapshot, then ask for the diff.
+    const r0 = await postJson(
+      server,
+      '/api/finance/audit/retention/history/snapshot',
+      {},
+    );
+    assert.equal(r0.status, 200);
+    // The diff endpoint expects from/to ISO timestamps.
+    // We use the baseline as `from` and "now+1 day" as
+    // `to`. The second snapshot is in the window.
+    const r1 = await get(
+      server,
+      '/api/finance/audit/retention/history/diff?from=2020-01-01%2000:00:00&to=2099-01-01%2000:00:00',
+    );
+    assert.equal(r1.status, 200);
+    assert.equal(typeof r1.body.from, 'string');
+    assert.equal(typeof r1.body.to, 'string');
+    assert.ok(Array.isArray(r1.body.added));
+    assert.ok(Array.isArray(r1.body.removed));
+    assert.ok(Array.isArray(r1.body.changed));
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

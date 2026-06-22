@@ -3890,6 +3890,76 @@ else
 fi
 echo
 
+echo "=== STEP 5ai: Retention history diff (Wave 68) ==="
+# Smoke coverage for the W68 history diff endpoint. We verify:
+#   1. GET diff without from/to returns 400
+#   2. GET diff with from/to returns 200 with the documented shape
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) Missing from/to returns 400
+    const r1 = await get("/api/finance/audit/retention/history/diff");
+    if (r1.status !== 400) {
+      console.log("  FAIL missing params expected 400 got " + r1.status);
+      process.exit(1);
+    }
+    if (r1.body.error !== "invalid_request") {
+      console.log("  FAIL error code " + r1.body.error);
+      process.exit(1);
+    }
+    console.log("  missing from/to rejected with 400");
+
+    // 2) Valid from/to returns 200 with documented shape
+    const r2 = await get(
+      "/api/finance/audit/retention/history/diff?from=2020-01-01%2000:00:00&to=2099-01-01%2000:00:00",
+    );
+    if (r2.status !== 200) {
+      console.log("  FAIL diff status " + r2.status);
+      process.exit(1);
+    }
+    if (typeof r2.body.from !== "string" || typeof r2.body.to !== "string") {
+      console.log("  FAIL diff missing from/to: " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    if (!Array.isArray(r2.body.added) ||
+        !Array.isArray(r2.body.removed) ||
+        !Array.isArray(r2.body.changed)) {
+      console.log("  FAIL diff lists not arrays: " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    console.log("  diff returned: " + r2.body.added.length + " added, " + r2.body.removed.length + " removed, " + r2.body.changed.length + " changed");
+
+    console.log("  OK retention history diff");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  retention history diff OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

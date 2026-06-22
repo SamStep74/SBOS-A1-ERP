@@ -287,3 +287,191 @@ export async function* streamRetentionHistoryCsv(db, opts = {}, chunkSize = 500)
     yield buf.join('');
   }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// W68: retention history diff.
+//
+// diffRetentionSnapshots — compare two retention snapshots
+// and return per-tenant deltas. The CFO can ask "what
+// changed between last Tuesday and this Tuesday?" — a
+// real compliance use case for retention state changes.
+//
+// Returns:
+//   {
+//     from:  <iso timestamp of the baseline snapshot>,
+//     to:    <iso timestamp of the current snapshot>,
+//     added:   [tenant_id, ...],   // tenants in `to` but not in `from`
+//     removed: [tenant_id, ...],   // tenants in `from` but not in `to`
+//     changed: [
+//       {
+//         tenant_id,
+//         retention_days: { from, to },
+//         has_explicit_config: { from, to },
+//         audit_row_count: { from, to },
+//         last_purge_at: { from, to },
+//         last_purge_count: { from, to },
+//       },
+//       ...
+//     ],
+//   }
+//
+// The function picks the closest snapshot to each
+// `from` / `to` timestamp. Operators usually pass a
+// timestamp like "last Tuesday" and we use the nearest
+// recorded snapshot at-or-before that time.
+// ────────────────────────────────────────────────────────────────────────
+
+// pickSnapshot — fetch the single closest snapshot at-or-
+// before the given timestamp for a tenant. Returns null
+// if no snapshot exists.
+function pickSnapshot(db, tenantId, at) {
+  const sql = stripFinancePrefix(
+    `SELECT id, tenant_id, snapshot_at, retention_days,
+            has_explicit_config, audit_row_count,
+            last_purge_at, last_purge_count
+       FROM finance.retention_history
+      WHERE tenant_id = ? AND snapshot_at <= ?
+      ORDER BY snapshot_at DESC
+      LIMIT 1`,
+  );
+  return db.prepare(sql).get(tenantId, at) || null;
+}
+
+// pickSnapshotInRange — fetch the closest snapshot in the
+// half-open range (fromTs, toTs] for a tenant. Used by
+// the diff to detect "removed" tenants (those that had
+// activity at-or-before `fromTs` but no new activity in
+// the window). Returns null if no snapshot is in the
+// range. Note: we use the half-open interval so the
+// "from" snapshot is NOT counted as a "change in the
+// window" — it IS the baseline.
+function pickSnapshotInRange(db, tenantId, fromTs, toTs) {
+  const sql = stripFinancePrefix(
+    `SELECT id, tenant_id, snapshot_at, retention_days,
+            has_explicit_config, audit_row_count,
+            last_purge_at, last_purge_count
+       FROM finance.retention_history
+      WHERE tenant_id = ? AND snapshot_at > ?
+        AND snapshot_at <= ?
+      ORDER BY snapshot_at DESC
+      LIMIT 1`,
+  );
+  return db.prepare(sql).get(tenantId, fromTs, toTs) || null;
+}
+
+// allTenantsAt — return the set of tenant_ids that
+// have any snapshot at-or-before the given timestamp.
+// Used to build the union of tenants across from/to.
+function allTenantsAt(db, at) {
+  const sql = stripFinancePrefix(
+    `SELECT DISTINCT tenant_id
+       FROM finance.retention_history
+      WHERE snapshot_at <= ?`,
+  );
+  return db.prepare(sql).all(at).map((r) => Number(r.tenant_id));
+}
+
+function normaliseRow(row) {
+  if (!row) return null;
+  return {
+    tenant_id: Number(row.tenant_id),
+    retention_days: Number(row.retention_days),
+    has_explicit_config: Number(row.has_explicit_config) === 1,
+    audit_row_count: Number(row.audit_row_count),
+    last_purge_at: row.last_purge_at || null,
+    last_purge_count:
+      row.last_purge_count == null ? null : Number(row.last_purge_count),
+  };
+}
+
+export function diffRetentionSnapshots(db, opts = {}) {
+  const from = String(opts.from || '').trim();
+  const to = String(opts.to || '').trim();
+  if (!from) throw new RangeError('from is required (ISO timestamp)');
+  if (!to) throw new RangeError('to is required (ISO timestamp)');
+
+  // Union of tenants across both timestamps — covers
+  // tenants that exist on one side but not the other.
+  const allTenants = new Set([...allTenantsAt(db, from), ...allTenantsAt(db, to)]);
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const tid of allTenants) {
+    // The "from" snapshot is the baseline (at-or-before
+    // `from`). The "to" snapshot is the latest one in
+    // the (from, to] window — i.e. a snapshot STRICTLY
+    // after the baseline. This way, the baseline itself
+    // is not counted as a "change" for the same tenant.
+    const fromRow = normaliseRow(pickSnapshot(db, tid, from));
+    const toRow = normaliseRow(pickSnapshotInRange(db, tid, from, to));
+    if (fromRow && !toRow) {
+      // No new snapshot in the (from, to] window. The
+      // tenant is "removed" UNLESS from === to (the
+      // window is empty, so there's nothing to compare).
+      if (from === to) {
+        // from === to: there's no window at all, so
+        // there's no "change". Skip.
+        continue;
+      }
+      // Tenant had a baseline at `from` but no new
+      // snapshot in the window. We classify as "removed"
+      // — the operator's data may have been purged, the
+      // tenant may have been deleted, or the auto-snapshot
+      // worker may have skipped it (e.g. no audit rows).
+      // Either way it's a signal worth surfacing.
+      removed.push(tid);
+      continue;
+    }
+    if (!fromRow && toRow) {
+      added.push(tid);
+      continue;
+    }
+    if (!fromRow && !toRow) {
+      // No snapshots on either side — shouldn't happen
+      // because we built the union from allTenantsAt,
+      // but defensively skip.
+      continue;
+    }
+    // Both exist. Compare fields. A tenant is "changed"
+    // iff at least one field differs.
+    if (
+      fromRow.retention_days !== toRow.retention_days ||
+      fromRow.has_explicit_config !== toRow.has_explicit_config ||
+      fromRow.audit_row_count !== toRow.audit_row_count ||
+      fromRow.last_purge_at !== toRow.last_purge_at ||
+      fromRow.last_purge_count !== toRow.last_purge_count
+    ) {
+      changed.push({
+        tenant_id: tid,
+        retention_days: {
+          from: fromRow.retention_days,
+          to: toRow.retention_days,
+        },
+        has_explicit_config: {
+          from: fromRow.has_explicit_config,
+          to: toRow.has_explicit_config,
+        },
+        audit_row_count: {
+          from: fromRow.audit_row_count,
+          to: toRow.audit_row_count,
+        },
+        last_purge_at: {
+          from: fromRow.last_purge_at,
+          to: toRow.last_purge_at,
+        },
+        last_purge_count: {
+          from: fromRow.last_purge_count,
+          to: toRow.last_purge_count,
+        },
+      });
+    }
+    // else: unchanged — not in any of the lists.
+  }
+  return {
+    from,
+    to,
+    added: added.sort((a, b) => a - b),
+    removed: removed.sort((a, b) => a - b),
+    changed: changed.sort((a, b) => a.tenant_id - b.tenant_id),
+  };
+}
