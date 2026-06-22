@@ -13,6 +13,7 @@ yarn-error.log*
 
 # Worktrees and orchestration scratch
 .claude/worktrees/
+.gstack/
 .orchestration/*/[a-z]*/
 !.orchestration/README.md
 
