@@ -30,6 +30,7 @@
 //   POST   /api/finance/audit/retention/digest          (security.audit.export)         — W65 weekly digest email
 //   GET    /api/finance/audit/retention/history         (security.audit.read)          — W66 per-tenant snapshot history
 //   POST   /api/finance/audit/retention/history/snapshot (security.audit.retention.update) — W66 manual snapshot
+//   GET    /api/finance/audit/retention/history/export  (security.audit.read)          — W67 CSV export
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -168,6 +169,7 @@ import {
 import {
   listRetentionHistory,
   snapshotRetentionDashboard,
+  streamRetentionHistoryCsv,
 } from './retentionHistory.js';
 import {
   createCatalogItem,
@@ -1795,6 +1797,53 @@ export function registerFinanceRoutes(app, opts = {}) {
         }
         const count = snapshotRetentionDashboard(rawDb);
         res.status(200).json({ ok: true, snapshots: count });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/history/export — CSV
+  // export of the W66 history. Mirrors the W64 dashboard
+  // export pattern: streams text/csv with attachment
+  // filename + documented 8-column header.
+  //
+  // Query params: since, until, limit (default 100, max
+  // 1000). Same shape as the history GET.
+  //
+  // Perm gate: `security.audit.read` (same as the
+  // history GET).
+  app.get(
+    '/api/finance/audit/retention/history/export',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const today = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="retention-history-${today}.csv"`,
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        // Stream chunks. The history is bounded by the
+        // limit (default 100, max 1000), so the kernel
+        // buffer is plenty — no need to await drain.
+        for await (const chunk of streamRetentionHistoryCsv(rawDb, {
+          tenantId: req.tenantId,
+          since: req.query.since,
+          until: req.query.until,
+          limit: req.query.limit,
+        })) {
+          res.write(chunk);
+        }
+        res.end();
       } catch (err) {
         next(err);
       }

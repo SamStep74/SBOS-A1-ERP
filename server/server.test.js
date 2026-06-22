@@ -2210,6 +2210,31 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(typeof item.snapshot_at === 'string');
   });
 
+  // ─── Wave 67: retention history CSV export ───
+
+  test('67a. GET /api/finance/audit/retention/history/export returns text/csv with the documented header', async () => {
+    // 66a already took a snapshot for tenant 0. The
+    // export should include at least the header + 1 row.
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/retention/history/export`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /^text\/csv/);
+    assert.match(
+      res.headers.get('content-disposition') || '',
+      /^attachment; filename="retention-history-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    const text = await res.text();
+    const lines = text.trim().split('\n');
+    // Header is always first.
+    assert.match(
+      lines[0],
+      /^tenant_id,snapshot_at,retention_days,has_explicit_config,audit_row_count,last_purge_at,last_purge_count,last_purge_days$/,
+    );
+    // At least one data row from 66a.
+    assert.ok(lines.length >= 2, 'expected header + at least 1 data row');
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

@@ -211,3 +211,79 @@ export function startRetentionSnapshot({
     tickNow: tickOnce,
   };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// W67: retention history CSV export.
+//
+// streamRetentionHistoryCsv — async generator that yields the
+// history rows as CSV. Mirrors the W64 dashboard CSV pattern
+// and the W40 audit CSV pattern: header first, memory-
+// bounded by chunk size, the caller (Express route) can
+// pipe each chunk to res as it's produced.
+// ────────────────────────────────────────────────────────────────────────
+
+const HISTORY_CSV_HEADERS = Object.freeze([
+  'tenant_id',
+  'snapshot_at',
+  'retention_days',
+  'has_explicit_config',
+  'audit_row_count',
+  'last_purge_at',
+  'last_purge_count',
+  'last_purge_days',
+]);
+
+function historyCsvEscape(value) {
+  if (value == null) return '';
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function historyCsvLine(values) {
+  return values.map(historyCsvEscape).join(',') + '\n';
+}
+
+// Stream the history as CSV. The generator yields
+// one chunk at a time (a string ready to write to res).
+// No buffering of the full output in memory.
+//
+// @param {object} db   raw node:sqlite handle
+// @param {object} opts { tenantId, since?, until?, limit? }
+// @param {number} [chunkSize=500]  rows per yield
+export async function* streamRetentionHistoryCsv(db, opts = {}, chunkSize = 500) {
+  const size = Math.min(Math.max(Number(chunkSize) || 500, 1), 5000);
+  // Pull every snapshot via the existing pure function
+  // (single round-trip; no per-row queries).
+  const history = listRetentionHistory(db, opts);
+  // Header first.
+  yield historyCsvLine(HISTORY_CSV_HEADERS);
+  // Iterate. items.length is bounded by the limit
+  // (default 100, max 1000). chunkSize mostly matters
+  // when the caller asks for the maximum.
+  let buf = [];
+  for (const item of history.items) {
+    buf.push(historyCsvLine([
+      item.tenant_id,
+      item.snapshot_at,
+      item.retention_days,
+      item.has_explicit_config ? 1 : 0,
+      item.audit_row_count,
+      item.last_purge_at,
+      // last_purge_days is in the dashboard JSON but not
+      // in the per-snapshot row (we don't snapshot it;
+      // the dashboard reads it from the live config). We
+      // include it as null in the CSV for schema stability.
+      null,
+    ]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) {
+    yield buf.join('');
+  }
+}

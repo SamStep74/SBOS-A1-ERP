@@ -3828,6 +3828,68 @@ else
 fi
 echo
 
+echo "=== STEP 5ah: Retention history CSV export (Wave 67) ==="
+# Smoke coverage for the W67 history CSV export. We verify:
+#   1. GET export returns 200 + text/csv + attachment filename
+#   2. Header line has the documented 8 columns
+#   3. At least one data row exists (the 5ag snapshot)
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          resolve({ status: res.statusCode, headers: res.headers, body: buf });
+        });
+      });
+      r.end();
+    });
+  }
+
+  (async () => {
+    const r = await get("/api/finance/audit/retention/history/export");
+    if (r.status !== 200) {
+      console.log("  FAIL export status " + r.status);
+      process.exit(1);
+    }
+    if (!/^text\/csv/.test(r.headers["content-type"] || "")) {
+      console.log("  FAIL content-type " + r.headers["content-type"]);
+      process.exit(1);
+    }
+    if (!/^attachment; filename="retention-history-\d{4}-\d{2}-\d{2}\.csv"$/.test(r.headers["content-disposition"] || "")) {
+      console.log("  FAIL content-disposition " + r.headers["content-disposition"]);
+      process.exit(1);
+    }
+    const lines = r.body.trim().split("\n");
+    const expectedHeader = "tenant_id,snapshot_at,retention_days,has_explicit_config,audit_row_count,last_purge_at,last_purge_count,last_purge_days";
+    if (lines[0] !== expectedHeader) {
+      console.log("  FAIL header mismatch: " + lines[0]);
+      process.exit(1);
+    }
+    if (lines.length < 2) {
+      console.log("  FAIL expected at least 1 data row, got " + (lines.length - 1));
+      process.exit(1);
+    }
+    console.log("  CSV export: header + " + (lines.length - 1) + " data row(s)");
+
+    console.log("  OK retention history CSV export");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  retention history CSV export OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

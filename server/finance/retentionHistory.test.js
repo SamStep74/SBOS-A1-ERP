@@ -13,6 +13,7 @@ import {
   snapshotRetentionDashboard,
   listRetentionHistory,
   startRetentionSnapshot,
+  streamRetentionHistoryCsv,
 } from './retentionHistory.js';
 
 function makeHistoryDb() {
@@ -162,4 +163,72 @@ test('startRetentionSnapshot: tickNow captures immediately and returns a stop ha
   const count = handle.tickNow();
   assert.equal(count, 1);
   handle.stop();
+});
+
+// ─── W67: retention history CSV export ───
+
+async function collect(generator) {
+  const out = [];
+  for await (const chunk of generator) out.push(chunk);
+  return out.join('');
+}
+
+test('streamRetentionHistoryCsv: emits the header line first', async () => {
+  const db = makeHistoryDb();
+  const text = await collect(streamRetentionHistoryCsv(db, { tenantId: 0 }));
+  const lines = text.trim().split('\n');
+  // Header is the first line.
+  assert.match(lines[0], /^tenant_id,snapshot_at,retention_days,/);
+  // No snapshots → no data rows beyond the header.
+  assert.equal(lines.length, 1);
+});
+
+test('streamRetentionHistoryCsv: emits a row per snapshot with the documented shape', async () => {
+  const db = makeHistoryDb();
+  seedAudit(db, { tenantId: 0, ageDays: 1 });
+  // Take three snapshots at different times.
+  snapshotRetentionDashboard(db, '2026-06-01 10:00:00');
+  snapshotRetentionDashboard(db, '2026-06-02 10:00:00');
+  snapshotRetentionDashboard(db, '2026-06-03 10:00:00');
+  const text = await collect(
+    streamRetentionHistoryCsv(db, { tenantId: 0 }),
+  );
+  const lines = text.trim().split('\n');
+  // 1 header + 3 data rows.
+  assert.equal(lines.length, 4);
+  // Header has the documented 8 columns.
+  for (const col of [
+    'tenant_id',
+    'snapshot_at',
+    'retention_days',
+    'has_explicit_config',
+    'audit_row_count',
+    'last_purge_at',
+    'last_purge_count',
+    'last_purge_days',
+  ]) {
+    assert.ok(lines[0].includes(col), `header missing ${col}`);
+  }
+  // All data rows are for tenant 0.
+  for (let i = 1; i < lines.length; i += 1) {
+    assert.match(lines[i], /^0,/);
+  }
+});
+
+test('streamRetentionHistoryCsv: respects the limit option', async () => {
+  const db = makeHistoryDb();
+  seedAudit(db, { tenantId: 0, ageDays: 1 });
+  for (let i = 0; i < 5; i += 1) {
+    db.prepare(
+      `INSERT INTO retention_history
+       (tenant_id, snapshot_at, retention_days, has_explicit_config, audit_row_count)
+       VALUES (0, '2026-06-0' || ? || ' 10:00:00', 90, 1, ?)`,
+    ).run(i + 1, i + 1);
+  }
+  const text = await collect(
+    streamRetentionHistoryCsv(db, { tenantId: 0, limit: 3 }),
+  );
+  const lines = text.trim().split('\n');
+  // 1 header + 3 data rows.
+  assert.equal(lines.length, 4);
 });
