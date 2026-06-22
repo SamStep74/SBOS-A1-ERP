@@ -660,6 +660,54 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(row.user_id, 1); // stub auth mode admin
   });
 
+  // ─── Wave 49: account unlock ───
+
+  test('49a. POST /api/rbac/users/:userId/unlock clears failed_logins + locked_until', async () => {
+    // Self-seed bob (id=2) — tests run in parallel, so we can't
+    // depend on the 42c test having seeded him first.
+    const future = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    full.db.prepare('DELETE FROM users WHERE id = 2').run();
+    full.db.prepare(
+      `INSERT INTO users (id, username, email, role, tenant_id, failed_logins, locked_until)
+       VALUES (2, 'bob', 'bob@example.com', 'Operator', 0, 4, ?)`,
+    ).run(future);
+    const r = await postJson(server, '/api/rbac/users/2/unlock', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.userId, 2);
+    assert.equal(r.body.previous_failed_logins, 4);
+    assert.equal(r.body.previous_locked_until, future);
+    // The user is no longer locked.
+    const row = full.db.prepare(
+      `SELECT failed_logins, locked_until FROM users WHERE id = 2`,
+    ).get();
+    assert.equal(row.failed_logins, 0);
+    assert.equal(row.locked_until, null);
+  });
+
+  test('49b. POST /api/rbac/users/999999/unlock returns 404 for unknown user', async () => {
+    const r = await postJson(server, '/api/rbac/users/999999/unlock', {});
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'user_not_found');
+  });
+
+  test('49c. POST /api/rbac/users/abc/unlock returns 404 for non-numeric id', async () => {
+    const r = await postJson(server, '/api/rbac/users/abc/unlock', {});
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'not_found');
+  });
+
+  test('49d. POST /api/rbac/users/1/unlock on an already-unlocked user returns 200 with previous_failed_logins=0', async () => {
+    // Admin (id=1) is fresh — no failed_logins or lock.
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = 1`,
+    ).run();
+    const r = await postJson(server, '/api/rbac/users/1/unlock', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.userId, 1);
+    assert.equal(r.body.previous_failed_logins, 0);
+    assert.equal(r.body.previous_locked_until, null);
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

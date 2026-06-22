@@ -1686,6 +1686,100 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" DB_PATH="$DB" node -e "
   fi
 echo
 
+echo "=== STEP 5p: Account unlock (Wave 49) ==="
+# Smoke coverage for POST /api/rbac/users/:userId/unlock:
+#   1. Unknown user → 404
+#   2. Non-numeric id → 404
+#   3. Existing user is unlocked (failed_logins reset to 0,
+#      locked_until cleared) and the response echoes the previous
+#      values for audit
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" DB_PATH="$DB" node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const http = require('node:http');
+
+  function call(method, path, body) {
+    return new Promise((resolve) => {
+      const data = body ? JSON.stringify(body) : null;
+      const headers = { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN };
+      if (data) {
+        headers['content-type'] = 'application/json';
+        headers['content-length'] = Buffer.byteLength(data);
+      }
+      const req = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path, method, headers,
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+
+  (async () => {
+    // 1. Unknown user → 404
+    const unknown = await call('POST', '/api/rbac/users/999999/unlock', {});
+    if (unknown.status !== 404) {
+      console.log('  FAIL unknown user: expected 404, got ' + unknown.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 POST unlock for unknown user');
+
+    // 2. Non-numeric id → 404
+    const nonnumeric = await call('POST', '/api/rbac/users/abc/unlock', {});
+    if (nonnumeric.status !== 404) {
+      console.log('  FAIL non-numeric id: expected 404, got ' + nonnumeric.status);
+      process.exit(1);
+    }
+    console.log('  PASS 404 POST unlock for non-numeric id');
+
+    // 3. Lock a test user + verify the unlock clears it.
+    const db = new DatabaseSync(process.env.DB_PATH);
+    const future = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare('DELETE FROM users WHERE id = 99').run();
+    db.prepare(\`INSERT INTO users (id, username, email, role, tenant_id, failed_logins, locked_until)
+      VALUES (99, 'locktest', 'lock@example.com', 'Operator', 0, 4, ?)\`).run(future);
+    const unlock = await call('POST', '/api/rbac/users/99/unlock', {});
+    if (unlock.status !== 200) {
+      console.log('  FAIL unlock: status=' + unlock.status + ' body=' + JSON.stringify(unlock.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (unlock.body.userId !== 99) {
+      console.log('  FAIL unlock.userId:', unlock.body.userId);
+      process.exit(1);
+    }
+    if (unlock.body.previous_failed_logins !== 4) {
+      console.log('  FAIL unlock.previous_failed_logins:', unlock.body.previous_failed_logins);
+      process.exit(1);
+    }
+    if (unlock.body.previous_locked_until !== future) {
+      console.log('  FAIL unlock.previous_locked_until:', unlock.body.previous_locked_until);
+      process.exit(1);
+    }
+    // Verify the DB row was actually updated.
+    const row = db.prepare('SELECT failed_logins, locked_until FROM users WHERE id = 99').get();
+    if (row.failed_logins !== 0 || row.locked_until !== null) {
+      console.log('  FAIL row not updated: ' + JSON.stringify(row));
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST unlock clears failed_logins + locked_until (response echoes previous values)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  account unlock OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

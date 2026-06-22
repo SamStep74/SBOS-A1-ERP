@@ -19,6 +19,7 @@
 //   POST   /api/rbac/users/:userId/permission-sets    (security.role.assign)
 //   DELETE /api/rbac/users/:userId/permission-sets/:ps (security.role.assign)
 //   POST   /api/rbac/users/:userId/role               (security.role.assign)
+//   POST   /api/rbac/users/:userId/unlock             (security.user.update) — clear lockout
 //   GET    /api/rbac/profiles                          (security.profile.read)
 //   POST   /api/rbac/profiles                          (security.profile.create)
 //   GET    /api/rbac/profiles/:id                      (security.profile.read)
@@ -449,6 +450,47 @@ function registerRbacRoutes(app, opts = {}) {
         /* users.role may not exist in some deployments */
       }
       return reply.code(201).send({ userId, roleId });
+    },
+  );
+
+  // POST /api/rbac/users/:userId/unlock — clear the failed-login
+  // counter and the locked_until timestamp on a user. Used by ops
+  // when a user is locked out and needs help getting back in (the
+  // user has verified their identity out-of-band — phone call,
+  // in-person, etc — and the operator is clearing the lock).
+  //
+  // Returns 200 with {userId, previous_failed_logins, previous_locked_until}
+  // so the operator can see what they just cleared. Audited under
+  // resource='user:<id>'.
+  app.post(
+    '/api/rbac/users/:userId/unlock',
+    { preHandler: requirePermFastify('security.user.update') },
+    async (request, reply) => {
+      const userId = Number(request.params.userId);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const user = db
+        .prepare(
+          `SELECT id, tenant_id, failed_logins, locked_until FROM users WHERE id = ?`,
+        )
+        .get(userId);
+      if (!user) return reply.code(404).send({ error: 'user_not_found' });
+      const previous = {
+        failed_logins: Number(user.failed_logins || 0),
+        locked_until: user.locked_until || null,
+      };
+      db.prepare(
+        `UPDATE users
+            SET failed_logins = 0,
+                locked_until = NULL
+          WHERE id = ?`,
+      ).run(userId);
+      return reply.code(200).send({
+        userId,
+        previous_failed_logins: previous.failed_logins,
+        previous_locked_until: previous.locked_until,
+      });
     },
   );
 
