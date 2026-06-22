@@ -1,8 +1,8 @@
 {
   "name": "sbos-a1-erp",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "private": true,
-  "description": "SBOS-A1-ERP — Armenian SME ERP foundation (Node.js + ESM, strict, test-driven).",
+  "description": "SBOS-A1-ERP \u2014 Armenian SME ERP foundation (Node.js + ESM, strict, test-driven).",
   "type": "module",
   "bin": {
     "sbos-server": "bin/sbos-server.mjs"
