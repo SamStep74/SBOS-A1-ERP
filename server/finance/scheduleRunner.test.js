@@ -114,6 +114,8 @@ function makeMockDb() {
       enabled: opts.enabled ?? 1,
       params: opts.params ?? null,
       notify_email: opts.notify_email ?? null,
+      notify_webhook_url: opts.notify_webhook_url ?? null,
+      notify_webhook_secret: opts.notify_webhook_secret ?? null,
       last_run_at: opts.last_run_at ?? null,
       next_run_at: opts.next_run_at ?? null,
       created_by: opts.created_by ?? null,
@@ -333,12 +335,10 @@ test('dispatchReport: params must be a JSON object', async () => {
 // sendNotificationEmail stub
 // ────────────────────────────────────────────────────────────────────────
 
-test('sendNotificationEmail: stub returns deterministic shape', async () => {
+test('sendNotificationEmail: stub returns delivered=false + mode=stub', async () => {
   const r = await sendNotificationEmail('cfo@example.com', 'ar_aging', '{"x":1}');
   assert.equal(r.delivered, false);
-  assert.equal(r.to, 'cfo@example.com');
-  assert.equal(r.report_type, 'ar_aging');
-  assert.equal(r.bytes, 7);
+  assert.equal(r.mode, 'stub');
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -420,6 +420,63 @@ test('tickOnce: handles empty schedule list', async () => {
   const pgAdapter = makeMockPgAdapter({});
   const summary = await tickOnce(db, pgAdapter, new Date('2026-06-22T12:00:00.000Z'), 0, STUB_DISPATCH);
   assert.deepEqual(summary, { fired: 0, skipped: 0, errors: 0 });
+});
+
+test('tickOnce: sendNotification fires for notify_webhook_url set', async () => {
+  const db = makeMockDb();
+  const pgAdapter = makeMockPgAdapter({});
+  let capturedUrl = null;
+  let capturedBody = null;
+  let capturedHeaders = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    capturedUrl = url;
+    capturedBody = opts.body;
+    capturedHeaders = opts.headers;
+    return { ok: true, status: 200 };
+  };
+  try {
+    db.seedSchedule({
+      report_type: 'ar_aging',
+      cron_expression: '* * * * *',
+      next_run_at: '2026-06-22T12:00:00.000Z',
+      notify_webhook_url: 'https://hooks.example.com/sbos',
+      notify_webhook_secret: 'shared-secret-789',
+    });
+    const summary = await tickOnce(db, pgAdapter, new Date('2026-06-22T12:01:00.000Z'), 0, STUB_DISPATCH);
+    assert.equal(summary.fired, 1);
+    assert.equal(db.executions.get(1).status, 'completed');
+    assert.equal(capturedUrl, 'https://hooks.example.com/sbos');
+    assert.ok(capturedHeaders['x-sbos-signature'], 'X-SBOS-Signature header should be set');
+    const payload = JSON.parse(capturedBody);
+    assert.equal(payload.event, 'report.execution');
+    assert.equal(payload.report_type, 'ar_aging');
+    assert.equal(payload.status, 'success');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('tickOnce: webhook failure does not fail the tick', async () => {
+  const db = makeMockDb();
+  const pgAdapter = makeMockPgAdapter({});
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('network unreachable'); };
+  try {
+    db.seedSchedule({
+      report_type: 'ar_aging',
+      cron_expression: '* * * * *',
+      next_run_at: '2026-06-22T12:00:00.000Z',
+      notify_webhook_url: 'https://hooks.example.com/sbos',
+    });
+    const summary = await tickOnce(db, pgAdapter, new Date('2026-06-22T12:01:00.000Z'), 0, STUB_DISPATCH);
+    // Webhook failure is non-fatal; the tick still records the execution as success.
+    assert.equal(summary.fired, 1);
+    assert.equal(summary.errors, 0);
+    assert.equal(db.executions.get(1).status, 'completed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('tickOnce: sendNotificationEmail called for notify_email set', async () => {

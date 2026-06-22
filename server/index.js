@@ -305,6 +305,7 @@ export async function createApp({
   pgAdapter,
   locale = 'en',
   scheduler = null,
+  emailService = null,
 } = {}) {
   if (!db) {
     throw new TypeError('createApp requires a db (opts.db)');
@@ -524,13 +525,37 @@ export async function createApp({
     const schedulerConfig = typeof scheduler === 'object' && scheduler !== null
       ? scheduler
       : {};
+    // Build the email service from env vars if the caller
+    // didn't inject one. The default mode is 'capture' (writes
+    // to var/sbos-emails/YYYY-MM-DD.jsonl). Set
+    // SBOS_EMAIL_MODE=smtp + SBOS_SMTP_HOST to enable real
+    // delivery.
+    let activeEmailService = emailService;
+    if (activeEmailService === null) {
+      const { createEmailService } = await import('./finance/emailService.js');
+      const mode = process.env.SBOS_EMAIL_MODE || 'capture';
+      activeEmailService = createEmailService({
+        mode,
+        captureDir: process.env.SBOS_EMAIL_CAPTURE_DIR || 'var/sbos-emails',
+        from: process.env.SBOS_EMAIL_FROM || 'sbos-a1-erp@localhost',
+        smtp: {
+          host: process.env.SBOS_SMTP_HOST,
+          port: process.env.SBOS_SMTP_PORT ? Number(process.env.SBOS_SMTP_PORT) : 587,
+          user: process.env.SBOS_SMTP_USER,
+          pass: process.env.SBOS_SMTP_PASS,
+          starttls: process.env.SBOS_SMTP_STARTTLS !== 'false',
+        },
+      });
+    }
     const schedulerHandle = startScheduler({
       db,
       pgAdapter,
       tickMs: 60_000,
+      emailService: activeEmailService,
       ...schedulerConfig,
     });
     app.locals.scheduler = schedulerHandle;
+    app.locals.emailService = activeEmailService;
   }
 
   // Generic 500.

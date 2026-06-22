@@ -319,19 +319,55 @@ export async function dispatchReport(
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Email stub
+// Email — thin wrapper over the email service (W101-1)
+//
+// In W97-1 this was a stub that returned a deterministic
+// shape. In W101-1 we delegate to the email service
+// (server/finance/emailService.js) which can route to
+// capture / log / smtp modes. If no email service is
+// provided to startScheduler, we fall back to a stub
+// behavior that returns { delivered: false, ... } so
+// the worker never throws — it just doesn't actually
+// send.
 // ────────────────────────────────────────────────────────────────────────
 
+const DEFAULT_EMAIL_SERVICE = Object.freeze({
+  async send(_msg) {
+    return { delivered: false, mode: 'stub' };
+  },
+  async close() {},
+  mode: 'stub',
+});
+
 /**
- * Send a notification email. In wave 4 this is a stub that
- * logs the payload. Wave 5 will replace with SMTP.
+ * Send a notification email. Delegates to the email service.
+ * Returns the result from emailService.send() (or the stub
+ * equivalent if no service was provided).
  *
- * @returns {Promise<{ delivered: boolean, to: string, report_type: string }>}
+ * The body is auto-formatted: subject is a short line with
+ * the report type, body is a JSON dump of the result.
+ *
+ * @returns {Promise<{ delivered: boolean, mode: string, ... }>}
  */
-export async function sendNotificationEmail(to, reportType, resultJson) {
-  // The stub returns a deterministic shape so the caller
-  // can log the result and tests can assert the call happened.
-  return { delivered: false, to, report_type: reportType, bytes: resultJson ? resultJson.length : 0 };
+export async function sendNotificationEmail(to, reportType, resultJson, emailService = null) {
+  const service = emailService || DEFAULT_EMAIL_SERVICE;
+  const subject = `[SBOS] scheduled report: ${reportType}`;
+  // Body is plain text (not HTML) — easier to read in email clients.
+  // We try to pretty-print the JSON if possible, otherwise just
+  // show the raw result.
+  let body;
+  try {
+    const parsed = JSON.parse(resultJson);
+    body = `Scheduled report: ${reportType}\nGenerated at: ${new Date().toUTCString()}\n\n${JSON.stringify(parsed, null, 2)}`;
+  } catch (_e) {
+    body = `Scheduled report: ${reportType}\nGenerated at: ${new Date().toUTCString()}\n\n${resultJson || '(no result)'}`;
+  }
+  return await service.send({
+    to,
+    subject,
+    body,
+    isHtml: false,
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -360,6 +396,7 @@ export async function tickOnce(
   now = new Date(),
   tenantId = 0,
   dispatchTable = DEFAULT_DISPATCH,
+  emailService = null,
 ) {
   assertNonNegativeInt(tenantId, 'tenantId');
   const allSchedules = await listReportSchedules(db, tenantId, { enabled: 1 });
@@ -421,9 +458,36 @@ export async function tickOnce(
           sched.notify_email,
           sched.report_type,
           resultJson || '',
+          emailService,
         );
       } catch (e) {
         console.error('[scheduler] email send failed:', e && e.message ? e.message : e);
+      }
+    }
+    // Webhook (if configured). Fire-and-forget POST to
+    // notify_webhook_url. The payload is JSON; consumers
+    // (Slack bots, Sendgrid HTTP API, etc) parse it.
+    if (sched.notify_webhook_url) {
+      try {
+        const { sendNotification } = await import('./notifications.js');
+        await sendNotification({
+          url: sched.notify_webhook_url,
+          secret: sched.notify_webhook_secret || null,
+          execution: {
+            tenantId: sched.tenant_id,
+            scheduleId: sched.id,
+            scheduleName: sched.name,
+            reportType: sched.report_type,
+            status: status === 'completed' ? 'success' : 'failed',
+            startedAt: startedAt,
+            finishedAt: completedAt,
+            durationMs: durationMs,
+            resultSummary: status === 'completed' ? resultJson : null,
+            errorMessage: error,
+          },
+        });
+      } catch (e) {
+        console.error('[scheduler] webhook send failed:', e && e.message ? e.message : e);
       }
     }
     // Update next_run_at.
@@ -487,6 +551,7 @@ export function startScheduler({
   tenantId = 0,
   onError = null,
   dispatchTable = DEFAULT_DISPATCH,
+  emailService = null,
 } = {}) {
   if (!db) throw new TypeError('startScheduler requires opts.db');
   if (!pgAdapter) throw new TypeError('startScheduler requires opts.pgAdapter');
@@ -495,9 +560,10 @@ export function startScheduler({
     throw new ValueError(`tickMs must be >= ${MIN_TICK_MS} (got ${tickMs})`);
   }
   assertNonNegativeInt(tenantId, 'tenantId');
-  console.log(`[scheduler] worker started, tick=${tickMs}ms, tenant=${tenantId}`);
+  const emailMode = emailService ? emailService.mode : 'stub';
+  console.warn(`[scheduler] worker started, tick=${tickMs}ms, tenant=${tenantId}, email=${emailMode}`);
   const tick = () => {
-    tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable)
+    tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService)
       .catch((e) => {
         const msg = e && e.message ? e.message : String(e);
         console.error('[scheduler] tick error:', msg);
@@ -515,7 +581,7 @@ export function startScheduler({
       stopped = true;
       clearInterval(interval);
     },
-    tickOnce: () => tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable),
+    tickOnce: () => tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService),
     tickMs,
   };
 }

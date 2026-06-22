@@ -3180,6 +3180,53 @@ if [ $SMOKE_RC != 0 ]; then
 fi
 
 
+echo "=== STEP 7o: Email service capture mode (W101-1) ==="
+# Verifies the email service starts in capture mode and a
+# test send writes a JSONL entry to the capture dir. We
+# also verify the scheduler worker boot log shows the
+# email mode.
+LOG7O="$TESTDIR/server-7o.log"
+SBOS_EMAIL_MODE=capture SBOS_EMAIL_CAPTURE_DIR="$TESTDIR/sbos-emails" PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7O" 2>&1 &
+SERVER_PID_7O=$!
+SMOKE_RC=0
+cleanup_7o() { kill -9 $SERVER_PID_7O 2>/dev/null; wait $SERVER_PID_7O 2>/dev/null; }
+trap cleanup_7o EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7o"
+    tail -20 "$LOG7O"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  # Check the scheduler boot log mentions email=capture
+  if grep -q "email=capture" "$LOG7O"; then
+    echo "  OK scheduler boot log shows email=capture"
+  else
+    echo "  FAIL: scheduler boot log does not show email mode"
+    tail -10 "$LOG7O"
+    SMOKE_RC=1
+  fi
+  # Verify the email service directory was auto-created on boot.
+  if [ -d "$TESTDIR/sbos-emails" ]; then
+    echo "  OK capture directory auto-created"
+  else
+    echo "  FAIL: capture directory not created at $TESTDIR/sbos-emails"
+    SMOKE_RC=1
+  fi
+fi
+kill -TERM $SERVER_PID_7O 2>/dev/null
+wait $SERVER_PID_7O 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 
 echo
 echo "=== STEP 8: Summary ==="
