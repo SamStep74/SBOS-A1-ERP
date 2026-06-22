@@ -72,19 +72,22 @@ the schedule's report_type, records the execution
 ## Lessons learned
 
 1. **Vixie cron semantics for dom/dow are subtle.** The
-   standard rule is: if BOTH `dom` and `dow` are restricted
-   (non-wildcard), match if BOTH match (AND). If EITHER is
-   `*` (wildcard), match if EITHER matches (OR). The bug
+   standard Vixie rule is: if BOTH `dom` and `dow` are
+   restricted (non-wildcard), match if EITHER matches (OR
+   semantics). If ONE of them is `*` (wildcard), the other
+   is the only constraint (so the wildcard is effectively
+   ignored). If BOTH are `*`, every day matches. The bug
    I shipped on the first pass: I used `dom_matches ||
    dow_matches` unconditionally, which made `0 9 * * 1`
    (Mondays at 9am) match EVERY day, not just Mondays.
    Fix: track `wildcard` per field during parse, and use
-   AND vs OR based on the wildcard flags. The lesson:
-   **when implementing a subset of a well-known spec,
-   read the spec's behavior for the edge cases, not just
-   the happy path.** The 6 cron fields have 20 years of
-   battle-tested edge cases; "matches if both fields
-   match" is wrong for dom/dow specifically.
+   the four-way truth table (both-restricted OR / dom-only /
+   dow-only / both-wildcard). The lesson: **when
+   implementing a subset of a well-known spec, read the
+   spec's behavior for the edge cases, not just the happy
+   path.** The 6 cron fields have 20 years of battle-tested
+   edge cases; "matches if both fields match" is wrong for
+   dom/dow specifically.
 
 2. **The dispatch table should be an injectable parameter,
    not a hidden import.** The first version of
