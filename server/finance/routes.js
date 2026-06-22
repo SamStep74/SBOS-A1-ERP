@@ -3206,6 +3206,43 @@ export function registerFinanceRoutes(app, opts = {}) {
     }
   });
 
+  // POST /api/finance/reports/schedules
+  //   Create a new report schedule. The body has:
+  //     name, report_type, cron_expression, enabled (default 1),
+  //     params (object, default null), notify_email (string, default null)
+  //   cron_expression is a 5-field cron (minute, hour, day-of-month,
+  //   month, day-of-week) — e.g. "0 9 * * 1" = every Monday at 09:00.
+  app.post('/api/finance/reports/schedules', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const out = await createReportSchedule(pgAdapter, req.body || {}, tenantId);
+      res.status(201).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/reports/schedules/:id/toggle
+  //   Body: { enabled: 0|1 } — toggle the schedule on or off.
+  //   The full updated schedule is returned.
+  app.post('/api/finance/reports/schedules/:id/toggle', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const tenantId = req.tenantId;
+      const enabled = Number(req.body?.enabled ?? 1);
+      const out = await toggleReportSchedule(pgAdapter, id, { enabled }, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
   // POST /api/finance/reports/schedules/:id/toggle
   //   Toggle the enabled flag. Body: { enabled: 0 | 1 }.
   app.post(

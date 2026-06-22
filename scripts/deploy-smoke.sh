@@ -2712,6 +2712,117 @@ fi
 
 
 echo
+echo "=== STEP 7l: Report schedules CRUD (W96-1) ==="
+# Tests the report-schedule routes:
+#   GET /api/finance/reports/schedules
+#   POST /api/finance/reports/schedules
+#   GET /api/finance/reports/schedules/:id
+#   POST /api/finance/reports/schedules/:id/toggle
+#   GET /api/finance/reports/executions
+LOG7L="$TESTDIR/server-7l.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7L" 2>&1 &
+SERVER_PID_7L=$!
+SMOKE_RC=0
+cleanup_7l() { kill -9 $SERVER_PID_7L 2>/dev/null; wait $SERVER_PID_7L 2>/dev/null; }
+trap cleanup_7l EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7l"
+    tail -20 "$LOG7L"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7L=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7L" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7L" ]; then
+    echo "  FAIL: STEP 7l server did not print admin session token"
+    tail -20 "$LOG7L"
+    SMOKE_RC=1
+  else
+    # List schedules (empty on fresh DB)
+    LIST_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0")
+    if echo "$LIST_OUT" | python3 -c "import json, sys; d=json.load(sys.stdin); assert 'items' in d and isinstance(d['items'], list); print('OK', len(d['items']))" 2>/dev/null; then
+      echo "  OK list schedules returns items array"
+    else
+      echo "  FAIL: list schedules did not return items: $LIST_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Create a schedule
+    CREATE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"Weekly AR aging","report_type":"ar_aging","cron_expression":"0 9 * * 1"}')
+    SCHED_ID=$(echo "$CREATE_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -n "$SCHED_ID" ]; then
+      echo "  OK create schedule returns id=$SCHED_ID"
+    else
+      echo "  FAIL: create schedule did not return id: $CREATE_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Get the schedule
+    if [ -n "$SCHED_ID" ]; then
+      GET_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/reports/schedules/$SCHED_ID" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0")
+      if echo "$GET_OUT" | grep -q '"name":"Weekly AR aging"'; then
+        echo "  OK get schedule by id returns the schedule"
+      else
+        echo "  FAIL: get schedule did not return schedule: $GET_OUT"
+        SMOKE_RC=1
+      fi
+
+      # Toggle the schedule
+      TOGGLE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules/$SCHED_ID/toggle" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0" \
+        -H "content-type: application/json" \
+        -d '{"enabled":0}')
+      if echo "$TOGGLE_OUT" | grep -q '"enabled":0'; then
+        echo "  OK toggle schedule to disabled returns enabled=0"
+      else
+        echo "  FAIL: toggle schedule did not work: $TOGGLE_OUT"
+        SMOKE_RC=1
+      fi
+    fi
+
+    # Invalid cron expression returns 400
+    BAD_CRON=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"Bad","report_type":"ar_aging","cron_expression":"not a cron"}')
+    if [ "$BAD_CRON" = "400" ]; then
+      echo "  OK invalid cron expression returns 400"
+    else
+      echo "  FAIL: invalid cron returned $BAD_CRON (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # List executions (empty on fresh DB)
+    EXEC_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/reports/executions" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7L" -H "X-Tenant-Id: 0")
+    if echo "$EXEC_OUT" | python3 -c "import json, sys; d=json.load(sys.stdin); assert 'items' in d and isinstance(d['items'], list); print('OK', len(d['items']))" 2>/dev/null; then
+      echo "  OK list executions returns items array"
+    else
+      echo "  FAIL: list executions did not return items: $EXEC_OUT"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7L 2>/dev/null
+wait $SERVER_PID_7L 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"
