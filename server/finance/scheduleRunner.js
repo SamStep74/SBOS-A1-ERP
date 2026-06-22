@@ -563,27 +563,106 @@ export function startScheduler({
   assertNonNegativeInt(tenantId, 'tenantId');
   const emailMode = emailService ? emailService.mode : 'stub';
   console.warn(`[scheduler] worker started, tick=${tickMs}ms, tenant=${tenantId}, email=${emailMode}`);
-  const tick = () => {
-    tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService)
-      .catch((e) => {
-        const msg = e && e.message ? e.message : String(e);
-        console.error('[scheduler] tick error:', msg);
-        if (typeof onError === 'function') onError(e);
-      });
-  };
-  const interval = setInterval(tick, tickMs);
+
+  // Concurrency guard (W104-1). If a tick takes longer
+  // than `tickMs` (e.g. SMTP send is slow, or a report
+  // function blocks), the next setInterval tick fires
+  // while the previous is still running. Without a guard,
+  // this causes duplicate execution rows + duplicate
+  // emails. The flag is set when a tick starts and
+  // cleared in the .finally so it always runs.
+  //
+  // The `metrics` object tracks scheduler health for
+  // observability — the operator can read it from the
+  // handle or via the GET /api/finance/reports/scheduler
+  // route (a future wave).
+  let inProgress = false;
+  let totalTicks = 0;
+  let skippedTicks = 0;
+  let completedTicks = 0;
+  let erroredTicks = 0;
+  let lastTickAt = null;
+  let lastTickDurationMs = null;
+  let lastTickError = null;
+
+  const interval = setInterval(runOneTick, tickMs);
   // Don't keep the event loop alive solely for the scheduler
   // (allows the test harness to exit cleanly after the test).
   if (typeof interval.unref === 'function') interval.unref();
   let stopped = false;
+
+  // Internal helper: run one tick with the same metrics
+  // accounting the setInterval path uses. Both the
+  // setInterval tick and the direct tickOnce() call go
+  // through this so the metrics are unified.
+  function runOneTick() {
+    if (inProgress) {
+      skippedTicks += 1;
+      return Promise.resolve({ fired: 0, skipped: 1, errors: 0 });
+    }
+    inProgress = true;
+    totalTicks += 1;
+    const tickStartedAt = Date.now();
+    lastTickAt = new Date(tickStartedAt).toISOString();
+    return tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService)
+      .then((summary) => {
+        completedTicks += 1;
+        // tickOnce catches per-schedule errors and
+        // records them in finance.report_executions.
+        // It returns a summary { fired, skipped, errors }.
+        // If errors > 0, the tick had at least one failed
+        // execution; we surface that on the metrics.
+        if (summary && summary.errors && summary.errors > 0) {
+          lastTickError = `tick had ${summary.errors} error(s) (per-schedule failures recorded in report_executions)`;
+          erroredTicks += 1;
+        } else {
+          lastTickError = null;
+        }
+        return summary;
+      })
+      .catch((e) => {
+        // tickOnce's outer promise rejects only on
+        // unexpected infrastructure failures (db query
+        // failed, etc.) — per-schedule errors are caught
+        // inside tickOnce and surfaced via summary.errors.
+        const msg = e && e.message ? e.message : String(e);
+        console.error('[scheduler] tick error:', msg);
+        lastTickError = msg;
+        erroredTicks += 1;
+        if (typeof onError === 'function') onError(e);
+        // Re-throw so the caller of tickOnce() can see
+        // the error too. The setInterval path ignores the
+        // throw (it just logs).
+        throw e;
+      })
+      .finally(() => {
+        inProgress = false;
+        lastTickDurationMs = Date.now() - tickStartedAt;
+      });
+  }
+
   return {
     stop() {
       if (stopped) return;
       stopped = true;
       clearInterval(interval);
     },
-    tickOnce: () => tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService),
+    tickOnce: runOneTick,
     tickMs,
+    // W104-1: scheduler health observability. The metrics
+    // object is a live reference (not a snapshot) — the
+    // values update as the scheduler runs. Callers that
+    // want a snapshot should JSON.stringify() it.
+    metrics: {
+      get totalTicks() { return totalTicks; },
+      get skippedTicks() { return skippedTicks; },
+      get completedTicks() { return completedTicks; },
+      get erroredTicks() { return erroredTicks; },
+      get inProgress() { return inProgress; },
+      get lastTickAt() { return lastTickAt; },
+      get lastTickDurationMs() { return lastTickDurationMs; },
+      get lastTickError() { return lastTickError; },
+    },
   };
 }
 
