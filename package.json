@@ -25,6 +25,9 @@
     "format:fix": "prettier --write .",
     "typecheck": "node scripts/typecheck-if-typescript.mjs",
     "boundary-check": "node scripts/check-open-core-boundary-contract.mjs",
+    "karpathy:list": "node scripts/karpathy-eval.mjs --list",
+    "karpathy:program": "node scripts/karpathy-eval.mjs --program",
+    "karpathy:run": "node scripts/karpathy-eval.mjs --run",
     "check": "npm run lint && npm run typecheck && npm run test && npm run boundary-check",
     "build": "tsc"
   },
