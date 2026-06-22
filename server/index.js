@@ -292,8 +292,8 @@ function makeFastifyFacade(expressApp, { db }) {
 // uses this so we don't have to seed a session per test.
 // ────────────────────────────────────────────────────────────────────────
 
-function makeAuthMiddlewareForApp({ db }) {
-  return makeAuthMiddleware({ db });
+function makeAuthMiddlewareForApp({ db, dbRef }) {
+  return makeAuthMiddleware({ db, dbRef });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -352,7 +352,10 @@ export async function createApp({
   app.use(express.json({ limit: '1mb' }));
 
   // Auth middleware (must run before any /api/rbac routes).
-  app.use(makeAuthMiddlewareForApp({ db: dbRef.current }));
+  // Pass dbRef (not just dbRef.current) so the middleware
+  // reads the live handle per request — necessary because
+  // the restore route swaps the live db mid-process.
+  app.use(makeAuthMiddlewareForApp({ dbRef }));
 
   // The facade exposes a Fastify-compatible API so registerRbacRoutes
   // can register its Fastify-style routes without us rewriting the
@@ -422,7 +425,7 @@ export async function createApp({
   // if the token is unknown or already revoked, we still return 200
   // (the goal is to make the token unusable, which is already true
   // for an unknown/revoked token).
-  app.post('/api/auth/logout', makeAuthMiddlewareForApp({ db }), (req, res) => {
+  app.post('/api/auth/logout', makeAuthMiddlewareForApp({ dbRef }), (req, res) => {
     if (req.session && req.session.id) {
       try {
         db.prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(req.session.id);
@@ -453,7 +456,7 @@ export async function createApp({
   // ──────────────────────────────────────────────────────────────────
 
   // GET /api/auth/sessions — list the current user's active sessions.
-  app.get('/api/auth/sessions', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+  app.get('/api/auth/sessions', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { listMySessions } = await import('./auth-sessions.js');
       const sessions = listMySessions(db, req.user.id);
@@ -471,7 +474,7 @@ export async function createApp({
   // POST /api/auth/sessions/:id/revoke — revoke one of the current
   // user's sessions (must be owned by them; cross-user is rejected
   // at the SQL boundary).
-  app.post('/api/auth/sessions/:id/revoke', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+  app.post('/api/auth/sessions/:id/revoke', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { revokeMySession } = await import('./auth-sessions.js');
       const ok = revokeMySession(db, req.user.id, req.params.id);
@@ -488,7 +491,7 @@ export async function createApp({
   // user's sessions, including the current one (logout-everywhere).
   // The current session is also revoked; the caller will need to
   // log in again on the next request.
-  app.post('/api/auth/sessions/revoke-all', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+  app.post('/api/auth/sessions/revoke-all', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { revokeAllMySessions } = await import('./auth-sessions.js');
       const count = revokeAllMySessions(db, req.user.id);
@@ -501,7 +504,7 @@ export async function createApp({
   // POST /api/auth/password — change the current user's password.
   // Self-service rotation. Body: { old_password, new_password }.
   // Perm gate: any authenticated user (this is self-service).
-  app.post('/api/auth/password', makeAuthMiddlewareForApp({ db }), async (req, res) => {
+  app.post('/api/auth/password', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { changePassword } = await import('./auth-login.js');
       const body = req.body || {};

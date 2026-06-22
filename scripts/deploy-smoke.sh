@@ -2126,6 +2126,151 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_BACKUP_DIR="$SMOKE_BACKUP_DIR" node
   fi
 echo
 
+echo "=== STEP 5t: Account lockout observability + force-lock (Wave 53) ==="
+# Smoke coverage for the new lockout ops endpoints:
+#   1. GET /api/rbac/users returns the user list with totals
+#   2. GET /api/rbac/users?locked=true filters to locked users only
+#   3. POST /api/rbac/users/:userId/lock force-locks with a reason
+#   4. POST /api/rbac/users/:userId/lock without a reason returns 400
+#   5. POST /api/rbac/users/999999/lock returns 404
+#   6. After the lock, the user is visible in ?locked=true
+#   7. POST /api/rbac/users/:userId/unlock clears the lock
+# The smoke creates a fresh test user (id=2) via the existing
+# pattern and exercises the full lock/unlock cycle.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+  const { DatabaseSync } = require('node:sqlite');
+  const { join } = require('node:path');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  function postJson(p, body) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: {
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': 'application/json',
+        'content-length': body ? JSON.stringify(body).length : 2,
+      },
+    }, body ? JSON.stringify(body) : '{}');
+  }
+
+  (async () => {
+    // 1. GET /api/rbac/users returns 200 + items + totals.
+    const list = await get('/api/rbac/users');
+    if (list.status !== 200 || !Array.isArray(list.body.items)) {
+      console.log('  FAIL list: status=' + list.status + ' body=' + JSON.stringify(list.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (typeof list.body.locked_count !== 'number') {
+      console.log('  FAIL list: missing locked_count');
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/rbac/users returns items + totals (total=' + list.body.total + ', locked=' + list.body.locked_count + ')');
+
+    // 2. GET /api/rbac/users?locked=true returns 200 + items
+    // (the array may be empty if no users are currently locked).
+    const locked = await get('/api/rbac/users?locked=true');
+    if (locked.status !== 200 || !Array.isArray(locked.body.items)) {
+      console.log('  FAIL locked filter: status=' + locked.status);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/rbac/users?locked=true returns items array (n=' + locked.body.items.length + ')');
+
+    // 3. POST /api/rbac/users/1/lock without reason returns 400.
+    const noReason = await postJson('/api/rbac/users/1/lock', {});
+    if (noReason.status !== 400 || noReason.body.error !== 'invalid_request') {
+      console.log('  FAIL lock no-reason: status=' + noReason.status + ' body=' + JSON.stringify(noReason.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 400 POST /api/rbac/users/1/lock rejects empty reason (invalid_request)');
+
+    // 4. POST /api/rbac/users/999999/lock returns 404 (unknown user).
+    const notFound = await postJson('/api/rbac/users/999999/lock', { reason: 'smoke test' });
+    if (notFound.status !== 404 || notFound.body.error !== 'user_not_found') {
+      console.log('  FAIL lock 404: status=' + notFound.status + ' body=' + JSON.stringify(notFound.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 404 POST /api/rbac/users/999999/lock returns user_not_found');
+
+    // 5. POST /api/rbac/users/1/lock with reason force-locks admin.
+    // (id=1 is the admin user, always present in the smoke env.)
+    const lockedRes = await postJson('/api/rbac/users/1/lock', {
+      reason: 'W53 smoke: simulating account compromise for ops review',
+    });
+    if (lockedRes.status !== 200 || lockedRes.body.failed_logins !== 99) {
+      console.log('  FAIL lock: status=' + lockedRes.status + ' body=' + JSON.stringify(lockedRes.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (!lockedRes.body.locked_until) {
+      console.log('  FAIL lock: locked_until not set');
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST /api/rbac/users/1/lock force-locks admin (failed_logins=99, locked_until set)');
+
+    // 6. After the lock, admin is visible in the ?locked=true list.
+    const afterLock = await get('/api/rbac/users?locked=true');
+    if (afterLock.status !== 200) {
+      console.log('  FAIL post-lock list: status=' + afterLock.status);
+      process.exit(1);
+    }
+    if (!afterLock.body.items.some((u) => u.id === 1)) {
+      console.log('  FAIL post-lock: admin (id=1) not in locked list');
+      process.exit(1);
+    }
+    if (afterLock.body.locked_count < 1) {
+      console.log('  FAIL post-lock: locked_count should be >= 1, got ' + afterLock.body.locked_count);
+      process.exit(1);
+    }
+    console.log('  PASS post-lock: admin visible in ?locked=true (locked_count=' + afterLock.body.locked_count + ')');
+
+    // 7. POST /api/rbac/users/1/unlock clears the lock.
+    const unlocked = await postJson('/api/rbac/users/1/unlock', {});
+    if (unlocked.status !== 200) {
+      console.log('  FAIL unlock: status=' + unlocked.status);
+      process.exit(1);
+    }
+    // Verify admin is no longer locked.
+    const afterUnlock = await get('/api/rbac/users?locked=true');
+    if (afterUnlock.body.items.some((u) => u.id === 1)) {
+      console.log('  FAIL post-unlock: admin still in locked list');
+      process.exit(1);
+    }
+    console.log('  PASS post-unlock: admin cleared from locked list (locked_count=' + afterUnlock.body.locked_count + ')');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  account lockout ops OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

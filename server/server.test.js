@@ -1034,6 +1034,115 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(r.body.previous_locked_until, null);
   });
 
+  // ─── Wave 53: account lockout observability + force-lock ───
+
+  test('53a. GET /api/rbac/users returns 200 with items + totals', async () => {
+    // Reset to a known state: admin (id=1) only, no failed_logins,
+    // no lock. Other tests may have left bob (id=2) in a locked
+    // state — clean that up too.
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL`,
+    ).run();
+    const r = await get(server, '/api/rbac/users');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+    assert.ok(r.body.total >= 1, 'total must include the admin user');
+    assert.equal(typeof r.body.locked_count, 'number');
+    assert.equal(r.body.locked_count, 0, 'no users should be locked in the clean state');
+    assert.equal(r.body.limit, 200);
+    assert.equal(r.body.offset, 0);
+  });
+
+  test('53b. GET /api/rbac/users?locked=true returns only currently-locked users', async () => {
+    // Reset everyone, then lock bob (id=2) with locked_until in
+    // the future. The locked filter should include bob; the
+    // unfiltered list should include both.
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL`,
+    ).run();
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 4, locked_until = ? WHERE id = 2`,
+    ).run(future);
+
+    // ?locked=true → only bob.
+    const locked = await get(server, '/api/rbac/users?locked=true');
+    assert.equal(locked.status, 200);
+    assert.equal(locked.body.items.length, 1);
+    assert.equal(locked.body.items[0].id, 2);
+    assert.equal(locked.body.total, 1);
+
+    // No filter → both users (admin + bob).
+    const all = await get(server, '/api/rbac/users');
+    assert.equal(all.status, 200);
+    assert.ok(all.body.items.length >= 2);
+    assert.ok(all.body.total >= 2);
+    assert.equal(all.body.locked_count, 1);
+  });
+
+  test('53c. POST /api/rbac/users/:userId/lock force-locks the user with the given reason', async () => {
+    // Reset bob, then lock him via the route. Verify:
+    //   - the response has the expected shape
+    //   - the db state has failed_logins=99 + locked_until in the future
+    //   - bob is now visible in the ?locked=true list
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = 2`,
+    ).run();
+    const reason = 'W53 smoke test: simulated compromise';
+    const r = await postJson(server, '/api/rbac/users/2/lock', { reason });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.userId, 2);
+    assert.equal(r.body.failed_logins, 99);
+    assert.ok(
+      r.body.locked_until && r.body.locked_until.length > 0,
+      'locked_until must be set',
+    );
+    assert.equal(r.body.reason, reason);
+    assert.equal(r.body.locked_by, 1, 'admin user is id=1 in stub auth mode');
+
+    // Verify the db state.
+    const after = full.db
+      .prepare(
+        'SELECT failed_logins, locked_until FROM users WHERE id = 2',
+      )
+      .get();
+    assert.equal(after.failed_logins, 99);
+    assert.ok(after.locked_until, 'locked_until must be set in the db');
+
+    // Verify the locked-only list now includes bob.
+    const locked = await get(server, '/api/rbac/users?locked=true');
+    assert.equal(locked.status, 200);
+    assert.ok(
+      locked.body.items.some((u) => u.id === 2),
+      'bob should be in the locked list after the force-lock',
+    );
+  });
+
+  test('53d. POST /api/rbac/users/:userId/lock rejects requests with no reason', async () => {
+    // The reason is mandatory — it's recorded in the audit log
+    // so the action is always traceable to a documented
+    // justification. Empty/missing reason → 400.
+    const r1 = await postJson(server, '/api/rbac/users/2/lock', {});
+    assert.equal(r1.status, 400);
+    assert.equal(r1.body.error, 'invalid_request');
+
+    const r2 = await postJson(server, '/api/rbac/users/2/lock', { reason: '' });
+    assert.equal(r2.status, 400);
+    assert.equal(r2.body.error, 'invalid_request');
+
+    const r3 = await postJson(server, '/api/rbac/users/2/lock', { reason: '   ' });
+    assert.equal(r3.status, 400);
+    assert.equal(r3.body.error, 'invalid_request');
+  });
+
+  test('53e. POST /api/rbac/users/999999/lock returns 404 for unknown user', async () => {
+    const r = await postJson(server, '/api/rbac/users/999999/lock', {
+      reason: 'test 404 path',
+    });
+    assert.equal(r.status, 404);
+    assert.equal(r.body.error, 'user_not_found');
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

@@ -85,10 +85,18 @@ export function seedSessionForAdmin(db, { ttlSeconds = 60 * 60 * 24 * 30 } = {})
 // On failure (real mode only): responds 401 with { error: 'unauthorized' }.
 // ────────────────────────────────────────────────────────────────────────
 
-export function makeAuthMiddleware({ db, authMode = process.env.SBOS_AUTH_MODE || 'real' }) {
+export function makeAuthMiddleware({ db, dbRef, authMode = process.env.SBOS_AUTH_MODE || 'real' }) {
   if (authMode !== 'real' && authMode !== 'stub') {
     throw new Error(`authMode must be 'real' or 'stub', got ${JSON.stringify(authMode)}`);
   }
+  // Resolve the live db on every request. The legacy `db` arg is
+  // captured at construction time and is fine for callers that
+  // never swap the handle. Callers that need the live-swap
+  // behavior (e.g. POST /api/rbac/backup/restore) pass `dbRef`
+  // and we read `dbRef.current` per request.
+  const getDb = dbRef
+    ? () => dbRef.current
+    : () => db;
 
   function stubAdmin() {
     return { id: 1, username: 'admin', role: 'Admin', tenant_id: 0, org_id: null, mfa_verified: true };
@@ -130,9 +138,20 @@ export function makeAuthMiddleware({ db, authMode = process.env.SBOS_AUTH_MODE |
       });
     }
 
+    // Read the LIVE db (not the captured `db`) so the auth
+    // middleware survives a live-swap from the backup/restore
+    // route. If the swapped-in db has the session row, the
+    // request goes through; if not, the auth fails normally.
+    const liveDb = getDb();
+    if (!liveDb) {
+      return res.status(503).json({
+        error: 'service_unavailable',
+        message: 'db is initializing or has been closed',
+      });
+    }
     let row;
     try {
-      row = db
+      row = liveDb
         .prepare(
           `SELECT s.id AS session_id, s.user_id, s.tenant_id, s.role_id,
                   s.permission_set_ids_json, s.effective_permissions_json,
@@ -176,7 +195,7 @@ JOIN users u ON u.id = s.user_id
     };
     // Bump last_seen_at in the background (fire and forget).
     try {
-      db.prepare(
+      liveDb.prepare(
         `UPDATE sbos_rbac_sessions SET last_seen_at = datetime('now') WHERE id = ?`,
       ).run(row.session_id);
     } catch (_e) {

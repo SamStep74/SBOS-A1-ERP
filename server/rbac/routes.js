@@ -20,6 +20,8 @@
 //   DELETE /api/rbac/users/:userId/permission-sets/:ps (security.role.assign)
 //   POST   /api/rbac/users/:userId/role               (security.role.assign)
 //   POST   /api/rbac/users/:userId/unlock             (security.user.update) — clear lockout
+//   POST   /api/rbac/users/:userId/lock               (security.user.update) — force-lock with reason
+//   GET    /api/rbac/users                            (security.user.read) — list users (with ?locked filter)
 //   GET    /api/rbac/profiles                          (security.profile.read)
 //   POST   /api/rbac/profiles                          (security.profile.create)
 //   GET    /api/rbac/profiles/:id                      (security.profile.read)
@@ -525,6 +527,135 @@ function registerRbacRoutes(app, opts = {}) {
         previous_failed_logins: previous.failed_logins,
         previous_locked_until: previous.locked_until,
       });
+    },
+  );
+
+  // POST /api/rbac/users/:userId/lock — force-lock a user. The
+  // counterpart to the unlock route above. Used by ops when a
+  // user account is suspected of being compromised (e.g. unusual
+  // activity, offboarding, leaving the role) and needs to be
+  // disabled immediately without waiting for the auto-lockout
+  // to fire.
+  //
+  // Body: { reason: "free-text reason" } — required, recorded in
+  // the audit log. The reason is mandatory so the action is
+  // always traceable to a documented justification.
+  //
+  // Action: SET failed_logins = 99 (sentinel "locked by admin"),
+  // locked_until = NOW + 1 hour. The hour is short enough that
+  // the auto-unlock janitor (or the explicit unlock route) can
+  // clear it if the operator decides the lock was wrong, but
+  // long enough that the user can't log in for an hour even if
+  // the operator walks away.
+  //
+  // Returns 200 with the user state after the lock. Audited
+  // under resource='user:<id>' with the reason in the payload.
+  app.post(
+    '/api/rbac/users/:userId/lock',
+    { preHandler: requirePermFastify('security.user.update') },
+    async (request, reply) => {
+      const userId = Number(request.params.userId);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const body = request.body || {};
+      const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+      if (!reason) {
+        return reply.code(400).send({
+          error: 'invalid_request',
+          message: 'reason is required (free text, recorded in audit log)',
+        });
+      }
+      const user = getDb()
+        .prepare('SELECT id FROM users WHERE id = ?')
+        .get(userId);
+      if (!user) return reply.code(404).send({ error: 'user_not_found' });
+      // 1-hour default lock. Long enough to block access; short
+      // enough to recover from a mistaken lock. The unlock route
+      // is the right way to clear it if the operator changes
+      // their mind.
+      getDb().prepare(
+        `UPDATE users
+            SET failed_logins = 99,
+                locked_until = datetime('now', '+1 hour')
+          WHERE id = ?`,
+      ).run(userId);
+      // Return the new state so the operator can see what was set.
+      const after = getDb()
+        .prepare(
+          `SELECT id, username, failed_logins, locked_until FROM users WHERE id = ?`,
+        )
+        .get(userId);
+      return reply.code(200).send({
+        userId,
+        failed_logins: Number(after.failed_logins || 0),
+        locked_until: after.locked_until,
+        reason,
+        locked_by: request.user ? request.user.id : null,
+      });
+    },
+  );
+
+  // GET /api/rbac/users — list users. Supports ?locked=true to
+  // filter to currently-locked users (locked_until in the future).
+  // The endpoint exists primarily for the lockout ops workflow:
+  // "show me everyone who's currently locked so I can review".
+  //
+  // Returns { items: [...], total: N, locked_count: N }. The
+  // total and locked_count are computed against the same query
+  // shape so the operator can see "12 of 87 users are locked"
+  // at a glance.
+  //
+  // The user list is unfiltered by default (returns everyone).
+  // The ?locked=true filter restricts to locked users only. The
+  // tenant filter is intentionally NOT applied here — this is an
+  // ops endpoint, not a tenant-facing directory. The system admin
+  // perm (security.user.read) already gates access.
+  app.get(
+    '/api/rbac/users',
+    { preHandler: requirePermFastify('security.user.read') },
+    async (request) => {
+      const limit = Math.min(Math.max(Number(request.query.limit) || 200, 1), 1000);
+      const offset = Math.max(Number(request.query.offset) || 0, 0);
+      const lockedOnly = request.query.locked === 'true';
+      // Two queries: the page + the totals. The totals are
+      // computed in the same WHERE so they're consistent with
+      // the items shape.
+      const where = lockedOnly
+        ? `WHERE CAST(strftime('%s', locked_until) AS INTEGER) > CAST(strftime('%s', 'now') AS INTEGER)`
+        : '';
+      const items = getDb()
+        .prepare(
+          `SELECT id, username, email, role, tenant_id, org_id,
+                  failed_logins, locked_until, mfa_required, mfa_verified
+             FROM users
+             ${where}
+             ORDER BY id
+             LIMIT ? OFFSET ?`,
+        )
+        .all(limit, offset);
+      const totalRow = getDb()
+        .prepare(`SELECT COUNT(*) AS n FROM users ${where}`)
+        .get();
+      const total = Number(totalRow.n || 0);
+      // For the locked_count, always query the locked-only filter
+      // regardless of what the caller asked for. The shape is
+      // consistent: total = total users (or locked if filtered),
+      // locked_count = always the locked count.
+      const lockedRow = getDb()
+        .prepare(
+          `SELECT COUNT(*) AS n FROM users
+              WHERE CAST(strftime('%s', locked_until) AS INTEGER) > CAST(strftime('%s', 'now') AS INTEGER)`,
+        )
+        .get();
+      const lockedCount = Number(lockedRow.n || 0);
+      return {
+        items,
+        total,
+        locked_count: lockedCount,
+        limit,
+        offset,
+      };
     },
   );
 
