@@ -39,7 +39,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
     const arg = argv[i];
     if (arg === '--root') {
       const v = argv[++i];
-      if (!v) { out.errors.push('--root needs a value'); continue; }
+      if (!v) {
+        out.errors.push('--root needs a value');
+        continue;
+      }
       out.root = v;
     } else if (arg === '--format') {
       const v = argv[++i];
@@ -111,7 +114,7 @@ function printUsage(out) {
   out('Usage: node audit-cli.js [--root <dir>] [--format text|json] [--quiet] [--help]');
   out('');
   out('Options:');
-  out('  --root <dir>     Walk this directory for source files (default: this module\'s dir)');
+  out("  --root <dir>     Walk this directory for source files (default: this module's dir)");
   out('  --format <fmt>   Output format: text (default) or json');
   out('  --quiet, -q      Suppress all output; exit code only');
   out('  --help, -h       Print this usage message');

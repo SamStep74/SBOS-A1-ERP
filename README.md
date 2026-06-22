@@ -19,14 +19,14 @@ tenant secrets, and brand-specific code are still in flux.
 `SBOS-A1-ERP` (this repo) is where **de-privatized, brand-neutral** code lands for
 public release. Code flows **A1-ERP-HY → SBOS-A1-ERP** via dmux-workflows waves:
 
-| | A1-ERP-HY (private) | SBOS-A1-ERP (public) |
-|---|---|---|
-| **Purpose** | R&D, hardening, vendor integration | Public open-core distribution |
-| **Brand** | Armosphera + HayHashvapah identifiers | Brand-neutral (rebrandable) |
-| **Tests** | 800+ (full) | 55+ (RBAC port only) and growing |
-| **Domains** | All 9 + i18n + Armenia tax | RBAC first; others port per wave |
-| **CI** | Internal | GitHub Actions |
-| **License** | Proprietary | TBD (open-core proposal) |
+|             | A1-ERP-HY (private)                   | SBOS-A1-ERP (public)             |
+| ----------- | ------------------------------------- | -------------------------------- |
+| **Purpose** | R&D, hardening, vendor integration    | Public open-core distribution    |
+| **Brand**   | Armosphera + HayHashvapah identifiers | Brand-neutral (rebrandable)      |
+| **Tests**   | 800+ (full)                           | 55+ (RBAC port only) and growing |
+| **Domains** | All 9 + i18n + Armenia tax            | RBAC first; others port per wave |
+| **CI**      | Internal                              | GitHub Actions                   |
+| **License** | Proprietary                           | TBD (open-core proposal)         |
 
 See `docs/SBOS_VS_A1_ERP_HY.md` for the full porting protocol.
 
@@ -36,12 +36,12 @@ Wave 0 (bootstrap) is in progress — 4 workers run in parallel via the
 `sbos-a1-erp-bootstrap` plan. See `.orchestration/sbos-a1-erp-bootstrap.json`
 and `docs/PROJECT_STATUS.md` for the live state.
 
-| Worker | Scope | Status |
-|---|---|---|
-| `repo-foundation` | package.json, tsconfig, eslint, prettier, CI, sanity test | starting |
+| Worker                | Scope                                                              | Status   |
+| --------------------- | ------------------------------------------------------------------ | -------- |
+| `repo-foundation`     | package.json, tsconfig, eslint, prettier, CI, sanity test          | starting |
 | `seed-from-a1-erp-hy` | Mirror canonical docs (RBAC, DMUX, ERP-comparison, project status) | starting |
-| `rbac-port` | Port `server/rbac/*` from A1-ERP-HY with brand-strip + hardening | starting |
-| `dmux-docs` | SBOS-A1-ERP-tuned DMUX_WORKFLOWS, PROJECT_STATUS, AGENT_BRIEF | starting |
+| `rbac-port`           | Port `server/rbac/*` from A1-ERP-HY with brand-strip + hardening   | starting |
+| `dmux-docs`           | SBOS-A1-ERP-tuned DMUX_WORKFLOWS, PROJECT_STATUS, AGENT_BRIEF      | starting |
 
 ## How to run
 

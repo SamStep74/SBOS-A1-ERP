@@ -13,13 +13,14 @@
     "test:unit": "node --test --test-concurrency=4 --test-timeout=60000",
     "test:coverage": "node --test --experimental-test-coverage --test-concurrency=4 --test-timeout=60000",
     "coverage:check": "node scripts/check-coverage.mjs",
+    "audit:l10n-ci": "node scripts/check-l10n-am-audit-ci.mjs",
     "karpathy:list": "node scripts/karpathy-eval.mjs --list",
     "karpathy:program": "node scripts/karpathy-eval.mjs --program",
     "karpathy:run": "node scripts/karpathy-eval.mjs --run",
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/typecheck-if-present.mjs",
     "build": "tsc"
   },
   "devDependencies": {

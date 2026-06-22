@@ -56,7 +56,12 @@ function ensureDir(p) {
 }
 
 function pathExists(p) {
-  try { fs.accessSync(p); return true; } catch (_) { return false; }
+  try {
+    fs.accessSync(p);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // ───── createWorktree(branchName, baseRef) ─────
@@ -140,12 +145,18 @@ function writeWorkerFiles(worktreePath, sessionName, workerName, task) {
 
   const handoffPath = path.join(dir, 'handoff.md');
   if (!pathExists(handoffPath)) {
-    fs.writeFileSync(handoffPath, `# Handoff — ${workerName}\n\n(filled in by the worker on completion)\n`);
+    fs.writeFileSync(
+      handoffPath,
+      `# Handoff — ${workerName}\n\n(filled in by the worker on completion)\n`,
+    );
   }
 
   const statusPath = path.join(dir, 'status.md');
   if (!pathExists(statusPath)) {
-    fs.writeFileSync(statusPath, `# Status — ${workerName}\n\n- [ ] task started\n- [ ] task completed\n`);
+    fs.writeFileSync(
+      statusPath,
+      `# Status — ${workerName}\n\n- [ ] task started\n- [ ] task completed\n`,
+    );
   }
 
   return { taskPath, handoffPath, statusPath };
@@ -222,13 +233,18 @@ function capturePaneOutput(sessionName, workerName, lines = 200) {
 function listWorkers(sessionName) {
   const dir = path.join(ORCH_DIR, sessionName);
   if (!pathExists(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter(d => d.isDirectory())
-    .map(d => d.name);
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
 }
 
 function killSession(sessionName) {
-  try { tmux(['kill-session', '-t', sessionName]); } catch (_) { /* ignore */ }
+  try {
+    tmux(['kill-session', '-t', sessionName]);
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 module.exports = {
@@ -244,5 +260,8 @@ module.exports = {
   listWorkers,
   killSession,
   // helpers
-  git, tmux, pathExists, ensureDir,
+  git,
+  tmux,
+  pathExists,
+  ensureDir,
 };

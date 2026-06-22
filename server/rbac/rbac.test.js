@@ -23,21 +23,46 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as rbac from './index.js';
-import { requirePerm as expressRequirePerm, requireRole as expressRequireRole } from './express-adapter.js';
+import {
+  requirePerm as expressRequirePerm,
+  requireRole as expressRequireRole,
+} from './express-adapter.js';
 import { requirePermFastify, requireAnyPerm } from './guards.js';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
-  PERMISSIONS, ROLES, PERMISSION_SETS, ROLE_MATRIX,
-  byCategory, isValidKey, getDefinition, listKeys,
-  getRole, listRoleIds, getParentChain, getEffectiveAppSet,
-  mfaRequiredFor, sessionHardLimitMinutesFor, canBeImpersonated,
-  listForRole, getDefaultPermissionSetIds, expandRolePermissions,
-  hasPermission, hasAnyPermission, hasAllPermissions,
-  requirePermission, requirePermissionWithSensitivity,
-  requirePerm, requireRole, requiresMfa,
-  redactFields, recordLevelClause, canImpersonate,
-  seedRBAC, readVersions, validateCustomRole,
+  PERMISSIONS,
+  ROLES,
+  PERMISSION_SETS,
+  ROLE_MATRIX,
+  byCategory,
+  isValidKey,
+  getDefinition,
+  listKeys,
+  getRole,
+  listRoleIds,
+  getParentChain,
+  getEffectiveAppSet,
+  mfaRequiredFor,
+  sessionHardLimitMinutesFor,
+  canBeImpersonated,
+  listForRole,
+  getDefaultPermissionSetIds,
+  expandRolePermissions,
+  hasPermission,
+  hasAnyPermission,
+  hasAllPermissions,
+  requirePermission,
+  requirePermissionWithSensitivity,
+  requirePerm,
+  requireRole,
+  requiresMfa,
+  redactFields,
+  recordLevelClause,
+  canImpersonate,
+  seedRBAC,
+  readVersions,
+  validateCustomRole,
 } = rbac;
 
 // ─────────────── Catalog integrity ───────────────
@@ -54,8 +79,7 @@ describe('Permission catalog', () => {
     for (const k of keys) {
       assert.ok(!seen.has(k), `duplicate key: ${k}`);
       seen.add(k);
-      assert.match(k, /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){1,3}$/,
-        `bad key shape: ${k}`);
+      assert.match(k, /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){1,3}$/, `bad key shape: ${k}`);
     }
   });
 
@@ -64,7 +88,10 @@ describe('Permission catalog', () => {
     const validSensitivities = new Set(Object.keys(rbac.SENSITIVITY));
     for (const [k, def] of Object.entries(PERMISSIONS)) {
       assert.ok(validCategories.has(def.category), `bad category on ${k}: ${def.category}`);
-      assert.ok(validSensitivities.has(def.sensitivity), `bad sensitivity on ${k}: ${def.sensitivity}`);
+      assert.ok(
+        validSensitivities.has(def.sensitivity),
+        `bad sensitivity on ${k}: ${def.sensitivity}`,
+      );
       assert.ok(typeof def.label === 'string' && def.label.length > 0, `missing label on ${k}`);
     }
   });
@@ -72,7 +99,11 @@ describe('Permission catalog', () => {
   test('critical actions are tagged dual-control', () => {
     for (const [k, def] of Object.entries(PERMISSIONS)) {
       if (def.sensitivity === 'critical') {
-        assert.equal(rbac.SENSITIVITY.critical.dualControl, true, `critical ${k} must be dual-control`);
+        assert.equal(
+          rbac.SENSITIVITY.critical.dualControl,
+          true,
+          `critical ${k} must be dual-control`,
+        );
       }
     }
   });
@@ -315,7 +346,13 @@ describe('New permission sets', () => {
   });
 
   test('Owner holds the new critical keys via implicit-all', () => {
-    const u = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const critical = [
       'mfg.quality.hold',
       'mfg.quality.release',
@@ -335,7 +372,13 @@ describe('New permission sets', () => {
   });
 
   test('Admin is restricted on tenant.create and tenant.delete (Owner-only)', () => {
-    const u = { id: 2, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 2,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     assert.equal(hasPermission(u, 'system.tenant.create'), false);
     assert.equal(hasPermission(u, 'system.tenant.delete'), false);
     assert.equal(hasPermission(u, 'system.tenant.suspend'), false);
@@ -343,7 +386,13 @@ describe('New permission sets', () => {
   });
 
   test('Admin holds the new operator-level keys (manufacturing/marketing/agent)', () => {
-    const u = { id: 2, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 2,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const adminKeys = [
       'mfg.bom.delete',
       'mfg.bom.version',
@@ -367,7 +416,13 @@ describe('New permission sets', () => {
   });
 
   test('ComplianceOfficer holds the new compliance.* keys', () => {
-    const u = { id: 3, role: 'ComplianceOfficer', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 3,
+      role: 'ComplianceOfficer',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const coKeys = [
       'compliance.policy.approve',
       'compliance.policy.publish',
@@ -390,7 +445,13 @@ describe('New permission sets', () => {
   });
 
   test('Auditor does NOT have compliance.breach.update (read-only role)', () => {
-    const u = { id: 4, role: 'Auditor', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 4,
+      role: 'Auditor',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     assert.equal(hasPermission(u, 'compliance.breach.read'), true);
     assert.equal(hasPermission(u, 'compliance.breach.update'), false);
     assert.equal(hasPermission(u, 'compliance.retention.run'), false);
@@ -398,7 +459,13 @@ describe('New permission sets', () => {
   });
 
   test('SalesRep is denied manufacturing, compliance, and agent-admin keys', () => {
-    const u = { id: 5, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const u = {
+      id: 5,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const denied = [
       'mfg.bom.delete',
       'mfg.quality.hold',
@@ -430,7 +497,10 @@ describe('New permission sets', () => {
     const operatorPerms = new Set(PERMISSION_SETS.ManufacturingOperator.permissions);
     const adminPerms = new Set(PERMISSION_SETS.ManufacturingAdmin.permissions);
     for (const k of operatorPerms) {
-      assert.ok(operatorPerms.has(k), `ManufacturingOperator key ${k} should still be in operator PS`);
+      assert.ok(
+        operatorPerms.has(k),
+        `ManufacturingOperator key ${k} should still be in operator PS`,
+      );
     }
     assert.ok(adminPerms.has('mfg.bom.delete'));
     assert.ok(adminPerms.has('mfg.bom.version'));
@@ -442,7 +512,10 @@ describe('New permission sets', () => {
     const opKeys = new Set(PERMISSION_SETS.MarketingOperator.permissions);
     const autoKeys = PERMISSION_SETS.MarketingAutomation.permissions;
     for (const k of autoKeys) {
-      assert.ok(!opKeys.has(k), `${k} should be in MarketingAutomation only, not MarketingOperator`);
+      assert.ok(
+        !opKeys.has(k),
+        `${k} should be in MarketingAutomation only, not MarketingOperator`,
+      );
     }
   });
 
@@ -464,7 +537,7 @@ describe('New permission sets', () => {
     for (const k of mutating) {
       assert.ok(
         !PERMISSION_SETS.TenantSupport.permissions.includes(k),
-        `TenantSupport must not include mutating key ${k}`
+        `TenantSupport must not include mutating key ${k}`,
       );
     }
     const reading = [
@@ -479,7 +552,7 @@ describe('New permission sets', () => {
     for (const k of reading) {
       assert.ok(
         PERMISSION_SETS.TenantSupport.permissions.includes(k),
-        `TenantSupport must include read key ${k}`
+        `TenantSupport must include read key ${k}`,
       );
     }
   });
@@ -612,39 +685,83 @@ describe('Role matrix', () => {
 
 describe('Permission resolution', () => {
   test('Owner has all permissions', () => {
-    const u = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
-    for (const k of ['finance.journal.post', 'hr.payroll.run', 'system.tenant.delete', 'crm.deal.approve']) {
+    const u = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
+    for (const k of [
+      'finance.journal.post',
+      'hr.payroll.run',
+      'system.tenant.delete',
+      'crm.deal.approve',
+    ]) {
       assert.equal(hasPermission(u, k), true, `Owner missing ${k}`);
     }
   });
 
   test('Admin has most permissions but not Tenant.Delete implicitly', () => {
-    const u = { id: 2, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 2,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     assert.equal(hasPermission(u, 'finance.journal.post'), true);
     assert.equal(hasPermission(u, 'system.tenant.delete'), false);
   });
 
   test('SalesRep is denied finance.journal.post', () => {
-    const u = { id: 3, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const u = {
+      id: 3,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     assert.equal(hasPermission(u, 'finance.journal.post'), false);
     assert.equal(hasPermission(u, 'crm.deal.create'), true);
   });
 
   test('hasAnyPermission and hasAllPermissions work', () => {
-    const u = { id: 4, role: 'SalesManager', permission_set_ids: ['Approver'], mfa_required: false, mfa_verified: true };
+    const u = {
+      id: 4,
+      role: 'SalesManager',
+      permission_set_ids: ['Approver'],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     assert.equal(hasAnyPermission(u, ['crm.deal.approve', 'finance.journal.post']), true);
     assert.equal(hasAllPermissions(u, ['crm.deal.approve', 'purchase.po.approve']), true);
   });
 
   test('requirePermission throws on deny, passes on grant', () => {
-    const u = { id: 5, role: 'Accountant', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 5,
+      role: 'Accountant',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     assert.doesNotThrow(() => requirePermission(u, 'finance.invoice.create'));
     assert.throws(() => requirePermission(u, 'system.tenant.delete'), /Missing permission/);
   });
 
   test('critical actions throw mfa_required when MFA unverified', () => {
-    const u = { id: 6, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: false };
-    assert.throws(() => requirePermissionWithSensitivity(u, 'finance.journal.post'), /MFA required/);
+    const u = {
+      id: 6,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
+    assert.throws(
+      () => requirePermissionWithSensitivity(u, 'finance.journal.post'),
+      /MFA required/,
+    );
   });
 
   test('null user always denied', () => {
@@ -663,7 +780,13 @@ describe('Permission resolution', () => {
 
 describe('requirePerm (pure function)', () => {
   test('returns true for an Owner holding any perm', () => {
-    const u = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const ctx = { user: u };
     assert.equal(requirePerm('finance.invoice.create', ctx), true);
     assert.equal(ctx.outcome.allowed, true);
@@ -676,14 +799,26 @@ describe('requirePerm (pure function)', () => {
   });
 
   test('returns false when user lacks the permission', () => {
-    const u = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const u = {
+      id: 2,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const ctx = { user: u };
     assert.equal(requirePerm('system.tenant.delete', ctx), false);
     assert.equal(ctx.outcome.reason, 'no_permission');
   });
 
   test('returns false + mfa_required when perm requires MFA but session unverified', () => {
-    const u = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: false };
+    const u = {
+      id: 3,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
     const ctx = { user: u };
     // Use a perm Admin holds AND that requires MFA (ai.agent.* pattern).
     assert.equal(requirePerm('ai.agent.run', ctx), false);
@@ -692,7 +827,13 @@ describe('requirePerm (pure function)', () => {
   });
 
   test('returns true when perm requires MFA and session IS verified', () => {
-    const u = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const u = {
+      id: 3,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const ctx = { user: u };
     assert.equal(requirePerm('ai.agent.run', ctx), true);
     assert.equal(ctx.mfa_required, false);
@@ -701,7 +842,13 @@ describe('requirePerm (pure function)', () => {
   test('blocks impersonation from widening rights', () => {
     // SalesRep impersonating a user who somehow has a privileged perm
     // should not be granted that perm by the impersonation.
-    const actor = { id: 1, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const actor = {
+      id: 1,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const ctx = { user: actor, impersonator: actor };
     // requirePerm should still return false because the actor (and the
     // user) lack the perm; the impersonation branch never widens.
@@ -790,15 +937,30 @@ describe('Express adapter', () => {
     let body = null;
     let nextCalled = false;
     const res = {
-      status(code) { statusCode = code; return this; },
-      json(b) { body = b; return this; },
+      status(code) {
+        statusCode = code;
+        return this;
+      },
+      json(b) {
+        body = b;
+        return this;
+      },
     };
-    function next() { nextCalled = true; }
+    function next() {
+      nextCalled = true;
+    }
     return {
-      req, res,
-      get status() { return statusCode; },
-      get body() { return body; },
-      get nextCalled() { return nextCalled; },
+      req,
+      res,
+      get status() {
+        return statusCode;
+      },
+      get body() {
+        return body;
+      },
+      get nextCalled() {
+        return nextCalled;
+      },
       next,
     };
   }
@@ -806,7 +968,13 @@ describe('Express adapter', () => {
   test('requirePerm middleware calls next() on grant', () => {
     // Lazy-require to avoid pulling Express in (this is a thin wrapper
     // that takes req/res/next as arguments, no Express import needed).
-    const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const owner = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const m = mockReqRes(owner);
     expressRequirePerm('finance.invoice.create')(m.req, m.res, m.next);
     assert.equal(m.nextCalled, true);
@@ -822,7 +990,13 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm middleware 403s on deny', () => {
-    const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const salesrep = {
+      id: 2,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const m = mockReqRes(salesrep);
     expressRequirePerm('system.tenant.delete')(m.req, m.res, m.next);
     assert.equal(m.nextCalled, false);
@@ -831,7 +1005,13 @@ describe('Express adapter', () => {
   });
 
   test('requirePerm middleware 401s with rbac_mfa_required when MFA needed', () => {
-    const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: false };
+    const admin = {
+      id: 3,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
     const m = mockReqRes(admin);
     // Use a perm Admin holds AND that triggers the MFA gate.
     expressRequirePerm('ai.agent.run')(m.req, m.res, m.next);
@@ -877,14 +1057,28 @@ describe('Fastify adapter', () => {
     let sent = false;
     const request = { user, session, impersonator };
     const reply = {
-      code(n) { statusCode = n; return this; },
-      send(payload) { body = payload; sent = true; return this; },
+      code(n) {
+        statusCode = n;
+        return this;
+      },
+      send(payload) {
+        body = payload;
+        sent = true;
+        return this;
+      },
     };
     return {
-      request, reply,
-      get statusCode() { return statusCode; },
-      get body() { return body; },
-      get sent() { return sent; },
+      request,
+      reply,
+      get statusCode() {
+        return statusCode;
+      },
+      get body() {
+        return body;
+      },
+      get sent() {
+        return sent;
+      },
     };
   }
 
@@ -895,7 +1089,13 @@ describe('Fastify adapter', () => {
   });
 
   test('requirePermFastify passes through silently on grant (no reply sent)', async () => {
-    const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const owner = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const m = mockRequestReply({ user: owner });
     const preHandler = requirePermFastify('finance.invoice.create');
     await preHandler(m.request, m.reply);
@@ -904,7 +1104,13 @@ describe('Fastify adapter', () => {
   });
 
   test('requirePermFastify 403s with rbac_forbidden when user lacks permission', async () => {
-    const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const salesrep = {
+      id: 2,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const m = mockRequestReply({ user: salesrep });
     const preHandler = requirePermFastify('system.tenant.delete');
     await preHandler(m.request, m.reply);
@@ -930,7 +1136,13 @@ describe('Fastify adapter', () => {
   });
 
   test('requirePermFastify 401s with rbac_mfa_required when perm requires MFA but session is unverified', async () => {
-    const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: false };
+    const admin = {
+      id: 3,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: false,
+    };
     const m = mockRequestReply({ user: admin });
     // ai.agent.run triggers the MFA gate per MFA_REQUIRED_KEY_PATTERNS
     const preHandler = requirePermFastify('ai.agent.run');
@@ -942,7 +1154,13 @@ describe('Fastify adapter', () => {
   });
 
   test('requirePermFastify MFA gate yields to a verified session and grants', async () => {
-    const admin = { id: 3, role: 'Admin', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const admin = {
+      id: 3,
+      role: 'Admin',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const m = mockRequestReply({ user: admin });
     const preHandler = requirePermFastify('ai.agent.run');
     await preHandler(m.request, m.reply);
@@ -950,7 +1168,13 @@ describe('Fastify adapter', () => {
   });
 
   test('requireAnyPerm 403s when user holds none of the keys', async () => {
-    const salesrep = { id: 2, role: 'SalesRep', permission_set_ids: [], mfa_required: false, mfa_verified: true };
+    const salesrep = {
+      id: 2,
+      role: 'SalesRep',
+      permission_set_ids: [],
+      mfa_required: false,
+      mfa_verified: true,
+    };
     const m = mockRequestReply({ user: salesrep });
     const preHandler = requireAnyPerm(['system.tenant.delete', 'compliance.audit.read']);
     await preHandler(m.request, m.reply);
@@ -962,7 +1186,13 @@ describe('Fastify adapter', () => {
 
   test('requireAnyPerm passes through silently when user holds at least one key', async () => {
     // Owner holds every perm via the super-user shortcut in resolveEffectivePermissions.
-    const owner = { id: 1, role: 'Owner', permission_set_ids: [], mfa_required: true, mfa_verified: true };
+    const owner = {
+      id: 1,
+      role: 'Owner',
+      permission_set_ids: [],
+      mfa_required: true,
+      mfa_verified: true,
+    };
     const m = mockRequestReply({ user: owner });
     const preHandler = requireAnyPerm(['finance.invoice.create', 'system.tenant.delete']);
     await preHandler(m.request, m.reply);
@@ -999,7 +1229,10 @@ describe('Field-level security (FLS)', () => {
 
   test('redactFields handles arrays of records', () => {
     const clerk = { id: 9, role: 'WarehouseClerk', permission_set_ids: [] };
-    const arr = [{ id: 1, tax_id: 'AAA' }, { id: 2, tax_id: 'BBB' }];
+    const arr = [
+      { id: 1, tax_id: 'AAA' },
+      { id: 2, tax_id: 'BBB' },
+    ];
     const redacted = redactFields(clerk, arr, ['crm.account.tax_id']);
     assert.equal(redacted[0].tax_id, undefined);
     assert.equal(redacted[1].tax_id, undefined);
@@ -1068,7 +1301,10 @@ describe('Impersonation', () => {
 
 describe('validateCustomRole', () => {
   test('rejects bad id', () => {
-    assert.throws(() => validateCustomRole({ id: '1bad', parent: 'Admin' }), /letters, digits, underscores/);
+    assert.throws(
+      () => validateCustomRole({ id: '1bad', parent: 'Admin' }),
+      /letters, digits, underscores/,
+    );
     assert.throws(() => validateCustomRole({ id: '', parent: 'Admin' }), /required/);
     assert.throws(() => validateCustomRole({ id: 'Owner', parent: 'Admin' }), /already exists/);
   });
@@ -1098,8 +1334,11 @@ describe('Seed installer (in-memory SQLite)', () => {
   let db;
   before(async () => {
     let Database;
-    try { Database = require('better-sqlite3'); }
-    catch (e) { return; }
+    try {
+      Database = require('better-sqlite3');
+    } catch (e) {
+      return;
+    }
     db = new Database(':memory:');
     const v = await seedRBAC(db);
     assert.equal(v.permissions_seeded, listKeys().length);
@@ -1108,9 +1347,13 @@ describe('Seed installer (in-memory SQLite)', () => {
 
   test('seeds the expected number of rows (when sqlite is available)', () => {
     if (!db) return;
-    const perms = db.prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0').get();
+    const perms = db
+      .prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0')
+      .get();
     const roles = db.prepare('SELECT COUNT(*) AS c FROM sbos_rbac_roles WHERE tenant_id = 0').get();
-    const sets  = db.prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permission_sets WHERE tenant_id = 0').get();
+    const sets = db
+      .prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permission_sets WHERE tenant_id = 0')
+      .get();
     const links = db.prepare('SELECT COUNT(*) AS c FROM sbos_rbac_role_permission_sets').get();
     assert.equal(perms.c, listKeys().length);
     assert.equal(roles.c, listRoleIds().length);
@@ -1121,7 +1364,9 @@ describe('Seed installer (in-memory SQLite)', () => {
   test('is idempotent — re-running does not duplicate or error', async () => {
     if (!db) return;
     await seedRBAC(db);
-    const perms = db.prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0').get();
+    const perms = db
+      .prepare('SELECT COUNT(*) AS c FROM sbos_rbac_permissions WHERE tenant_id = 0')
+      .get();
     assert.equal(perms.c, listKeys().length);
   });
 

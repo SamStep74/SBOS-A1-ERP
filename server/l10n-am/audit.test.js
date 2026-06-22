@@ -9,13 +9,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  auditAll,
-  auditCatalog,
-  auditSource,
-  auditUnusedKeys,
-  stripJsComments,
-} from './audit.js';
+import { auditAll, auditCatalog, auditSource, auditUnusedKeys, stripJsComments } from './audit.js';
 import { STRINGS, LOCALES } from './i18n.js';
 // Note: auditAll now also calls auditOrphanPermissions, but we pass
 // synthetic `permissions`, `files`, and `readFile` so the tests never
@@ -24,8 +18,11 @@ import { STRINGS, LOCALES } from './i18n.js';
 describe('auditCatalog', () => {
   test('every key in the real catalog exists in every locale — current repo is balanced', () => {
     const result = auditCatalog({ strings: STRINGS, locales: LOCALES });
-    assert.equal(result.issues.length, 0,
-      `catalog should be balanced but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.equal(
+      result.issues.length,
+      0,
+      `catalog should be balanced but found: ${JSON.stringify(result.issues, null, 2)}`,
+    );
     assert.ok(result.keyCount > 0, 'catalog should have at least one key');
   });
 
@@ -46,7 +43,9 @@ describe('auditCatalog', () => {
     const synthetic = {
       hy: { 'only.here': 'X' },
       en: { 'only.here': 'X' },
-      ru: { /* missing on purpose */ },
+      ru: {
+        /* missing on purpose */
+      },
     };
     const result = auditCatalog({ strings: synthetic, locales: ['hy', 'en', 'ru'] });
     assert.equal(result.issues.length, 1);
@@ -58,8 +57,11 @@ describe('auditCatalog', () => {
 describe('auditSource', () => {
   test('current l10n-am source has no t() calls referencing missing keys', () => {
     const result = auditSource({ strings: STRINGS, locales: LOCALES });
-    assert.equal(result.issues.length, 0,
-      `current source should be clean but found: ${JSON.stringify(result.issues, null, 2)}`);
+    assert.equal(
+      result.issues.length,
+      0,
+      `current source should be clean but found: ${JSON.stringify(result.issues, null, 2)}`,
+    );
     assert.ok(result.tCallCount > 0, 'current source should have at least one t() call');
   });
 
@@ -67,9 +69,9 @@ describe('auditSource', () => {
     const syntheticFiles = {
       '/fake/root/vatReturn/vatReturn.js': [
         "import { t } from '../i18n.js';",
-        "const msg = t('en', 'vat.form.missingLine', { id: '7' });",          // OK — exists
-        "const oops = t('en', 'totally.fake.key');",                            // BAD
-        "const more = t('hy', 'also.fake');",                                   // BAD
+        "const msg = t('en', 'vat.form.missingLine', { id: '7' });", // OK — exists
+        "const oops = t('en', 'totally.fake.key');", // BAD
+        "const more = t('hy', 'also.fake');", // BAD
       ].join('\n'),
     };
     const result = auditSource({
@@ -151,13 +153,19 @@ describe('auditAll — live l10n-am regression', () => {
     const i18nIssues = result.issues.filter(
       (i) => i.type !== 'orphan-permission-key' && i.type !== 'unknown-permission-usage',
     );
-    assert.equal(i18nIssues.length, 0,
-      `live i18n should be clean but found: ${JSON.stringify(i18nIssues, null, 2)}`);
+    assert.equal(
+      i18nIssues.length,
+      0,
+      `live i18n should be clean but found: ${JSON.stringify(i18nIssues, null, 2)}`,
+    );
     assert.ok(result.catalogKeyCount > 0, 'live catalog should have keys');
     assert.ok(result.tCallCount > 0, 'live source should have t() calls');
     // Reverse direction: every catalog key is used at least once.
-    assert.equal(result.unusedKeyCount, 0,
-      `live repo should have no unused keys but found: ${result.unusedKeyCount}`);
+    assert.equal(
+      result.unusedKeyCount,
+      0,
+      `live repo should have no unused keys but found: ${result.unusedKeyCount}`,
+    );
   });
 
   test('live repo rbac sub-scanner is wired in and surfaces the four counts', () => {
@@ -168,27 +176,33 @@ describe('auditAll — live l10n-am regression', () => {
     // require the live catalog to be clean, which is a separate cleanup
     // task (see audit.js rbac sub-scanner note).
     const result = auditAll({ strings: STRINGS, locales: LOCALES });
-    assert.equal(typeof result.rbacCatalogKeyCount, 'number',
-      'auditAll must expose rbacCatalogKeyCount once the rbac scanner is wired in');
-    assert.equal(typeof result.rbacReferencedKeyCount, 'number',
-      'auditAll must expose rbacReferencedKeyCount');
-    assert.equal(typeof result.rbacOrphanCount, 'number',
-      'auditAll must expose rbacOrphanCount');
-    assert.equal(typeof result.rbacUnknownUsageCount, 'number',
-      'auditAll must expose rbacUnknownUsageCount');
-    assert.ok(result.rbacCatalogKeyCount > 0,
-      'live rbac catalog should have keys');
+    assert.equal(
+      typeof result.rbacCatalogKeyCount,
+      'number',
+      'auditAll must expose rbacCatalogKeyCount once the rbac scanner is wired in',
+    );
+    assert.equal(
+      typeof result.rbacReferencedKeyCount,
+      'number',
+      'auditAll must expose rbacReferencedKeyCount',
+    );
+    assert.equal(typeof result.rbacOrphanCount, 'number', 'auditAll must expose rbacOrphanCount');
+    assert.equal(
+      typeof result.rbacUnknownUsageCount,
+      'number',
+      'auditAll must expose rbacUnknownUsageCount',
+    );
+    assert.ok(result.rbacCatalogKeyCount > 0, 'live rbac catalog should have keys');
     // Set partition invariant: every catalog key is either referenced or
     // an orphan, so |catalog − orphan| = |catalog ∩ referenced| ≤ |referenced|.
     // Equivalently: orphan + referenced ≥ catalog. This holds even when
     // referenced also contains unknown keys (referenced but not in catalog),
     // since those only make the right side larger.
     assert.ok(
-      result.rbacOrphanCount + result.rbacReferencedKeyCount
-        >= result.rbacCatalogKeyCount,
+      result.rbacOrphanCount + result.rbacReferencedKeyCount >= result.rbacCatalogKeyCount,
       'orphan + referenced must be ≥ catalog (set partition: every catalog ' +
-      'key is either referenced or orphan, and referenced may also contain ' +
-      'unknown keys)',
+        'key is either referenced or orphan, and referenced may also contain ' +
+        'unknown keys)',
     );
     // Orphan is always a subset of catalog, so orphans ≤ catalog.
     assert.ok(
@@ -213,21 +227,19 @@ describe('auditAll — rbac permissions wire-in', () => {
   };
   const filesWithUnknownUsage = {
     '/fake/rbac/routes.js':
-      "requirePermFastify('finance.coa.read');\n" +
-      "requirePermFastify('does.not.exist');\n",
+      "requirePermFastify('finance.coa.read');\n" + "requirePermFastify('does.not.exist');\n",
   };
   const filesReferencingBoth = {
     '/fake/rbac/routes.js':
-      "requirePermFastify('finance.coa.read');\n" +
-      "requirePermFastify('security.role.read');\n",
+      "requirePermFastify('finance.coa.read');\n" + "requirePermFastify('security.role.read');\n",
   };
 
   test('exposes the four rbac-shaped counts on the combined report', () => {
     const result = auditAll({
-      strings: STRINGS, locales: LOCALES,
+      strings: STRINGS,
+      locales: LOCALES,
       permissions: fakePerms,
-      files: filesReferencingBoth['/fake/rbac/routes.js']
-        ? ['/fake/rbac/routes.js'] : [],
+      files: filesReferencingBoth['/fake/rbac/routes.js'] ? ['/fake/rbac/routes.js'] : [],
       readFile: (p) => filesReferencingBoth[p],
     });
     assert.equal(result.rbacCatalogKeyCount, 2);
@@ -239,7 +251,8 @@ describe('auditAll — rbac permissions wire-in', () => {
   test('splices orphan-permission-key issues into the combined issues array', () => {
     // security.role.read is in the catalog but never referenced anywhere.
     const result = auditAll({
-      strings: STRINGS, locales: LOCALES,
+      strings: STRINGS,
+      locales: LOCALES,
       permissions: fakePerms,
       files: ['/fake/rbac/routes.js'],
       readFile: (p) => "requirePermFastify('finance.coa.read');\n",
@@ -252,7 +265,8 @@ describe('auditAll — rbac permissions wire-in', () => {
 
   test('splices unknown-permission-usage issues into the combined issues array', () => {
     const result = auditAll({
-      strings: STRINGS, locales: LOCALES,
+      strings: STRINGS,
+      locales: LOCALES,
       permissions: fakePerms,
       files: ['/fake/rbac/routes.js'],
       readFile: (p) => filesWithUnknownUsage[p],
@@ -298,10 +312,10 @@ describe('auditUnusedKeys', () => {
 
   test('flags every unused key when source uses none of them', () => {
     const syntheticStrings = {
-      en: { 'a': 'A', 'b': 'B', 'c': 'C' },
+      en: { a: 'A', b: 'B', c: 'C' },
     };
     const syntheticFiles = {
-      '/fake/root/empty.js': "// no t() calls in here",
+      '/fake/root/empty.js': '// no t() calls in here',
     };
     const result = auditUnusedKeys({
       strings: syntheticStrings,
@@ -316,7 +330,7 @@ describe('auditUnusedKeys', () => {
 
   test('zero issues when every catalog key is used at least once', () => {
     const syntheticStrings = {
-      en: { 'x': 'X', 'y': 'Y' },
+      en: { x: 'X', y: 'Y' },
     };
     const syntheticFiles = {
       '/fake/root/a.js': "t('en', 'x');",
@@ -336,7 +350,7 @@ describe('auditUnusedKeys', () => {
   test('counts a key as used even when referenced by multiple call sites', () => {
     // Three call sites to 'shared', one to 'lonely'. lonely is the only unused.
     const syntheticStrings = {
-      en: { 'shared': 'S', 'lonely': 'L' },
+      en: { shared: 'S', lonely: 'L' },
     };
     const syntheticFiles = {
       '/fake/root/a.js': "t('en', 'shared'); t('en', 'shared');",
@@ -361,7 +375,7 @@ describe('auditUnusedKeys', () => {
       en: { 'only.in.test': 'X' },
     };
     const syntheticFiles = {
-      '/fake/root/real.js': "// no t() calls",
+      '/fake/root/real.js': '// no t() calls',
       '/fake/root/real.test.js': "t('en', 'only.in.test');",
     };
     const result = auditUnusedKeys({
@@ -401,27 +415,32 @@ describe('stripJsComments', () => {
     ].join('\n');
     const stripped = stripJsComments(src);
     // Real code survives intact.
-    assert.ok(stripped.includes('const real = 1;'),
-      'real code must survive');
-    assert.ok(stripped.includes('const other = 2;'),
-      'real code after the comment must survive');
+    assert.ok(stripped.includes('const real = 1;'), 'real code must survive');
+    assert.ok(stripped.includes('const other = 2;'), 'real code after the comment must survive');
     // The backtick and parens inside the comment are replaced with spaces.
     // Crucially, the NEWLINE is preserved so line numbers stay accurate.
     const lines = stripped.split('\n');
     assert.equal(lines.length, 3, 'newline count must be preserved');
-    assert.ok(!lines[1].includes('`'),
-      'backticks inside // comments must be stripped: ' + JSON.stringify(lines[1]));
-    assert.ok(!lines[1].includes('foo()'),
-      'code inside // comments must be stripped: ' + JSON.stringify(lines[1]));
+    assert.ok(
+      !lines[1].includes('`'),
+      'backticks inside // comments must be stripped: ' + JSON.stringify(lines[1]),
+    );
+    assert.ok(
+      !lines[1].includes('foo()'),
+      'code inside // comments must be stripped: ' + JSON.stringify(lines[1]),
+    );
     // The comment line is replaced with spaces of the same length (modulo \n).
-    assert.equal(lines[1].trim(), '',
-      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]));
+    assert.equal(
+      lines[1].trim(),
+      '',
+      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]),
+    );
   });
 
   test('strips `//` line comments even when they contain single or double quotes', () => {
     const src = [
       "const real = 'keep';",
-      "// example: foo('bar', \"baz\") is the call shape",
+      '// example: foo(\'bar\', "baz") is the call shape',
       'const other = "keep";',
     ].join('\n');
     const stripped = stripJsComments(src);
@@ -430,12 +449,19 @@ describe('stripJsComments', () => {
     assert.ok(lines[0].includes("'keep'"), 'single-quoted string must survive');
     assert.ok(lines[2].includes('"keep"'), 'double-quoted string must survive');
     // The comment is wiped.
-    assert.ok(!lines[1].includes("'bar'"),
-      'single quotes inside // must be stripped: ' + JSON.stringify(lines[1]));
-    assert.ok(!lines[1].includes('"baz"'),
-      'double quotes inside // must be stripped: ' + JSON.stringify(lines[1]));
-    assert.equal(lines[1].trim(), '',
-      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]));
+    assert.ok(
+      !lines[1].includes("'bar'"),
+      'single quotes inside // must be stripped: ' + JSON.stringify(lines[1]),
+    );
+    assert.ok(
+      !lines[1].includes('"baz"'),
+      'double quotes inside // must be stripped: ' + JSON.stringify(lines[1]),
+    );
+    assert.equal(
+      lines[1].trim(),
+      '',
+      'comment line should be whitespace-only: ' + JSON.stringify(lines[1]),
+    );
   });
 
   test('strips `/* */` block comments even when they contain string delimiters', () => {
@@ -448,10 +474,14 @@ describe('stripJsComments', () => {
     const lines = stripped.split('\n');
     assert.ok(lines[0].includes('const real = 1;'));
     assert.ok(lines[2].includes('const other = 2;'));
-    assert.ok(!lines[1].includes('`'),
-      'backticks inside block comments must be stripped: ' + JSON.stringify(lines[1]));
-    assert.ok(!lines[1].includes('"qux"'),
-      'double quotes inside block comments must be stripped: ' + JSON.stringify(lines[1]));
+    assert.ok(
+      !lines[1].includes('`'),
+      'backticks inside block comments must be stripped: ' + JSON.stringify(lines[1]),
+    );
+    assert.ok(
+      !lines[1].includes('"qux"'),
+      'double quotes inside block comments must be stripped: ' + JSON.stringify(lines[1]),
+    );
   });
 
   test('end-to-end: array literal inside a // comment does NOT match the permission audit pattern', () => {
@@ -459,23 +489,27 @@ describe('stripJsComments', () => {
     // false positives in permissions-audit.js (the scanner reading its own
     // docstring). The scanner relies on stripJsComments to wipe the comment
     // before ARRAY_REFERENCE_PATTERN runs.
-    const PERM_ARRAY_PATTERN =
-      /\brequire(?:Any|All)Permission\s*\(\s*\w+\s*,\s*\[([^\]]+)\]/g;
+    const PERM_ARRAY_PATTERN = /\brequire(?:Any|All)Permission\s*\(\s*\w+\s*,\s*\[([^\]]+)\]/g;
     const src = [
-      '// requireAnyPermission(user, [\'k1\',\'k2\']) and',
-      '// requireAllPermission(user, [\'k1\',\'k2\']) pass the keys as an array.',
+      "// requireAnyPermission(user, ['k1','k2']) and",
+      "// requireAllPermission(user, ['k1','k2']) pass the keys as an array.",
       "requirePermFastify('real.key');",
     ].join('\n');
     const stripped = stripJsComments(src);
     const matches = [...stripped.matchAll(PERM_ARRAY_PATTERN)];
-    assert.equal(matches.length, 0,
+    assert.equal(
+      matches.length,
+      0,
       `array literal inside // comments must not match: ` +
-      `stripped=${JSON.stringify(stripped)} matches=${JSON.stringify(matches.map(m=>m[0]))}`);
+        `stripped=${JSON.stringify(stripped)} matches=${JSON.stringify(matches.map((m) => m[0]))}`,
+    );
     // Sanity: the real call site does survive and is still detectable by a
     // single-key pattern (out of scope for this test but worth asserting
     // the surrounding lines were not damaged).
-    assert.ok(stripped.includes("requirePermFastify"),
-      'real code on the next line must survive stripping');
+    assert.ok(
+      stripped.includes('requirePermFastify'),
+      'real code on the next line must survive stripping',
+    );
   });
 
   test('preserves newline count so downstream line numbers stay accurate', () => {
@@ -494,21 +528,30 @@ describe('stripJsComments', () => {
     // `//` comment is passed through unmodified. This test reproduces
     // the live failure on permissions-audit.js line 51.
     const src = [
-      "const RE = /\\brequirePerm(?:Fastify|Any|All)?\\s*\\(\\s*['\"]([a-z][a-z0-9_.-]*)['\"]/gi;",
+      'const RE = /\\brequirePerm(?:Fastify|Any|All)?\\s*\\(\\s*[\'"]([a-z][a-z0-9_.-]*)[\'"]/gi;',
       '// this comment MUST be stripped after the regex literal above',
       'const after = 1;',
     ].join('\n');
     const stripped = stripJsComments(src);
     const lines = stripped.split('\n');
     assert.equal(lines.length, 3, 'newline count must be preserved');
-    assert.ok(lines[0].includes('const RE = /'),
-      'regex literal must survive stripping: ' + JSON.stringify(lines[0]));
-    assert.ok(!lines[1].includes('// this comment'),
-      '// comment after a regex literal MUST be stripped: ' + JSON.stringify(lines[1]));
-    assert.equal(lines[1].trim(), '',
-      'line after regex must be whitespace-only: ' + JSON.stringify(lines[1]));
-    assert.ok(lines[2].includes('const after = 1;'),
-      'real code after the comment must survive stripping');
+    assert.ok(
+      lines[0].includes('const RE = /'),
+      'regex literal must survive stripping: ' + JSON.stringify(lines[0]),
+    );
+    assert.ok(
+      !lines[1].includes('// this comment'),
+      '// comment after a regex literal MUST be stripped: ' + JSON.stringify(lines[1]),
+    );
+    assert.equal(
+      lines[1].trim(),
+      '',
+      'line after regex must be whitespace-only: ' + JSON.stringify(lines[1]),
+    );
+    assert.ok(
+      lines[2].includes('const after = 1;'),
+      'real code after the comment must survive stripping',
+    );
   });
 
   test('strips // comments that follow a regex literal containing backticks', () => {
@@ -522,11 +565,15 @@ describe('stripJsComments', () => {
     ].join('\n');
     const stripped = stripJsComments(src);
     const lines = stripped.split('\n');
-    assert.ok(lines[0].includes('const RE = /'),
-      'regex literal must survive: ' + JSON.stringify(lines[0]));
-    assert.ok(!lines[1].includes('`'),
-      'backticks after a regex literal in a // comment must be stripped: '
-        + JSON.stringify(lines[1]));
+    assert.ok(
+      lines[0].includes('const RE = /'),
+      'regex literal must survive: ' + JSON.stringify(lines[0]),
+    );
+    assert.ok(
+      !lines[1].includes('`'),
+      'backticks after a regex literal in a // comment must be stripped: ' +
+        JSON.stringify(lines[1]),
+    );
     assert.equal(lines[1].trim(), '');
   });
 
@@ -540,10 +587,15 @@ describe('stripJsComments', () => {
     ].join('\n');
     const stripped = stripJsComments(src);
     const lines = stripped.split('\n');
-    assert.ok(lines[0].includes('const x = 10 / 2;'),
-      'division must survive as-is: ' + JSON.stringify(lines[0]));
-    assert.equal(lines[1].trim(), '',
-      'comment after division must be wiped: ' + JSON.stringify(lines[1]));
+    assert.ok(
+      lines[0].includes('const x = 10 / 2;'),
+      'division must survive as-is: ' + JSON.stringify(lines[0]),
+    );
+    assert.equal(
+      lines[1].trim(),
+      '',
+      'comment after division must be wiped: ' + JSON.stringify(lines[1]),
+    );
     assert.ok(lines[2].includes('const y = x + 1;'));
   });
 });

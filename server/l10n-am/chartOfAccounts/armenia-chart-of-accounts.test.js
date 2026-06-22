@@ -162,9 +162,7 @@ test('pagedAccounts: class filter (digit) narrows the result set', () => {
 test('pagedAccounts: type + class filters compose with AND semantics', () => {
   const r = pagedAccounts({ type: 'asset', class: 2, pageSize: 10 });
   // type='asset' spans classes 1+2; class=2 narrows to current assets only
-  const expected = STANDARD_ACCOUNTS.filter(
-    (a) => a.type === 'asset' && a.code.startsWith('2'),
-  );
+  const expected = STANDARD_ACCOUNTS.filter((a) => a.type === 'asset' && a.code.startsWith('2'));
   assert.equal(r.meta.total, expected.length);
   assert.deepEqual(
     r.data.map((a) => a.code),

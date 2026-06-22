@@ -322,9 +322,7 @@ test('vat-return-form: a purchase flagged as a correcting invoice routes VAT to 
   // Routed amount is VAT (not base) — unlike line 8 which is base for OUTPUT.
   const dec = vatReturnForm({
     sales: [],
-    purchases: [
-      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'decrease' },
-    ],
+    purchases: [{ netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'decrease' }],
   });
   assert.equal(dec.lines['19'].vatDecrease, 20000);
   assert.equal(dec.lines['19'].vatIncrease, 0);
@@ -334,9 +332,7 @@ test('vat-return-form: a purchase flagged as a correcting invoice routes VAT to 
 
   const inc = vatReturnForm({
     sales: [],
-    purchases: [
-      { netAmount: 50000, vatRate: 20, vatAmount: 10000, adjusting: 'increase' },
-    ],
+    purchases: [{ netAmount: 50000, vatRate: 20, vatAmount: 10000, adjusting: 'increase' }],
   });
   assert.equal(inc.lines['19'].vatDecrease, 0);
   assert.equal(inc.lines['19'].vatIncrease, 10000);
@@ -398,7 +394,13 @@ test('vat-return-form: a sale with adjustingToCredit routes VAT to line 15 sub-c
   //   adjusting=decrease + adjustingToCredit → line 15.vatDecrease
   const dec = vatReturnForm({
     sales: [
-      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'decrease', adjustingToCredit: true },
+      {
+        netAmount: 100000,
+        vatRate: 20,
+        vatAmount: 20000,
+        adjusting: 'decrease',
+        adjustingToCredit: true,
+      },
     ],
     purchases: [],
   });
@@ -413,7 +415,13 @@ test('vat-return-form: a sale with adjustingToCredit routes VAT to line 15 sub-c
 
   const inc = vatReturnForm({
     sales: [
-      { netAmount: 50000, vatRate: 20, vatAmount: 10000, adjusting: 'increase', adjustingToCredit: true },
+      {
+        netAmount: 50000,
+        vatRate: 20,
+        vatAmount: 10000,
+        adjusting: 'increase',
+        adjustingToCredit: true,
+      },
     ],
     purchases: [],
   });
@@ -434,7 +442,13 @@ test('vat-return-form: regular (line 8) and agent-issued (line 11) adjusting inv
       // seller-issued regular correcting invoice → line 8 (base)
       { netAmount: 200000, vatRate: 20, adjusting: 'decrease' },
       // agent-issued correcting invoice → line 11 (VAT)
-      { netAmount: 150000, vatRate: 20, vatAmount: 30000, adjusting: 'decrease', adjustingInSupplierName: true },
+      {
+        netAmount: 150000,
+        vatRate: 20,
+        vatAmount: 30000,
+        adjusting: 'decrease',
+        adjustingInSupplierName: true,
+      },
       // regular current-period sale → line 7
       { netAmount: 5000000, vatRate: 20 },
     ],
@@ -468,8 +482,20 @@ test('vat-return-form: regular (8), agent-issued (11), and credit-adjusting (15)
     sales: [
       { netAmount: 5000000, vatRate: 20 }, // line 7
       { netAmount: 200000, vatRate: 20, adjusting: 'decrease' }, // line 8 (base)
-      { netAmount: 150000, vatRate: 20, vatAmount: 30000, adjusting: 'decrease', adjustingInSupplierName: true }, // line 11
-      { netAmount: 100000, vatRate: 20, vatAmount: 20000, adjusting: 'increase', adjustingToCredit: true }, // line 15
+      {
+        netAmount: 150000,
+        vatRate: 20,
+        vatAmount: 30000,
+        adjusting: 'decrease',
+        adjustingInSupplierName: true,
+      }, // line 11
+      {
+        netAmount: 100000,
+        vatRate: 20,
+        vatAmount: 20000,
+        adjusting: 'increase',
+        adjustingToCredit: true,
+      }, // line 15
     ],
     purchases: [],
   });
@@ -675,8 +701,20 @@ test('vat-return-form: lines 17/18 + 19 (per-acq) + 20 (offset total) coexist; l
       { netAmount: 1000000, vatRate: 20 }, // standard → line 18: vat 200000
       { netAmount: 150000, vatRate: 20, vatAmount: 30000, adjusting: 'decrease' }, // line 19 dec
       { netAmount: 25000, vatRate: 20, vatAmount: 5000, adjusting: 'increase' }, // line 19 inc
-      { netAmount: 200000, vatRate: 20, vatAmount: 40000, adjusting: 'decrease', adjustingToDebit: true }, // line 20 dec
-      { netAmount: 75000, vatRate: 20, vatAmount: 15000, adjusting: 'increase', adjustingToDebit: true }, // line 20 inc
+      {
+        netAmount: 200000,
+        vatRate: 20,
+        vatAmount: 40000,
+        adjusting: 'decrease',
+        adjustingToDebit: true,
+      }, // line 20 dec
+      {
+        netAmount: 75000,
+        vatRate: 20,
+        vatAmount: 15000,
+        adjusting: 'increase',
+        adjustingToDebit: true,
+      }, // line 20 inc
     ],
   });
   assert.equal(f.lines['18'].vat, 200000);
@@ -694,7 +732,10 @@ test('vat-return-form: every line definition carries the same shape (section/lab
   for (const id of ['8', '10', '11', '14', '15', '19', '20', '22']) {
     const def = f.lineDefinitions[id];
     assert.ok(def, `line ${id} definition missing`);
-    assert.ok(['output', 'input'].includes(def.section), `line ${id} section must be output or input`);
+    assert.ok(
+      ['output', 'input'].includes(def.section),
+      `line ${id} section must be output or input`,
+    );
     assert.equal(typeof def.labelHy, 'string');
     assert.ok(def.labelHy.length > 0, `line ${id} labelHy must be non-empty`);
     assert.ok(Array.isArray([...def.fields]), `line ${id} fields must be an array`);

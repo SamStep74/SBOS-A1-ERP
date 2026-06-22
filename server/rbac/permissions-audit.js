@@ -57,8 +57,7 @@ export const PERMISSION_REFERENCE_PATTERN =
 // This pattern captures the array literal so the keys can be extracted
 // from it. Kept private (not exported) because the test contract pins
 // only the single-key pattern; future expansions can export it.
-const ARRAY_REFERENCE_PATTERN =
-  /\brequire(?:Any|All)Permission\s*\(\s*\w+\s*,\s*\[([^\]]+)\]/g;
+const ARRAY_REFERENCE_PATTERN = /\brequire(?:Any|All)Permission\s*\(\s*\w+\s*,\s*\[([^\]]+)\]/g;
 
 // One entry in an array literal. Single-quoted or double-quoted permission
 // key — same shape as the single-key pattern's group 1.
@@ -95,17 +94,11 @@ function findPermissionReferences(originalSource, strippedSource) {
   }
 
   // Array form: capture the whole array literal, then iterate its keys.
-  const arr = new RegExp(
-    ARRAY_REFERENCE_PATTERN.source,
-    ARRAY_REFERENCE_PATTERN.flags,
-  );
+  const arr = new RegExp(ARRAY_REFERENCE_PATTERN.source, ARRAY_REFERENCE_PATTERN.flags);
   for (const m of strippedSource.matchAll(arr)) {
     const inner = m[1];
     const innerStart = m.index + m[0].indexOf(inner);
-    const token = new RegExp(
-      ARRAY_KEY_TOKEN_PATTERN.source,
-      ARRAY_KEY_TOKEN_PATTERN.flags,
-    );
+    const token = new RegExp(ARRAY_KEY_TOKEN_PATTERN.source, ARRAY_KEY_TOKEN_PATTERN.flags);
     for (const k of inner.matchAll(token)) {
       refs.push({
         key: k[1],
@@ -205,8 +198,6 @@ export function auditOrphanPermissions({
     catalogKeyCount: catalogKeys.size,
     referencedKeyCount: referencedKeys.size,
     orphanCount,
-    unknownUsageCount: issues.filter(
-      (i) => i.type === 'unknown-permission-usage',
-    ).length,
+    unknownUsageCount: issues.filter((i) => i.type === 'unknown-permission-usage').length,
   };
 }

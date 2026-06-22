@@ -7,9 +7,7 @@
 //   const { seedRBAC } = require('./seed');
 //   await seedRBAC(db);            // safe to call on every boot
 //   await seedRBAC(db, { force: true });  // blow away + re-seed (DANGEROUS)
-import {
-  PERMISSIONS, PERMISSIONS_VERSION, listKeys, getDefinition,
-} from './permissions.js';
+import { PERMISSIONS, PERMISSIONS_VERSION, listKeys, getDefinition } from './permissions.js';
 import { ROLES, ROLES_VERSION, APPS } from './roles.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
 import { ROLE_MATRIX } from './roleMatrix.js';
@@ -30,8 +28,14 @@ function runInTx(db, fn) {
   }
   if (typeof db.beginTransaction === 'function') {
     db.beginTransaction();
-    try { const r = fn(); db.commitTransaction && db.commitTransaction(); return r; }
-    catch (e) { db.rollbackTransaction && db.rollbackTransaction(); throw e; }
+    try {
+      const r = fn();
+      db.commitTransaction && db.commitTransaction();
+      return r;
+    } catch (e) {
+      db.rollbackTransaction && db.rollbackTransaction();
+      throw e;
+    }
   }
   // Fallback: run outside a transaction (drivers without tx support).
   return fn();
@@ -51,8 +55,9 @@ async function seedPermissions(db) {
     const def = getDefinition(key);
     stmt.run(key, def.category, def.sensitivity, def.label, def.description);
   }
-  db.prepare(`UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'permissions_version'`)
-    .run(String(PERMISSIONS_VERSION));
+  db.prepare(
+    `UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'permissions_version'`,
+  ).run(String(PERMISSIONS_VERSION));
 }
 
 async function seedRoles(db) {
@@ -83,8 +88,9 @@ async function seedRoles(db) {
       role.canBeImpersonated ? 1 : 0,
     );
   }
-  db.prepare(`UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'roles_version'`)
-    .run(String(ROLES_VERSION));
+  db.prepare(
+    `UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'roles_version'`,
+  ).run(String(ROLES_VERSION));
 }
 
 async function seedPermissionSets(db) {
@@ -98,8 +104,9 @@ async function seedPermissionSets(db) {
   for (const ps of Object.values(PERMISSION_SETS)) {
     psStmt.run(ps.id, ps.label, ps.description);
   }
-  db.prepare(`UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'permission_sets_version'`)
-    .run(String(PERMISSION_SETS_VERSION));
+  db.prepare(
+    `UPDATE sbos_rbac_meta SET value = ?, updated_at = datetime('now') WHERE key = 'permission_sets_version'`,
+  ).run(String(PERMISSION_SETS_VERSION));
 
   // Members
   const memberStmt = db.prepare(`
@@ -132,17 +139,15 @@ async function runMigrations(db) {
   const raw = fs.readFileSync(schemaPath, 'utf8');
 
   // Strip single-line `--` comments but preserve newlines for safety.
-  const cleaned = raw
-    .replace(/^\s*--.*$/gm, '')
-    .replace(/\r\n/g, '\n');
+  const cleaned = raw.replace(/^\s*--.*$/gm, '').replace(/\r\n/g, '\n');
 
   // SQLite: each statement must end with a `;` and not contain a `;` inside
   // a string literal. The schema file is hand-written and safe; this splitter
   // is good enough.
   const statements = cleaned
     .split(/;\s*\n/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
   for (const sql of statements) {
     try {
@@ -201,4 +206,4 @@ function readVersions(db) {
   return out;
 }
 
-export {seedRBAC, readVersions, runMigrations};
+export { seedRBAC, readVersions, runMigrations };

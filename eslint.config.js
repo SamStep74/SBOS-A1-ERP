@@ -32,16 +32,15 @@ export default [
         globalThis: 'readonly',
         URL: 'readonly',
         URLSearchParams: 'readonly',
+        require: 'readonly',
+        module: 'readonly',
       },
     },
     rules: {
       'no-console': ['warn', { allow: ['warn', 'error'] }],
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
-      '@typescript-eslint/consistent-type-imports': [
-        'error',
-        { prefer: 'type-imports' },
-      ],
+      '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
@@ -49,6 +48,22 @@ export default [
       'no-eval': 'error',
       'no-implied-eval': 'error',
       'no-new-func': 'error',
+    },
+  },
+  {
+    files: ['**/*.js', '**/*.mjs', '**/*.cjs'],
+    ...tseslint.configs.disableTypeChecked,
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      '@typescript-eslint/no-dynamic-delete': 'off',
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-unused-expressions': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+      'no-control-regex': 'off',
+      'no-irregular-whitespace': 'off',
+      'no-unused-expressions': 'off',
+      'no-unused-vars': 'off',
+      'no-useless-escape': 'off',
     },
   },
   {

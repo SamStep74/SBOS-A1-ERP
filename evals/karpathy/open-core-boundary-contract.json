@@ -10,9 +10,7 @@
     "server/l10n-am/einvoice/einvoice.js",
     "server/l10n-am/einvoice/einvoice.test.js"
   ],
-  "readOnlyFiles": [
-    "scripts/check-open-core-boundary-contract.mjs"
-  ],
+  "readOnlyFiles": ["scripts/check-open-core-boundary-contract.mjs"],
   "contextFiles": [
     "package.json",
     "AGENTS.md",
@@ -28,9 +26,7 @@
   ],
   "eval": {
     "command": "node",
-    "args": [
-      "scripts/check-open-core-boundary-contract.mjs"
-    ],
+    "args": ["scripts/check-open-core-boundary-contract.mjs"],
     "metric": {
       "name": "failing_checks",
       "direction": "minimize"

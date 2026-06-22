@@ -13,10 +13,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  auditOrphanPermissions,
-  PERMISSION_REFERENCE_PATTERN,
-} from './permissions-audit.js';
+import { auditOrphanPermissions, PERMISSION_REFERENCE_PATTERN } from './permissions-audit.js';
 
 // ───────────────────────────────────────────────────────────────────────────
 // helper: build a small synthetic source tree from a {path: text} map
@@ -64,9 +61,7 @@ describe('auditOrphanPermissions — contract', () => {
     assert.ok(PERMISSION_REFERENCE_PATTERN instanceof RegExp);
     assert.ok(PERMISSION_REFERENCE_PATTERN.flags.includes('g'));
     const sample = "requirePermFastify('finance.coa.read')";
-    const matches = [...sample.matchAll(PERMISSION_REFERENCE_PATTERN)].map(
-      (m) => m[1],
-    );
+    const matches = [...sample.matchAll(PERMISSION_REFERENCE_PATTERN)].map((m) => m[1]);
     assert.deepEqual(matches, ['finance.coa.read']);
   });
 });
@@ -102,7 +97,7 @@ describe('auditOrphanPermissions — orphan-permission-key', () => {
       'one.two.three': {},
     };
     const tree = fixtureTree({
-      '/fake/empty.js': "// no permission references here",
+      '/fake/empty.js': '// no permission references here',
     });
     const result = auditOrphanPermissions({
       permissions,
@@ -171,9 +166,7 @@ describe('auditOrphanPermissions — unknown-permission-usage', () => {
       files: tree.files,
       readFile: tree.readFile,
     });
-    const unknown = result.issues.find(
-      (i) => i.type === 'unknown-permission-usage',
-    );
+    const unknown = result.issues.find((i) => i.type === 'unknown-permission-usage');
     assert.ok(unknown, 'expected one unknown-permission-usage issue');
     assert.equal(unknown.key, 'finance.does.not.exist');
     assert.equal(unknown.file, '/fake/route.js');
@@ -197,9 +190,7 @@ describe('auditOrphanPermissions — unknown-permission-usage', () => {
       files: tree.files,
       readFile: tree.readFile,
     });
-    const typos = result.issues.filter(
-      (i) => i.type === 'unknown-permission-usage',
-    );
+    const typos = result.issues.filter((i) => i.type === 'unknown-permission-usage');
     assert.equal(typos.length, 2);
     assert.deepEqual(
       typos.map((t) => t.line).sort((a, b) => a - b),
@@ -214,8 +205,7 @@ describe('auditOrphanPermissions — unknown-permission-usage', () => {
     };
     const tree = fixtureTree({
       '/fake/route.js':
-        "requirePermFastify('in.catalog');\n" +
-        "requirePermFastify('phantom.unknown');\n",
+        "requirePermFastify('in.catalog');\n" + "requirePermFastify('phantom.unknown');\n",
     });
     const result = auditOrphanPermissions({
       permissions,
@@ -223,10 +213,7 @@ describe('auditOrphanPermissions — unknown-permission-usage', () => {
       readFile: tree.readFile,
     });
     const types = result.issues.map((i) => i.type).sort();
-    assert.deepEqual(types, [
-      'orphan-permission-key',
-      'unknown-permission-usage',
-    ]);
+    assert.deepEqual(types, ['orphan-permission-key', 'unknown-permission-usage']);
   });
 });
 
@@ -267,7 +254,7 @@ describe('auditOrphanPermissions — defensive', () => {
       'only.orphan.b': {},
     };
     const tree = fixtureTree({
-      '/fake/empty.js': "// no permission references here",
+      '/fake/empty.js': '// no permission references here',
     });
     const result = auditOrphanPermissions({
       permissions,
@@ -288,9 +275,9 @@ describe('auditOrphanPermissions — defensive', () => {
     const tree = fixtureTree({
       '/fake/route.js':
         "// TODO: wire requirePermFastify('finance.coa.read') later\n" +
-        "/*\n" +
+        '/*\n' +
         " * Block comment: requirePermFastify('finance.coa.read')\n" +
-        " */\n" +
+        ' */\n' +
         "requirePermFastify('finance.coa.read');\n",
     });
     const result = auditOrphanPermissions({

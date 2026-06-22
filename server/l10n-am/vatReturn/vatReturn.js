@@ -296,10 +296,7 @@ function vatReturnForm({ sales = [], purchases = [] } = {}) {
     // flagged with `adjustingToDebit: true` is a period-total offset adjustment,
     // not a per-acquisition correcting invoice. Both share the `adjusting` flag
     // for direction, so the line-20 branch must run first to claim those inputs.
-    if (
-      p.adjustingToDebit === true &&
-      (p.adjusting === 'decrease' || p.adjusting === 'increase')
-    ) {
+    if (p.adjustingToDebit === true && (p.adjusting === 'decrease' || p.adjusting === 'increase')) {
       const { vat } = lineVat(p);
       if (p.adjusting === 'decrease') offsetAdjustingVatDecrease += vat;
       else offsetAdjustingVatIncrease += vat;

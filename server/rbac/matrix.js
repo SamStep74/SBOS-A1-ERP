@@ -15,7 +15,8 @@ const PERMISSION_SETS = Object.freeze({
   StandardUser: {
     id: 'StandardUser',
     label: 'Standard User',
-    description: 'Default set for any signed-in user. Read own profile, view dashboards, log time, view own tasks.',
+    description:
+      'Default set for any signed-in user. Read own profile, view dashboards, log time, view own tasks.',
     isSystem: true,
     permissions: Object.freeze([
       'system.org.read',
@@ -40,7 +41,8 @@ const PERMISSION_SETS = Object.freeze({
   Approver: {
     id: 'Approver',
     label: 'Approver',
-    description: 'Approve deals, quotes, POs, bills, payroll, time off, contracts. This is a capability set, not a role.',
+    description:
+      'Approve deals, quotes, POs, bills, payroll, time off, contracts. This is a capability set, not a role.',
     isSystem: true,
     permissions: Object.freeze([
       'crm.deal.approve',
@@ -68,16 +70,16 @@ const PERMISSION_SETS = Object.freeze({
   AIMutator: {
     id: 'AIMutator',
     label: 'AI Mutator',
-    description: 'Allow Copilot to propose mutations. Still requires a human approver with the matching action permission.',
+    description:
+      'Allow Copilot to propose mutations. Still requires a human approver with the matching action permission.',
     isSystem: true,
-    permissions: Object.freeze([
-      'ai.copilot.mutate',
-    ]),
+    permissions: Object.freeze(['ai.copilot.mutate']),
   },
   AIPowerUser: {
     id: 'AIPowerUser',
     label: 'AI Power User',
-    description: 'AI Enabled + AI Mutator + ability to configure Copilot topics and run evaluations.',
+    description:
+      'AI Enabled + AI Mutator + ability to configure Copilot topics and run evaluations.',
     isSystem: true,
     permissions: Object.freeze([
       'ai.copilot.use',
@@ -99,7 +101,8 @@ const PERMISSION_SETS = Object.freeze({
   AgentDeveloper: {
     id: 'AgentDeveloper',
     label: 'Agent Developer',
-    description: 'Create, edit, and version AI agent definitions, register tools, and run evaluations. Cannot deploy to production.',
+    description:
+      'Create, edit, and version AI agent definitions, register tools, and run evaluations. Cannot deploy to production.',
     isSystem: true,
     permissions: Object.freeze([
       'ai.agent.read',
@@ -144,11 +147,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Agent Deployer',
     description: 'Deploy and rollback AI agent versions to production (critical, dual-control).',
     isSystem: true,
-    permissions: Object.freeze([
-      'ai.agent.deploy',
-      'ai.agent.rollback',
-      'ai.agent.delete',
-    ]),
+    permissions: Object.freeze(['ai.agent.deploy', 'ai.agent.rollback', 'ai.agent.delete']),
   },
   AIGovernance: {
     id: 'AIGovernance',
@@ -167,7 +166,8 @@ const PERMISSION_SETS = Object.freeze({
   SensitiveDataReader: {
     id: 'SensitiveDataReader',
     label: 'Sensitive Data Reader',
-    description: 'Read access to PII and confidential fields. Use sparingly; required for HR, finance close, and compliance investigations.',
+    description:
+      'Read access to PII and confidential fields. Use sparingly; required for HR, finance close, and compliance investigations.',
     isSystem: true,
     permissions: Object.freeze([
       'hr.employee.pii.read',
@@ -180,10 +180,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'PII Editor',
     description: 'Edit employee PII. Highly sensitive — restricted to HR and compliance.',
     isSystem: true,
-    permissions: Object.freeze([
-      'hr.employee.pii.read',
-      'hr.employee.pii.update',
-    ]),
+    permissions: Object.freeze(['hr.employee.pii.read', 'hr.employee.pii.update']),
   },
 
   // ─────────── Finance sets ───────────
@@ -203,7 +200,8 @@ const PERMISSION_SETS = Object.freeze({
   FinanceOperator: {
     id: 'FinanceOperator',
     label: 'Finance Operator',
-    description: 'Day-to-day finance: invoices, bills (read/update), payments, bank, journal, tax. The two create perms the Wave 5 + Wave 7 narrow-grant workers split out (finance.journal.create, finance.bill.create) live in dedicated narrow perm sets (JournalWriter, FinanceBillWriter) so the catalog can mirror the legacy requireFinanceOperator allow-list exactly.',
+    description:
+      'Day-to-day finance: invoices, bills (read/update), payments, bank, journal, tax. The two create perms the Wave 5 + Wave 7 narrow-grant workers split out (finance.journal.create, finance.bill.create) live in dedicated narrow perm sets (JournalWriter, FinanceBillWriter) so the catalog can mirror the legacy requireFinanceOperator allow-list exactly.',
     isSystem: true,
     permissions: Object.freeze([
       'finance.coa.read',
@@ -328,11 +326,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Inventory Admin',
     description: 'Manage warehouses and run valuation.',
     isSystem: true,
-    permissions: Object.freeze([
-      'inv.product.delete',
-      'inv.warehouse.update',
-      'inv.valuation.run',
-    ]),
+    permissions: Object.freeze(['inv.product.delete', 'inv.warehouse.update', 'inv.valuation.run']),
   },
 
   // ─────────── Purchase sets ───────────
@@ -357,7 +351,8 @@ const PERMISSION_SETS = Object.freeze({
   PurchaseOperator: {
     id: 'PurchaseOperator',
     label: 'Purchase Operator',
-    description: 'RFQs, POs, receipts, returns, vendor master. The 8 perm keys the Wave 7 narrow-grant worker split out (vendor/po read+create+update+receipt+return+analytics) live in dedicated narrow perm sets so the catalog can mirror the legacy requirePurchaseReader / requirePurchaseWriter allow-lists exactly.',
+    description:
+      'RFQs, POs, receipts, returns, vendor master. The 8 perm keys the Wave 7 narrow-grant worker split out (vendor/po read+create+update+receipt+return+analytics) live in dedicated narrow perm sets so the catalog can mirror the legacy requirePurchaseReader / requirePurchaseWriter allow-lists exactly.',
     isSystem: true,
     permissions: Object.freeze([
       'purchase.vendor.update',
@@ -378,10 +373,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Purchase Admin',
     description: 'Vendor master hard-delete and pricelist management.',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.vendor.delete',
-      'purchase.pricelist.update',
-    ]),
+    permissions: Object.freeze(['purchase.vendor.delete', 'purchase.pricelist.update']),
   },
 
   // ─────────── POS sets ───────────
@@ -404,11 +396,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'POS Supervisor',
     description: 'Close sessions, void sales, issue refunds.',
     isSystem: true,
-    permissions: Object.freeze([
-      'pos.session.close',
-      'pos.sale.void',
-      'pos.refund.create',
-    ]),
+    permissions: Object.freeze(['pos.session.close', 'pos.sale.void', 'pos.refund.create']),
   },
 
   // ─────────── HR sets ───────────
@@ -447,11 +435,7 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Payroll Operator',
     description: 'Run and post payroll.',
     isSystem: true,
-    permissions: Object.freeze([
-      'hr.payroll.read',
-      'hr.payroll.run',
-      'hr.payroll.post',
-    ]),
+    permissions: Object.freeze(['hr.payroll.read', 'hr.payroll.run', 'hr.payroll.post']),
   },
 
   // ─────────── Projects sets ───────────
@@ -576,11 +560,10 @@ const PERMISSION_SETS = Object.freeze({
   PortalVendor: {
     id: 'PortalVendor',
     label: 'Portal Vendor',
-    description: 'External vendor with portal access. The purchase.po.read perm the Wave 7 narrow-grant worker split out lives in the dedicated PurchaseOrderReader perm set so the catalog can mirror the legacy requirePurchaseReader allow-list exactly.',
+    description:
+      'External vendor with portal access. The purchase.po.read perm the Wave 7 narrow-grant worker split out lives in the dedicated PurchaseOrderReader perm set so the catalog can mirror the legacy requirePurchaseReader allow-list exactly.',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.rfq.read',
-    ]),
+    permissions: Object.freeze(['purchase.rfq.read']),
   },
 
   // ─────────── Marketing sets ───────────
@@ -661,7 +644,8 @@ const PERMISSION_SETS = Object.freeze({
   ManufacturingAdmin: {
     id: 'ManufacturingAdmin',
     label: 'Manufacturing Admin',
-    description: 'Destructive manufacturing actions: BoM delete/version, work order cancel, MRP, MPS, costing rollup, repair complete.',
+    description:
+      'Destructive manufacturing actions: BoM delete/version, work order cancel, MRP, MPS, costing rollup, repair complete.',
     isSystem: true,
     permissions: Object.freeze([
       'mfg.bom.delete',
@@ -679,17 +663,15 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Quality Hold Admin',
     description: 'Place lots on hold and release them (critical, dual-control).',
     isSystem: true,
-    permissions: Object.freeze([
-      'mfg.quality.hold',
-      'mfg.quality.release',
-    ]),
+    permissions: Object.freeze(['mfg.quality.hold', 'mfg.quality.release']),
   },
 
   // ─────────── Compliance sets ───────────
   ComplianceOperator: {
     id: 'ComplianceOperator',
     label: 'Compliance Operator',
-    description: 'Policies, consent, retention, legal sources, GDPR/PDPA. Read + high-sensitivity mutations only (no breach/SOX/retention-purge).',
+    description:
+      'Policies, consent, retention, legal sources, GDPR/PDPA. Read + high-sensitivity mutations only (no breach/SOX/retention-purge).',
     isSystem: true,
     permissions: Object.freeze([
       'compliance.policy.read',
@@ -718,7 +700,8 @@ const PERMISSION_SETS = Object.freeze({
   ComplianceAdmin: {
     id: 'ComplianceAdmin',
     label: 'Compliance Admin',
-    description: 'Destructive compliance ops: breach register update, retention purge, SOX control updates. Granted only to ComplianceOfficer + Owner, NOT to Auditor.',
+    description:
+      'Destructive compliance ops: breach register update, retention purge, SOX control updates. Granted only to ComplianceOfficer + Owner, NOT to Auditor.',
     isSystem: true,
     permissions: Object.freeze([
       'compliance.retention.update',
@@ -732,18 +715,14 @@ const PERMISSION_SETS = Object.freeze({
     label: 'Retention Admin',
     description: 'Update data retention rules.',
     isSystem: true,
-    permissions: Object.freeze([
-      'compliance.retention.update',
-    ]),
+    permissions: Object.freeze(['compliance.retention.update']),
   },
   RetentionOperator: {
     id: 'RetentionOperator',
     label: 'Retention Operator',
     description: 'Run retention purges (Owner-approval gated).',
     isSystem: true,
-    permissions: Object.freeze([
-      'compliance.retention.run',
-    ]),
+    permissions: Object.freeze(['compliance.retention.run']),
   },
   // AuditOperator keeps only the "prepare" perm (compliance.audit.prepare)
   // which has no broad-grant audit findings. The audit/security/integration
@@ -757,20 +736,17 @@ const PERMISSION_SETS = Object.freeze({
   AuditOperator: {
     id: 'AuditOperator',
     label: 'Audit Operator',
-    description: 'Prepare audit packets; deliver via AuditDeliver. Read/export/list/revoke are split into dedicated perm sets so the catalog can mirror the legacy allow-lists exactly.',
+    description:
+      'Prepare audit packets; deliver via AuditDeliver. Read/export/list/revoke are split into dedicated perm sets so the catalog can mirror the legacy allow-lists exactly.',
     isSystem: true,
-    permissions: Object.freeze([
-      'compliance.audit.prepare',
-    ]),
+    permissions: Object.freeze(['compliance.audit.prepare']),
   },
   AuditDeliver: {
     id: 'AuditDeliver',
     label: 'Audit Deliver',
     description: 'Permission to deliver an audit packet externally (Owner-level).',
     isSystem: true,
-    permissions: Object.freeze([
-      'compliance.audit.deliver',
-    ]),
+    permissions: Object.freeze(['compliance.audit.deliver']),
   },
 
   // ─────────── Studio / Builder sets ───────────
@@ -819,7 +795,8 @@ const PERMISSION_SETS = Object.freeze({
   SystemAdmin: {
     id: 'SystemAdmin',
     label: 'System Admin',
-    description: 'Full system control except the most destructive Owner-only operations (tenant create/delete, system restore). Owner gets those via the implicit-all shortcut.',
+    description:
+      'Full system control except the most destructive Owner-only operations (tenant create/delete, system restore). Owner gets those via the implicit-all shortcut.',
     isSystem: true,
     permissions: Object.freeze([
       'system.org.read',
@@ -847,7 +824,8 @@ const PERMISSION_SETS = Object.freeze({
   TenantAdmin: {
     id: 'TenantAdmin',
     label: 'Tenant Admin',
-    description: 'Owner-level tenant lifecycle: create, suspend, reactivate, delete, transfer, isolation policy. Composes on top of SystemAdmin.',
+    description:
+      'Owner-level tenant lifecycle: create, suspend, reactivate, delete, transfer, isolation policy. Composes on top of SystemAdmin.',
     isSystem: true,
     permissions: Object.freeze([
       'system.tenant.create',
@@ -916,12 +894,10 @@ const PERMISSION_SETS = Object.freeze({
   SecurityAdmin: {
     id: 'SecurityAdmin',
     label: 'Security Admin',
-    description: 'Read-only user lookups for incident triage. Session/audit perms live in dedicated sets.',
+    description:
+      'Read-only user lookups for incident triage. Session/audit perms live in dedicated sets.',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.user.list',
-      'security.user.read',
-    ]),
+    permissions: Object.freeze(['security.user.list', 'security.user.read']),
   },
 
   // ─────────── Read-only sets ───────────
@@ -1027,111 +1003,100 @@ const PERMISSION_SETS = Object.freeze({
   PeopleWriter: {
     id: 'PeopleWriter',
     label: 'People Writer',
-    description: 'Write employee master data. Narrow grant — only Owner, Admin, Accountant (mirrors the legacy requirePeopleWriter allow-list).',
+    description:
+      'Write employee master data. Narrow grant — only Owner, Admin, Accountant (mirrors the legacy requirePeopleWriter allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'hr.employee.create',
-    ]),
+    permissions: Object.freeze(['hr.employee.create']),
   },
 
   AccessReviewer: {
     id: 'AccessReviewer',
     label: 'Access Reviewer',
-    description: 'Run access reviews. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireAccessReviewer allow-list).',
+    description:
+      'Run access reviews. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireAccessReviewer allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.access.review',
-    ]),
+    permissions: Object.freeze(['security.access.review']),
   },
 
   SessionReader: {
     id: 'SessionReader',
     label: 'Session Reader',
-    description: 'List active sessions. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireSessionReviewer allow-list).',
+    description:
+      'List active sessions. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireSessionReviewer allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.session.list',
-    ]),
+    permissions: Object.freeze(['security.session.list']),
   },
 
   SessionAdmin: {
     id: 'SessionAdmin',
     label: 'Session Admin',
-    description: 'Revoke active sessions. Narrow grant — only Owner, Admin (mirrors the legacy requireSessionAdmin allow-list).',
+    description:
+      'Revoke active sessions. Narrow grant — only Owner, Admin (mirrors the legacy requireSessionAdmin allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.session.revoke',
-    ]),
+    permissions: Object.freeze(['security.session.revoke']),
   },
 
   AuditReader: {
     id: 'AuditReader',
     label: 'Audit Reader',
-    description: 'Read audit trail. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireAuditReader / requireAuditExportReader allow-lists).',
+    description:
+      'Read audit trail. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireAuditReader / requireAuditExportReader allow-lists).',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.audit.read',
-    ]),
+    permissions: Object.freeze(['security.audit.read']),
   },
 
   AuditExportWriter: {
     id: 'AuditExportWriter',
     label: 'Audit Export Writer',
-    description: 'Export the audit trail. Narrow grant — only Owner, Admin (mirrors the legacy requireAuditExportWriter allow-list).',
+    description:
+      'Export the audit trail. Narrow grant — only Owner, Admin (mirrors the legacy requireAuditExportWriter allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'security.audit.export',
-    ]),
+    permissions: Object.freeze(['security.audit.export']),
   },
 
   DealCreator: {
     id: 'DealCreator',
     label: 'Deal Creator',
-    description: 'Create CRM deals. Narrow grant — sales + service roles (mirrors the legacy requireCrmEditor allow-list of Owner, Admin, Operator, Salesperson, Service Manager, where Salesperson now maps to SalesLead/SalesManager/SalesRep).',
+    description:
+      'Create CRM deals. Narrow grant — sales + service roles (mirrors the legacy requireCrmEditor allow-list of Owner, Admin, Operator, Salesperson, Service Manager, where Salesperson now maps to SalesLead/SalesManager/SalesRep).',
     isSystem: true,
-    permissions: Object.freeze([
-      'crm.deal.create',
-    ]),
+    permissions: Object.freeze(['crm.deal.create']),
   },
 
   SalesOrderDeleter: {
     id: 'SalesOrderDeleter',
     label: 'Sales Order Deleter',
-    description: 'Delete sales orders. Narrow grant — only Owner, Admin (mirrors the legacy requireCrmEditor allow-list for the destructive sales-order.delete perm).',
+    description:
+      'Delete sales orders. Narrow grant — only Owner, Admin (mirrors the legacy requireCrmEditor allow-list for the destructive sales-order.delete perm).',
     isSystem: true,
-    permissions: Object.freeze([
-      'sales.order.delete',
-    ]),
+    permissions: Object.freeze(['sales.order.delete']),
   },
 
   QuoteSender: {
     id: 'QuoteSender',
     label: 'Quote Sender',
-    description: 'Send CRM quotes to customers. Narrow grant — sales, service, and accountant roles (mirrors the legacy requireCollectionEditor allow-list of Owner, Admin, Operator, Salesperson, Service Manager, Accountant).',
+    description:
+      'Send CRM quotes to customers. Narrow grant — sales, service, and accountant roles (mirrors the legacy requireCollectionEditor allow-list of Owner, Admin, Operator, Salesperson, Service Manager, Accountant).',
     isSystem: true,
-    permissions: Object.freeze([
-      'crm.quote.send',
-    ]),
+    permissions: Object.freeze(['crm.quote.send']),
   },
 
   JournalWriter: {
     id: 'JournalWriter',
     label: 'Journal Writer',
-    description: 'Create accounting journal entries. Narrow grant — only Owner, Admin, Accountant (mirrors the legacy requireFinanceOperator allow-list).',
+    description:
+      'Create accounting journal entries. Narrow grant — only Owner, Admin, Accountant (mirrors the legacy requireFinanceOperator allow-list).',
     isSystem: true,
-    permissions: Object.freeze([
-      'finance.journal.create',
-    ]),
+    permissions: Object.freeze(['finance.journal.create']),
   },
 
   IntegrationsReader: {
     id: 'IntegrationsReader',
     label: 'Integrations Reader',
-    description: 'View configured third-party integrations. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireIntegrationReader allow-list used by GET /api/integrations/connectors).',
+    description:
+      'View configured third-party integrations. Narrow grant — only Owner, Admin, Auditor (mirrors the legacy requireIntegrationReader allow-list used by GET /api/integrations/connectors).',
     isSystem: true,
-    permissions: Object.freeze([
-      'system.integrations.read',
-    ]),
+    permissions: Object.freeze(['system.integrations.read']),
   },
 
   // ─────────── Wave 7 narrow grant sets ───────────
@@ -1173,124 +1138,110 @@ const PERMISSION_SETS = Object.freeze({
   CatalogReader: {
     id: 'CatalogReader',
     label: 'Catalog Reader',
-    description: 'Read catalog items, categories, price lists, margin rules. Narrow grant — Owner, Admin, Accountant, Auditor, Operator, SalesLead, SalesManager, SalesRep, ServiceManager (mirrors the legacy requireCatalogReader allow-list mapped to current role names).',
+    description:
+      'Read catalog items, categories, price lists, margin rules. Narrow grant — Owner, Admin, Accountant, Auditor, Operator, SalesLead, SalesManager, SalesRep, ServiceManager (mirrors the legacy requireCatalogReader allow-list mapped to current role names).',
     isSystem: true,
-    permissions: Object.freeze([
-      'inv.product.read',
-    ]),
+    permissions: Object.freeze(['inv.product.read']),
   },
 
   CatalogEditor: {
     id: 'CatalogEditor',
     label: 'Catalog Editor',
-    description: 'Create and update catalog items. Narrow grant — Owner, Admin, Operator, SalesLead, SalesManager, SalesRep, ServiceManager (mirrors the legacy requireCatalogWriter allow-list mapped to current role names).',
+    description:
+      'Create and update catalog items. Narrow grant — Owner, Admin, Operator, SalesLead, SalesManager, SalesRep, ServiceManager (mirrors the legacy requireCatalogWriter allow-list mapped to current role names).',
     isSystem: true,
-    permissions: Object.freeze([
-      'inv.product.create',
-      'inv.product.update',
-    ]),
+    permissions: Object.freeze(['inv.product.create', 'inv.product.update']),
   },
 
   StockReader: {
     id: 'StockReader',
     label: 'Stock Reader',
-    description: 'Read stock locations, quantities, and movements. Narrow grant — Owner, Admin, Accountant, Auditor, Operator, FinanceLead, InventoryLead, PurchaseLead, Purchaser, WarehouseClerk (mirrors the legacy requireInventoryReader allow-list plus the inventory/purchase functional leads).',
+    description:
+      'Read stock locations, quantities, and movements. Narrow grant — Owner, Admin, Accountant, Auditor, Operator, FinanceLead, InventoryLead, PurchaseLead, Purchaser, WarehouseClerk (mirrors the legacy requireInventoryReader allow-list plus the inventory/purchase functional leads).',
     isSystem: true,
-    permissions: Object.freeze([
-      'inv.stock.read',
-    ]),
+    permissions: Object.freeze(['inv.stock.read']),
   },
 
   StockReceiver: {
     id: 'StockReceiver',
     label: 'Stock Receiver',
-    description: 'Receive stock movements (inbound, adjustments). Narrow grant — Owner, Admin, Accountant, Operator, InventoryLead, PurchaseLead, Purchaser, WarehouseClerk (mirrors the legacy requireInventoryWriter allow-list plus the inventory/purchase functional leads).',
+    description:
+      'Receive stock movements (inbound, adjustments). Narrow grant — Owner, Admin, Accountant, Operator, InventoryLead, PurchaseLead, Purchaser, WarehouseClerk (mirrors the legacy requireInventoryWriter allow-list plus the inventory/purchase functional leads).',
     isSystem: true,
-    permissions: Object.freeze([
-      'inv.stock.receive',
-    ]),
+    permissions: Object.freeze(['inv.stock.receive']),
   },
 
   // --- Wave 7 purchase/finance branch ---
   PurchaseVendorReader: {
     id: 'PurchaseVendorReader',
     label: 'Purchase Vendor Reader',
-    description: 'Read vendor master data. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/vendors).',
+    description:
+      'Read vendor master data. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/vendors).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.vendor.read',
-    ]),
+    permissions: Object.freeze(['purchase.vendor.read']),
   },
 
   PurchaseOrderReader: {
     id: 'PurchaseOrderReader',
     label: 'Purchase Order Reader',
-    description: 'Read purchase orders. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/orders).',
+    description:
+      'Read purchase orders. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/orders).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.po.read',
-    ]),
+    permissions: Object.freeze(['purchase.po.read']),
   },
 
   PurchaseAnalyticsReader: {
     id: 'PurchaseAnalyticsReader',
     label: 'Purchase Analytics Reader',
-    description: 'Read purchase analytics / KPIs. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/analytics).',
+    description:
+      'Read purchase analytics / KPIs. Narrow grant — Owner, Admin, Operator, Accountant, Auditor (mirrors the legacy requirePurchaseReader allow-list used by GET /api/purchase/analytics).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.analytics.read',
-    ]),
+    permissions: Object.freeze(['purchase.analytics.read']),
   },
 
   PurchaseVendorWriter: {
     id: 'PurchaseVendorWriter',
     label: 'Purchase Vendor Writer',
-    description: 'Create vendor master records. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/vendors).',
+    description:
+      'Create vendor master records. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/vendors).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.vendor.create',
-    ]),
+    permissions: Object.freeze(['purchase.vendor.create']),
   },
 
   PurchaseOrderWriter: {
     id: 'PurchaseOrderWriter',
     label: 'Purchase Order Writer',
-    description: 'Create and update purchase orders. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders and POST /api/purchase/orders/:id/confirm).',
+    description:
+      'Create and update purchase orders. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders and POST /api/purchase/orders/:id/confirm).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.po.create',
-      'purchase.po.update',
-    ]),
+    permissions: Object.freeze(['purchase.po.create', 'purchase.po.update']),
   },
 
   PurchaseReceiptWriter: {
     id: 'PurchaseReceiptWriter',
     label: 'Purchase Receipt Writer',
-    description: 'Record purchase order receipts. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders/:id/receive).',
+    description:
+      'Record purchase order receipts. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders/:id/receive).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.receipt.create',
-    ]),
+    permissions: Object.freeze(['purchase.receipt.create']),
   },
 
   PurchaseReturnWriter: {
     id: 'PurchaseReturnWriter',
     label: 'Purchase Return Writer',
-    description: 'Create purchase returns. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders/:id/return).',
+    description:
+      'Create purchase returns. Narrow grant — Owner, Admin, Operator, Accountant (mirrors the legacy requirePurchaseWriter allow-list used by POST /api/purchase/orders/:id/return).',
     isSystem: true,
-    permissions: Object.freeze([
-      'purchase.return.create',
-    ]),
+    permissions: Object.freeze(['purchase.return.create']),
   },
 
   FinanceBillWriter: {
     id: 'FinanceBillWriter',
     label: 'Finance Bill Writer',
-    description: 'Create supplier bills. Narrow grant — Owner, Admin, Accountant (mirrors the legacy requireFinanceOperator allow-list used by POST /api/purchase/orders/:id/bill).',
+    description:
+      'Create supplier bills. Narrow grant — Owner, Admin, Accountant (mirrors the legacy requireFinanceOperator allow-list used by POST /api/purchase/orders/:id/bill).',
     isSystem: true,
-    permissions: Object.freeze([
-      'finance.bill.create',
-    ]),
+    permissions: Object.freeze(['finance.bill.create']),
   },
 });
 
@@ -1307,8 +1258,10 @@ function isSystemPermissionSet(id) {
   return Boolean(ps && ps.isSystem);
 }
 
-export {PERMISSION_SETS_VERSION,
+export {
+  PERMISSION_SETS_VERSION,
   PERMISSION_SETS,
   listPermissionSetIds,
   getPermissionSet,
-  isSystemPermissionSet,};
+  isSystemPermissionSet,
+};

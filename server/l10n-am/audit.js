@@ -34,8 +34,29 @@ import { auditOrphanPermissions } from '../rbac/permissions-audit.js';
 // (A full JS-spec disambiguator would need a tokenizer; this heuristic is
 // good enough for the audit scanner's source shapes.)
 const REGEX_START_CHARS = new Set([
-  '=', '(', '[', ',', ';', ':', '!', '&', '|', '?', '{', '}', '+', '-', '*',
-  '%', '^', '~', '<', '>', ')', ']', '\n',
+  '=',
+  '(',
+  '[',
+  ',',
+  ';',
+  ':',
+  '!',
+  '&',
+  '|',
+  '?',
+  '{',
+  '}',
+  '+',
+  '-',
+  '*',
+  '%',
+  '^',
+  '~',
+  '<',
+  '>',
+  ')',
+  ']',
+  '\n',
 ]);
 
 function isRegexStartContext(source, pos) {
@@ -53,9 +74,9 @@ export function stripJsComments(source) {
   let out = '';
   let i = 0;
   const n = source.length;
-  let inStr = null;          // ' " or ` if inside a string
-  let inRegex = false;      // true if inside a /.../ regex literal
-  let inCharClass = false;   // true if inside a [... ] char class in a regex
+  let inStr = null; // ' " or ` if inside a string
+  let inRegex = false; // true if inside a /.../ regex literal
+  let inCharClass = false; // true if inside a [... ] char class in a regex
   while (i < n) {
     const c = source[i];
     const next = source[i + 1];

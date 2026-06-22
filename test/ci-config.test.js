@@ -45,9 +45,7 @@ function extractNodeMatrix(ciText) {
  */
 function extractJobBlock(ciText, jobName) {
   const lines = ciText.split('\n');
-  const startIdx = lines.findIndex(
-    (l) => new RegExp(`^\\s*${jobName}:\\s*$`).test(l),
-  );
+  const startIdx = lines.findIndex((l) => new RegExp(`^\\s*${jobName}:\\s*$`).test(l));
   if (startIdx === -1) return '';
   let endIdx = lines.length;
   for (let i = startIdx + 1; i < lines.length; i += 1) {
@@ -93,7 +91,9 @@ test('ci.yml: node matrix covers every major in package.json engines', () => {
 test('ci.yml: runs a coverage step using node --test --test-coverage (built-in)', () => {
   const ci = readCi();
   const hasCoverageStep =
-    /--test-coverage/.test(ci) || /--experimental-test-coverage/.test(ci) || /npm run (test:coverage|coverage:check)/.test(ci);
+    /--test-coverage/.test(ci) ||
+    /--experimental-test-coverage/.test(ci) ||
+    /npm run (test:coverage|coverage:check)/.test(ci);
   assert.ok(
     hasCoverageStep,
     'ci.yml must run a coverage step (node --test --test-coverage or npm run test:coverage / coverage:check)',
@@ -155,16 +155,16 @@ test('package.json: coverage/ is ignored from version control', () => {
 });
 
 test('ci.yml: coverage-gate job runs the l10n-am audit CLI', () => {
-  // The audit CLI (server/l10n-am/audit-cli.js) is the project-wide check
-  // for catalog/issue parity; a missing i18n key in the form is a silent
-  // regression the audit catches. It must run on every push so a missing
-  // key never reaches main. The build-and-test job already runs it (see
-  // b33636e); the coverage-gate job must too, otherwise a push that only
-  // fails the coverage job will be merged without an audit run.
+  // The audit CI wrapper is the project-wide check for catalog/issue
+  // parity; a missing i18n key in the form is a silent regression the
+  // audit catches. It must run on every push so a missing key never
+  // reaches main. The build-and-test job already runs it; the
+  // coverage-gate job must too, otherwise a push that only fails the
+  // coverage job will be merged without an audit run.
   const job = extractJobBlock(readCi(), 'coverage-gate');
   assert.ok(job.length > 0, 'ci.yml has no coverage-gate job — cannot verify audit step');
   assert.ok(
-    /audit-cli\.js/.test(job),
-    `coverage-gate job must run the audit CLI (node server/l10n-am/audit-cli.js --quiet); got:\n${job}`,
+    /audit:l10n-ci/.test(job),
+    `coverage-gate job must run the l10n audit CI wrapper (npm run audit:l10n-ci); got:\n${job}`,
   );
 });

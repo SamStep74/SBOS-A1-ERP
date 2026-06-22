@@ -127,7 +127,7 @@ test('validateVatReturnForm: line 18 (domestic acquisitions) is checked against 
   const realBase18 = form.lines['18'].base;
   const realVat18 = form.lines['18'].vat;
   const realVat17 = form.lines['17'].vat;
-  const offRateVat18 = Math.round(realBase18 * 0.10); // 10%, well outside the 20% ±1% band
+  const offRateVat18 = Math.round(realBase18 * 0.1); // 10%, well outside the 20% ±1% band
   const delta = realVat18 - offRateVat18;
   form.lines['18'].vat = offRateVat18;
   form.lines['17'].vat = realVat17 + delta; // absorb so line 21 = 17 + 18 still ties
@@ -200,7 +200,7 @@ test('validateVatReturnForm: line 17 (imports) is checked against the 20% standa
   const realBase17 = form.lines['17'].base;
   const realVat17 = form.lines['17'].vat;
   const realVat18 = form.lines['18'].vat;
-  const offRateVat17 = Math.round(realBase17 * 0.10); // 10%, well outside the 20% ±1% band
+  const offRateVat17 = Math.round(realBase17 * 0.1); // 10%, well outside the 20% ±1% band
   const delta = realVat17 - offRateVat17;
   form.lines['17'].vat = offRateVat17;
   form.lines['18'].vat = realVat18 + delta; // absorb so line 21 = 17 + 18 still ties
