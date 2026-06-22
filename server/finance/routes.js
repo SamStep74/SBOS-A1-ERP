@@ -27,6 +27,7 @@
 //   POST   /api/finance/audit/purge                      (security.audit.retention.update) — W60 manual purge
 //   GET    /api/finance/audit/retention/dashboard        (security.audit.read)          — W63 dashboard
 //   GET    /api/finance/audit/retention/dashboard/export (security.audit.read)          — W64 CSV export
+//   POST   /api/finance/audit/retention/digest          (security.audit.export)         — W65 weekly digest email
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -159,6 +160,8 @@ import {
   recordPurgeRun,
   getRetentionDashboard,
   streamRetentionDashboardCsv,
+  getRetentionDigestSummary,
+  buildRetentionDigestBody,
 } from './auditRetention.js';
 import {
   createCatalogItem,
@@ -1648,6 +1651,73 @@ export function registerFinanceRoutes(app, opts = {}) {
           res.write(chunk);
         }
         res.end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/audit/retention/digest — generate the
+  // weekly retention digest and email it to the operator.
+  // Body: { to: <email>, subject?: <text> }.
+  // Uses the email service in capture mode (writes to
+  // var/sbos-emails/YYYY-MM-DD.jsonl) by default; real
+  // SMTP delivery requires SBOS_EMAIL_MODE=smtp + the
+  // SMTP_* env vars (see server/index.js createApp).
+  //
+  // The CFO is a busy person — the digest is intentionally
+  // a plain-text summary, not an HTML report. The full
+  // per-tenant detail lives in the dashboard (W63) and the
+  // CSV export (W64). The digest is the "what's the state
+  // of the system?" summary.
+  //
+  // Perm gate: `security.audit.export` — the same perm
+  // that gates the CSV export. Digest is a read-side
+  // export, no destructive ops.
+  app.post(
+    '/api/finance/audit/retention/digest',
+    requireTenant,
+    requirePerm('security.audit.export'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const body = req.body || {};
+        const to = String(body.to || '').trim();
+        if (!to) {
+          return res
+            .status(400)
+            .json({ error: 'invalid_request', message: 'to (recipient email) is required' });
+        }
+        // Build the summary + body. Pure functions, no
+        // I/O — easy to unit test and re-render on demand.
+        const summary = getRetentionDigestSummary(rawDb);
+        const text = buildRetentionDigestBody(summary);
+        // Send via the email service if present. In
+        // capture mode (default) the email is written to
+        // var/sbos-emails/YYYY-MM-DD.jsonl; in smtp mode
+        // it goes to the SMTP relay. If no email service
+        // is wired in (e.g. test harness), we still return
+        // the rendered body so the caller can use it.
+        const emailService = req.app && req.app.locals && req.app.locals.emailService;
+        if (emailService && typeof emailService.send === 'function') {
+          await emailService.send({
+            to,
+            subject: body.subject || 'SBOS Audit Retention Digest',
+            body: text,
+          });
+        }
+        res.status(200).json({
+          ok: true,
+          sent: Boolean(emailService),
+          recipient: to,
+          summary,
+          body: text,
+        });
       } catch (err) {
         next(err);
       }

@@ -21,6 +21,8 @@ import {
   recordPurgeRun,
   getRetentionDashboard,
   streamRetentionDashboardCsv,
+  getRetentionDigestSummary,
+  buildRetentionDigestBody,
   DEFAULT_RETENTION_DAYS,
 } from './auditRetention.js';
 
@@ -265,4 +267,79 @@ test('streamRetentionDashboardCsv: produces a header-only output when no tenants
   const db = makeRetentionDb();
   const text = await collect(streamRetentionDashboardCsv(db));
   assert.equal(text.trim().split('\n').length, 1);
+});
+
+// ─── W65: retention digest (weekly CFO email summary) ───
+
+test('getRetentionDigestSummary: returns aggregate counts across all tenants', () => {
+  const db = makeRetentionDb();
+  setAuditRetention(db, 0, 90, 1);
+  setAuditRetention(db, 7, 180, 2);
+  // Seed audit rows in three tenants.
+  seedAudit(db, { tenantId: 0, ageDays: 1 });
+  seedAudit(db, { tenantId: 0, ageDays: 5 });
+  seedAudit(db, { tenantId: 7, ageDays: 30 });
+  seedAudit(db, { tenantId: 5, ageDays: 100 });
+  const summary = getRetentionDigestSummary(db);
+  assert.equal(summary.tenant_count, 3, 'three tenants with audit rows');
+  assert.equal(summary.total_audit_rows, 4, 'four total audit rows');
+  assert.equal(summary.tenants_on_default, 1, 'one tenant on default 365d');
+  assert.equal(summary.tenants_with_explicit_config, 2, 'two tenants with explicit config');
+  // No purge history yet, so totals are 0.
+  assert.equal(summary.total_rows_purged, 0);
+  assert.equal(summary.tenants_with_recent_purge, 0);
+});
+
+test('getRetentionDigestSummary: totals rows purged and counts tenants with a purge in the window', () => {
+  const db = makeRetentionDb();
+  setAuditRetention(db, 0, 90, 1);
+  setAuditRetention(db, 7, 180, 2);
+  // Stamp two recent purges.
+  recordPurgeRun(db, 0, 17, 90);
+  recordPurgeRun(db, 7, 8, 180);
+  const summary = getRetentionDigestSummary(db);
+  assert.equal(summary.total_rows_purged, 25, '17 + 8 = 25');
+  assert.equal(summary.tenants_with_recent_purge, 2);
+});
+
+test('getRetentionDigestSummary: returns 0/0 when no retention activity has happened', () => {
+  const db = makeRetentionDb();
+  const summary = getRetentionDigestSummary(db);
+  assert.equal(summary.tenant_count, 0);
+  assert.equal(summary.total_audit_rows, 0);
+  assert.equal(summary.total_rows_purged, 0);
+});
+
+test('buildRetentionDigestBody: includes the summary totals in the body', () => {
+  const summary = {
+    tenant_count: 5,
+    tenants_on_default: 2,
+    tenants_with_explicit_config: 3,
+    total_audit_rows: 1234,
+    total_rows_purged: 567,
+    tenants_with_recent_purge: 3,
+  };
+  const body = buildRetentionDigestBody(summary);
+  // The body is human-readable text; verify the key
+  // numbers are present.
+  assert.match(body, /5/);
+  assert.match(body, /1234/);
+  assert.match(body, /567/);
+  assert.match(body, /2/);
+  assert.match(body, /3/);
+  // And it has a clear "what this is" header.
+  assert.match(body, /audit retention|retention digest/i);
+});
+
+test('buildRetentionDigestBody: produces an empty-state message when there is no data', () => {
+  const summary = {
+    tenant_count: 0,
+    tenants_on_default: 0,
+    tenants_with_explicit_config: 0,
+    total_audit_rows: 0,
+    total_rows_purged: 0,
+    tenants_with_recent_purge: 0,
+  };
+  const body = buildRetentionDigestBody(summary);
+  assert.match(body, /no retention activity|nothing to report/i);
 });

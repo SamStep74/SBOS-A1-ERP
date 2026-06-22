@@ -3629,6 +3629,93 @@ else
 fi
 echo
 
+echo "=== STEP 5af: Retention digest (Wave 65) ==="
+# Smoke coverage for the W65 weekly digest. We verify:
+#   1. POST digest without a recipient returns 400
+#   2. POST digest with a recipient returns 200 + body
+#   3. Body includes the documented summary header
+#   4. Body includes the "SBOS Audit Retention Digest" marker
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) Missing recipient returns 400
+    const r1 = await sendJson("POST", "/api/finance/audit/retention/digest", {});
+    if (r1.status !== 400) {
+      console.log("  FAIL missing recipient expected 400 got " + r1.status);
+      process.exit(1);
+    }
+    console.log("  missing recipient rejected with 400");
+
+    // 2) Valid recipient returns 200
+    const r2 = await sendJson("POST", "/api/finance/audit/retention/digest", {
+      to: "cfo@example.com",
+    });
+    if (r2.status !== 200) {
+      console.log("  FAIL valid digest status " + r2.status);
+      process.exit(1);
+    }
+    if (r2.body.recipient !== "cfo@example.com") {
+      console.log("  FAIL recipient mismatch");
+      process.exit(1);
+    }
+    console.log("  digest returned for " + r2.body.recipient);
+
+    // 3) Body includes the summary header
+    if (!/SBOS Audit Retention Digest/.test(r2.body.body)) {
+      console.log("  FAIL body missing digest header: " + r2.body.body.slice(0, 80));
+      process.exit(1);
+    }
+    console.log("  body includes digest header");
+
+    // 4) Summary has the documented shape
+    const summary = r2.body.summary;
+    if (typeof summary.tenant_count !== "number") {
+      console.log("  FAIL summary.tenant_count missing or wrong type");
+      process.exit(1);
+    }
+    if (typeof summary.total_audit_rows !== "number") {
+      console.log("  FAIL summary.total_audit_rows missing");
+      process.exit(1);
+    }
+    console.log("  summary: " + summary.tenant_count + " tenants, " + summary.total_audit_rows + " rows");
+
+    console.log("  OK retention digest");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  retention digest OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

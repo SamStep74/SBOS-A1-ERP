@@ -2133,6 +2133,31 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(Number(cols[1]), 90);
   });
 
+  // ─── Wave 65: retention digest (weekly CFO email summary) ───
+
+  test('65a. POST /api/finance/audit/retention/digest returns the rendered body', async () => {
+    // The route always returns the rendered body, even when
+    // no email service is wired in. The CFO can copy the
+    // body and email it manually; the test harness doesn't
+    // have an email service.
+    const r = await postJson(server, '/api/finance/audit/retention/digest', {
+      to: 'cfo@example.com',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.recipient, 'cfo@example.com');
+    assert.equal(typeof r.body.body, 'string');
+    // The body includes the summary header + tenant count.
+    assert.match(r.body.body, /SBOS Audit Retention Digest/);
+    assert.ok(typeof r.body.summary.tenant_count === 'number');
+  });
+
+  test('65b. POST digest without a recipient returns 400', async () => {
+    const r = await postJson(server, '/api/finance/audit/retention/digest', {});
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_request');
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

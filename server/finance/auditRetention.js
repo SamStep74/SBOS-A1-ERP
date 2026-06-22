@@ -486,3 +486,101 @@ export async function* streamRetentionDashboardCsv(db, _opts = {}, chunkSize = 5
     yield buf.join('');
   }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// W65: retention digest (weekly CFO email summary).
+//
+// The dashboard (W63) gives the CFO a live view; the digest
+// gives them a proactive weekly summary. Two pure functions:
+//
+//   - getRetentionDigestSummary(db) → roll-up counts
+//       { tenant_count, tenants_on_default, tenants_with_explicit_config,
+//         total_audit_rows, total_rows_purged, tenants_with_recent_purge }
+//   - buildRetentionDigestBody(summary) → human-readable text
+//
+// The email route (server/finance/routes.js) wires these
+// into the existing email service for delivery. The pure
+// functions stay self-contained so unit tests cover them
+// without spinning up the email service.
+// ────────────────────────────────────────────────────────────────────────
+
+// getRetentionDigestSummary — aggregate counts across every
+// tenant that has either an explicit config or any audit
+// rows. Used by the weekly digest route to render the
+// summary at the top of the email body.
+export function getRetentionDigestSummary(db) {
+  // Three sub-queries: tenants + audit rows + purge totals.
+  // Each is a single round-trip on the same db. We use
+  // the stripFinancePrefix pattern (audit table is named
+  // bare on sqlite, finance.audit on pg).
+  const tenantCountSql = stripFinancePrefix(
+    `SELECT COUNT(DISTINCT tenant_id) AS n FROM finance.audit`,
+  );
+  const onDefaultSql = stripFinancePrefix(
+    `SELECT COUNT(DISTINCT a.tenant_id) AS n
+       FROM finance.audit a
+      WHERE a.tenant_id NOT IN (SELECT tenant_id FROM finance.audit_retention)`,
+  );
+  const withConfigSql = stripFinancePrefix(
+    `SELECT COUNT(*) AS n FROM finance.audit_retention`,
+  );
+  const totalRowsSql = stripFinancePrefix(
+    `SELECT COUNT(*) AS n FROM finance.audit`,
+  );
+  const totalPurgedSql = stripFinancePrefix(
+    `SELECT COALESCE(SUM(last_purge_count), 0) AS n
+       FROM finance.audit_retention
+      WHERE last_purge_count IS NOT NULL
+        AND last_purge_count > 0`,
+  );
+  const recentPurgesSql = stripFinancePrefix(
+    `SELECT COUNT(*) AS n
+       FROM finance.audit_retention
+      WHERE last_purge_at IS NOT NULL`,
+  );
+  return {
+    tenant_count: Number(db.prepare(tenantCountSql).get().n || 0),
+    tenants_on_default: Number(db.prepare(onDefaultSql).get().n || 0),
+    tenants_with_explicit_config: Number(db.prepare(withConfigSql).get().n || 0),
+    total_audit_rows: Number(db.prepare(totalRowsSql).get().n || 0),
+    total_rows_purged: Number(db.prepare(totalPurgedSql).get().n || 0),
+    tenants_with_recent_purge: Number(db.prepare(recentPurgesSql).get().n || 0),
+  };
+}
+
+// buildRetentionDigestBody — render the summary as plain
+// text. Email bodies are text/plain for now; HTML version
+// is a follow-up. The body is intentionally short: the CFO
+// scans the totals, then drills into the dashboard or the
+// CSV export for details.
+export function buildRetentionDigestBody(summary) {
+  const s = summary || {};
+  // Empty-state path: nothing to report.
+  if (!s.tenant_count || s.tenant_count === 0) {
+    return [
+      'SBOS Audit Retention Digest',
+      '',
+      'No retention activity to report this period.',
+      '',
+      'No tenants have audit rows yet. Once finance write',
+      'activity starts, the weekly digest will summarise',
+      'tenant retention state, total rows, and purges.',
+    ].join('\n');
+  }
+  // Happy path: at least one tenant has rows.
+  return [
+    'SBOS Audit Retention Digest',
+    '',
+    'Tenants: ' + s.tenant_count,
+    '  on default 365d policy: ' + (s.tenants_on_default || 0),
+    '  with explicit config:   ' + (s.tenants_with_explicit_config || 0),
+    '',
+    'Audit rows (across all tenants): ' + (s.total_audit_rows || 0),
+    'Total rows purged (lifetime):    ' + (s.total_rows_purged || 0),
+    'Tenants with at least one purge: ' + (s.tenants_with_recent_purge || 0),
+    '',
+    'For the full per-tenant breakdown, hit the retention',
+    'dashboard at /api/finance/audit/retention/dashboard',
+    'or download the CSV at /api/finance/audit/retention/dashboard/export.',
+  ].join('\n');
+}
