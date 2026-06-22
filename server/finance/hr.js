@@ -670,10 +670,204 @@ export async function listPayrollRuns(
               employee_count, approved_by, approved_at,
               posted_by, posted_at, notes, created_at, updated_at
          FROM finance.hr_payroll_runs
-        WHERE tenant_id = $1
+         WHERE tenant_id = $1
         ORDER BY period_year DESC, period_month DESC`,
       [tenantId],
     );
   }
   return result.rows;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Employee status transitions (W95-1 — wave 3)
+//
+// State machine for hr_employees.status:
+//   active → on_leave, suspended, terminated
+//   on_leave → active, suspended, terminated
+//   suspended → active, terminated
+//   terminated → (terminal — no transitions out)
+//
+// The audit fields (suspended_at, on_leave_at, on_leave_until,
+// termination_reason) are stamped at the time of the transition.
+// They are NOT cleared on subsequent transitions (a 'terminated'
+// employee retains their previous 'suspended_at' for audit
+// purposes — the operator can see "this employee was suspended
+// in 2025-01, terminated in 2025-06").
+// ────────────────────────────────────────────────────────────────────────
+
+function validateTransitionInput(input, name) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError(`${name} is required`);
+  }
+  assertPositiveInt(input.user_id, 'user_id');
+}
+
+function validateOnLeaveInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('on_leave input is required');
+  }
+  assertPositiveInt(input.user_id, 'user_id');
+  if (input.expected_return_date !== null && input.expected_return_date !== undefined) {
+    _assertDate(input.expected_return_date, 'expected_return_date');
+  }
+  assertOptionalString(input.reason, 'reason', { max: 1024 });
+}
+
+function validateTerminateInput(input) {
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('terminate input is required');
+  }
+  assertPositiveInt(input.user_id, 'user_id');
+  assertOptionalString(input.reason, 'reason', { max: 1024 });
+  if (input.termination_date !== null && input.termination_date !== undefined) {
+    _assertDate(input.termination_date, 'termination_date');
+  }
+}
+
+/**
+ * Suspend an employee. Flips status: active/on_leave →
+ * suspended. Stamps suspended_at + suspended_by.
+ *
+ * @returns {Promise<{ id: number, status: 'suspended' }>}
+ */
+export async function suspendEmployee(db, employeeId, input, tenantId = 0) {
+  assertPositiveInt(employeeId, 'employeeId');
+  validateTransitionInput(input, 'input');
+  const emp = await fetchEmployee(db, employeeId, tenantId);
+  if (emp.status === 'suspended') {
+    throw new ValueError(`employee ${employeeId} is already suspended`);
+  }
+  if (emp.status === 'terminated') {
+    throw new ValueError(
+      `employee ${employeeId} is terminated (cannot suspend a terminated employee)`,
+    );
+  }
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.hr_employees
+        SET status = 'suspended',
+            suspended_at = datetime('now'),
+            suspended_by = $1
+      WHERE id = $2 AND tenant_id = $3 AND status != 'suspended'`,
+    [input.user_id, employeeId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `employee ${employeeId} is no longer active (concurrent update?)`,
+    );
+  }
+  return { id: employeeId, status: 'suspended' };
+}
+
+/**
+ * Reactivate an employee. Flips status: on_leave/suspended
+ * → active. Clears suspended_at + on_leave_at.
+ *
+ * @returns {Promise<{ id: number, status: 'active' }>}
+ */
+export async function reactivateEmployee(db, employeeId, input, tenantId = 0) {
+  assertPositiveInt(employeeId, 'employeeId');
+  validateTransitionInput(input, 'input');
+  const emp = await fetchEmployee(db, employeeId, tenantId);
+  if (emp.status === 'active') {
+    throw new ValueError(`employee ${employeeId} is already active`);
+  }
+  if (emp.status === 'terminated') {
+    throw new ValueError(
+      `employee ${employeeId} is terminated (cannot reactivate a terminated employee)`,
+    );
+  }
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.hr_employees
+        SET status = 'active',
+            suspended_at = NULL,
+            suspended_by = NULL,
+            on_leave_at = NULL,
+            on_leave_until = NULL
+      WHERE id = $1 AND tenant_id = $2 AND status IN ('on_leave', 'suspended')`,
+    [employeeId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `employee ${employeeId} is no longer on_leave/suspended (concurrent update?)`,
+    );
+  }
+  return { id: employeeId, status: 'active' };
+}
+
+/**
+ * Set an employee to on_leave. Flips status: active →
+ * on_leave. Stamps on_leave_at + on_leave_until (optional
+ * expected return date) + on_leave_reason.
+ *
+ * @param {object} input — { user_id, expected_return_date?, reason? }
+ * @returns {Promise<{ id: number, status: 'on_leave' }>}
+ */
+export async function setEmployeeOnLeave(db, employeeId, input, tenantId = 0) {
+  assertPositiveInt(employeeId, 'employeeId');
+  validateOnLeaveInput(input);
+  const emp = await fetchEmployee(db, employeeId, tenantId);
+  if (emp.status === 'on_leave') {
+    throw new ValueError(`employee ${employeeId} is already on leave`);
+  }
+  if (emp.status === 'terminated') {
+    throw new ValueError(
+      `employee ${employeeId} is terminated (cannot put a terminated employee on leave)`,
+    );
+  }
+  if (emp.status === 'suspended') {
+    throw new ValueError(
+      `employee ${employeeId} is suspended (reactivate first, then set on leave)`,
+    );
+  }
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.hr_employees
+        SET status = 'on_leave',
+            on_leave_at = datetime('now'),
+            on_leave_until = $1,
+            on_leave_reason = $2
+      WHERE id = $3 AND tenant_id = $4 AND status = 'active'`,
+    [input.expected_return_date ?? null, input.reason ?? null, employeeId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `employee ${employeeId} is no longer active (concurrent update?)`,
+    );
+  }
+  return { id: employeeId, status: 'on_leave' };
+}
+
+/**
+ * Terminate an employee. Flips status: any → terminated.
+ * Stamps termination_date (if not provided, uses today) +
+ * termination_reason.
+ *
+ * @param {object} input — { user_id, reason?, termination_date? }
+ * @returns {Promise<{ id: number, status: 'terminated' }>}
+ */
+export async function terminateEmployee(db, employeeId, input, tenantId = 0) {
+  assertPositiveInt(employeeId, 'employeeId');
+  validateTerminateInput(input);
+  const emp = await fetchEmployee(db, employeeId, tenantId);
+  if (emp.status === 'terminated') {
+    throw new ValueError(`employee ${employeeId} is already terminated`);
+  }
+  const terminationDate = input.termination_date ?? new Date().toISOString().slice(0, 10);
+  const upd = await runQuery(
+    db,
+    `UPDATE finance.hr_employees
+        SET status = 'terminated',
+            termination_date = $1,
+            termination_reason = $2
+      WHERE id = $3 AND tenant_id = $4 AND status != 'terminated'`,
+    [terminationDate, input.reason ?? null, employeeId, tenantId],
+  );
+  if (typeof upd.changes === 'number' && upd.changes === 0) {
+    throw new ValueError(
+      `employee ${employeeId} is no longer active (concurrent update?)`,
+    );
+  }
+  return { id: employeeId, status: 'terminated' };
 }

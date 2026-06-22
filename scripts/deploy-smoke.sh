@@ -268,6 +268,13 @@ const writeChecks = [
   { method: 'GET', path: '/api/finance/hr/contracts/1', headers: { 'X-Tenant-Id': '0' }, expect: 200, name: 'GET /api/finance/hr/contracts/1 (returns the contract created above)' },
   { method: 'POST', path: '/api/finance/hr/payroll-runs', body: { period_year: 2026, period_month: 1, notes: 'January 2026 payroll' }, expect: 201, name: 'POST /api/finance/hr/payroll-runs (returns id > 0)' },
   { method: 'POST', path: '/api/finance/hr/payroll-runs/1/lines', body: { employee_id: 1, contract_id: 1, base_salary_amd: 500000, bonus_amd: 50000, deductions_amd: 10000, tax_amd: 50000, worked_days: 22, vacation_days: 0, sick_days: 0 }, expect: 201, name: 'POST /api/finance/hr/payroll-runs/1/lines (returns id > 0)' },
+  // Phase 3 HR basics wave 3 (W95-1) — employee status
+  // transitions. Smoke flow: suspend → reactivate → on-leave
+  // → terminate the existing employee id=1.
+  { method: 'POST', path: '/api/finance/hr/employees/1/suspend', body: { user_id: 1 }, expect: 200, name: 'POST suspend (state-machine guard active → suspended)' },
+  { method: 'POST', path: '/api/finance/hr/employees/1/reactivate', body: { user_id: 1 }, expect: 200, name: 'POST reactivate (state-machine guard suspended → active)' },
+  { method: 'POST', path: '/api/finance/hr/employees/1/on-leave', body: { user_id: 1, expected_return_date: '2026-08-01', reason: 'maternity leave' }, expect: 200, name: 'POST on-leave (state-machine guard active → on_leave)' },
+  { method: 'POST', path: '/api/finance/hr/employees/1/terminate', body: { user_id: 1, reason: 'resigned' }, expect: 200, name: 'POST terminate (state-machine guard on_leave → terminated)' },
   // Phase 3 reporting drill-downs (W92-1) — empty-DB smoke
   // checks (no invoices yet → empty arrays, but valid JSON).
   // End-to-end drill-down coverage requires populated invoices;
@@ -2570,6 +2577,129 @@ if [ $SMOKE_RC = 0 ]; then
 fi
 kill -TERM $SERVER_PID_7J 2>/dev/null
 wait $SERVER_PID_7J 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+
+echo
+echo "=== STEP 7k: AI merge candidates + alerts (W94-1) ==="
+# Tests the advisory data-quality endpoints:
+#   GET /api/finance/ai/merge-candidates
+#   GET /api/finance/ai/alerts?threshold=80
+# Both endpoints are advisory (read-only) — they propose what
+# to do, they do NOT mutate state. The operator decides whether
+# to apply the merge or fix the data quality issues.
+LOG7K="$TESTDIR/server-7k.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7K" 2>&1 &
+SERVER_PID_7K=$!
+SMOKE_RC=0
+cleanup_7k() { kill -9 $SERVER_PID_7K 2>/dev/null; wait $SERVER_PID_7K 2>/dev/null; }
+trap cleanup_7k EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7k"
+    tail -20 "$LOG7K"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7K=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7K" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7K" ]; then
+    echo "  FAIL: STEP 7k server did not print admin session token"
+    tail -20 "$LOG7K"
+    SMOKE_RC=1
+  else
+    # merge-candidates — returns 200 + items array
+    MERGE_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/ai/merge-candidates" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7K" -H "X-Tenant-Id: 0")
+    if echo "$MERGE_OUT" | python3 -c "import json, sys; d=json.load(sys.stdin); assert 'items' in d and isinstance(d['items'], list); print('OK', len(d['items']))" 2>/dev/null; then
+      echo "  OK merge-candidates returns items array"
+    else
+      echo "  FAIL: merge-candidates did not return items array: $MERGE_OUT"
+      SMOKE_RC=1
+    fi
+
+    # alerts — returns 200 + items array
+    ALERTS_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/ai/alerts?threshold=80" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7K" -H "X-Tenant-Id: 0")
+    if echo "$ALERTS_OUT" | python3 -c "import json, sys; d=json.load(sys.stdin); assert 'items' in d and isinstance(d['items'], list); print('OK', len(d['items']))" 2>/dev/null; then
+      echo "  OK alerts returns items array"
+    else
+      echo "  FAIL: alerts did not return items array: $ALERTS_OUT"
+      SMOKE_RC=1
+    fi
+
+    # alerts with invalid threshold (101) returns 400
+    ALERTS_BAD=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/finance/ai/alerts?threshold=101" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7K" -H "X-Tenant-Id: 0")
+    if [ "$ALERTS_BAD" = "400" ]; then
+      echo "  OK alerts with invalid threshold returns 400"
+    else
+      echo "  FAIL: alerts invalid threshold returned $ALERTS_BAD (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # Each merge-candidate item has the expected shape (group_id, primary, secondary, invoice_count, payment_count, reason)
+    ITEM_SHAPE_OK=$(echo "$MERGE_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('items', [])
+# Empty items is OK; if there are items, each must have the expected keys
+if not items:
+  print('empty')
+else:
+  for it in items:
+    required = ['group_id','match_type','match_value','primary','secondary','invoice_count','payment_count','reason']
+    if not all(k in it for k in required):
+      print('missing keys in', it.keys())
+      sys.exit(1)
+    if not all(k in it['primary'] for k in ['id','name']):
+      print('primary missing keys', it['primary'].keys())
+      sys.exit(1)
+    if not all(k in it['secondary'] for k in ['id','name']):
+      print('secondary missing keys', it['secondary'].keys())
+      sys.exit(1)
+  print('shape OK', len(items))
+" 2>&1)
+    if [ -n "$ITEM_SHAPE_OK" ]; then
+      echo "  OK merge-candidate items have the expected shape ($ITEM_SHAPE_OK)"
+    else
+      echo "  FAIL: merge-candidate items shape check failed"
+      SMOKE_RC=1
+    fi
+
+    # Each alert has the expected shape
+    ALERT_SHAPE_OK=$(echo "$ALERTS_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('items', [])
+for it in items:
+  required = ['severity','code','message','recommended_action']
+  if not all(k in it for k in required):
+    print('missing keys in', it.keys())
+    sys.exit(1)
+  if it['severity'] not in ('critical','warning','info'):
+    print('bad severity', it['severity'])
+    sys.exit(1)
+print('alerts shape OK', len(items))
+" 2>&1)
+    if [ -n "$ALERT_SHAPE_OK" ]; then
+      echo "  OK alerts have the expected shape ($ALERT_SHAPE_OK)"
+    else
+      echo "  FAIL: alerts shape check failed"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7K 2>/dev/null
+wait $SERVER_PID_7K 2>/dev/null
 trap - EXIT
 if [ $SMOKE_RC != 0 ]; then
   exit 1

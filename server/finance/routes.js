@@ -225,6 +225,10 @@ import {
   createPayrollRun,
   addPayrollLine,
   listPayrollRuns,
+  suspendEmployee,
+  reactivateEmployee,
+  setEmployeeOnLeave,
+  terminateEmployee,
 } from './hr.js';
 import {
   findDuplicateCustomers,
@@ -2880,6 +2884,10 @@ export function registerFinanceRoutes(app, opts = {}) {
   );
 
 //   POST   /api/finance/hr/payroll-runs/:id/lines
+//   POST   /api/finance/hr/employees/:id/suspend  (Phase 3 W95-1)
+//   POST   /api/finance/hr/employees/:id/reactivate
+//   POST   /api/finance/hr/employees/:id/on-leave
+//   POST   /api/finance/hr/employees/:id/terminate
 //   GET    /api/finance/ai/duplicates               (Phase 3 W93-1)
 //   GET    /api/finance/ai/hvhh-drift
 //   GET    /api/finance/ai/data-quality
@@ -2970,6 +2978,72 @@ export function registerFinanceRoutes(app, opts = {}) {
       next(err);
     }
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 HR basics wave 3 (W95-1) — employee status
+  // transitions (suspend / reactivate / on-leave / terminate).
+  // ────────────────────────────────────────────────────────────────────
+
+  // POST /api/finance/hr/employees/:id/suspend
+  //   Body: { user_id }. Flips status active/on_leave →
+  //   suspended. Stamps suspended_at + suspended_by.
+  app.post(
+    '/api/finance/hr/employees/:id/suspend',
+    requireTenant,
+    requirePerm('hr.employee.update'),
+    wrapFinanceRoute('hr.employee.update', (req) => `hr_employee:${req.params.id}:suspend`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const employeeId = Number(req.params.id);
+      const out = await suspendEmployee(pgAdapter, employeeId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/hr/employees/:id/reactivate
+  //   Body: { user_id }. Flips status on_leave/suspended →
+  //   active. Clears suspended_at + on_leave_at.
+  app.post(
+    '/api/finance/hr/employees/:id/reactivate',
+    requireTenant,
+    requirePerm('hr.employee.update'),
+    wrapFinanceRoute('hr.employee.update', (req) => `hr_employee:${req.params.id}:reactivate`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const employeeId = Number(req.params.id);
+      const out = await reactivateEmployee(pgAdapter, employeeId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/hr/employees/:id/on-leave
+  //   Body: { user_id, expected_return_date?, reason? }.
+  //   Flips status active → on_leave. Stamps on_leave_at.
+  app.post(
+    '/api/finance/hr/employees/:id/on-leave',
+    requireTenant,
+    requirePerm('hr.employee.update'),
+    wrapFinanceRoute('hr.employee.update', (req) => `hr_employee:${req.params.id}:on_leave`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const employeeId = Number(req.params.id);
+      const out = await setEmployeeOnLeave(pgAdapter, employeeId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
+
+  // POST /api/finance/hr/employees/:id/terminate
+  //   Body: { user_id, reason?, termination_date? }.
+  //   Flips status any → terminated. Stamps termination_date
+  //   (defaults to today) + termination_reason.
+  app.post(
+    '/api/finance/hr/employees/:id/terminate',
+    requireTenant,
+    requirePerm('hr.employee.update'),
+    wrapFinanceRoute('hr.employee.update', (req) => `hr_employee:${req.params.id}:terminate`, async (req, res) => {
+      const tenantId = req.tenantId;
+      const employeeId = Number(req.params.id);
+      const out = await terminateEmployee(pgAdapter, employeeId, req.body || {}, tenantId);
+      res.status(200).json(out);
+    }),
+  );
 
   // ────────────────────────────────────────────────────────────────────
   // Phase 3 AI agents — data quality (W93-1) — read-only

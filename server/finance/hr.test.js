@@ -24,6 +24,10 @@ import {
   createPayrollRun,
   addPayrollLine,
   listPayrollRuns,
+  suspendEmployee,
+  reactivateEmployee,
+  setEmployeeOnLeave,
+  terminateEmployee,
   ValueError,
 } from './hr.js';
 
@@ -46,6 +50,12 @@ function makeMemoryDb() {
       status TEXT NOT NULL DEFAULT 'active',
       hvhh TEXT,
       bank_account TEXT,
+      termination_reason TEXT,
+      suspended_at TEXT,
+      suspended_by INTEGER,
+      on_leave_at TEXT,
+      on_leave_until TEXT,
+      on_leave_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -525,4 +535,162 @@ test('hr: listPayrollRuns filters by status + periodYear', async () => {
   const voided = await listPayrollRuns(db, 0, { status: 'voided' });
   assert.equal(voided.length, 1);
   assert.equal(voided[0].period_year, 2025);
+});// ────────────────────────────────────────────────────────────────────────
+// Employee status transitions (W95-1 — wave 3)
+// ────────────────────────────────────────────────────────────────────────
+
+test('hr: suspendEmployee flips active → suspended', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  const out = await suspendEmployee(db, emp.id, { user_id: 1 }, 0);
+  assert.equal(out.status, 'suspended');
+  const refreshed = db._db.prepare('SELECT status, suspended_by FROM hr_employees WHERE id = ?').get(emp.id);
+  assert.equal(refreshed.status, 'suspended');
+  assert.equal(refreshed.suspended_by, 1);
+});
+
+test('hr: suspendEmployee throws on already-suspended', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await suspendEmployee(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    suspendEmployee(db, emp.id, { user_id: 1 }, 0),
+    /already suspended/,
+  );
+});
+
+test('hr: suspendEmployee throws on terminated employee', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await terminateEmployee(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    suspendEmployee(db, emp.id, { user_id: 1 }, 0),
+    /is terminated/,
+  );
+});
+
+test('hr: reactivateEmployee flips suspended → active + clears audit', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await suspendEmployee(db, emp.id, { user_id: 1 }, 0);
+  const out = await reactivateEmployee(db, emp.id, { user_id: 1 }, 0);
+  assert.equal(out.status, 'active');
+  const refreshed = db._db.prepare('SELECT status, suspended_at, suspended_by FROM hr_employees WHERE id = ?').get(emp.id);
+  assert.equal(refreshed.status, 'active');
+  assert.equal(refreshed.suspended_at, null);
+  assert.equal(refreshed.suspended_by, null);
+});
+
+test('hr: reactivateEmployee throws on already-active', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await assert.rejects(
+    reactivateEmployee(db, emp.id, { user_id: 1 }, 0),
+    /already active/,
+  );
+});
+
+test('hr: reactivateEmployee throws on terminated employee', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await terminateEmployee(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    reactivateEmployee(db, emp.id, { user_id: 1 }, 0),
+    /is terminated/,
+  );
+});
+
+test('hr: setEmployeeOnLeave flips active → on_leave + stamps audit fields', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  const out = await setEmployeeOnLeave(
+    db,
+    emp.id,
+    { user_id: 1, expected_return_date: '2026-08-01', reason: 'maternity leave' },
+    0,
+  );
+  assert.equal(out.status, 'on_leave');
+  const refreshed = db._db.prepare(
+    'SELECT status, on_leave_until, on_leave_reason FROM hr_employees WHERE id = ?',
+  ).get(emp.id);
+  assert.equal(refreshed.status, 'on_leave');
+  assert.equal(refreshed.on_leave_until, '2026-08-01');
+  assert.equal(refreshed.on_leave_reason, 'maternity leave');
+});
+
+test('hr: setEmployeeOnLeave throws on already-on-leave', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await setEmployeeOnLeave(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    setEmployeeOnLeave(db, emp.id, { user_id: 1 }, 0),
+    /already on leave/,
+  );
+});
+
+test('hr: setEmployeeOnLeave throws on suspended (must reactivate first)', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await suspendEmployee(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    setEmployeeOnLeave(db, emp.id, { user_id: 1 }, 0),
+    /is suspended/,
+  );
+});
+
+test('hr: terminateEmployee flips any → terminated + stamps termination_date', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  const out = await terminateEmployee(
+    db,
+    emp.id,
+    { user_id: 1, reason: 'resigned', termination_date: '2026-06-21' },
+    0,
+  );
+  assert.equal(out.status, 'terminated');
+  const refreshed = db._db.prepare(
+    'SELECT status, termination_date, termination_reason FROM hr_employees WHERE id = ?',
+  ).get(emp.id);
+  assert.equal(refreshed.status, 'terminated');
+  assert.equal(refreshed.termination_date, '2026-06-21');
+  assert.equal(refreshed.termination_reason, 'resigned');
+});
+
+test('hr: terminateEmployee defaults termination_date to today when not provided', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await terminateEmployee(db, emp.id, { user_id: 1 }, 0);
+  const refreshed = db._db.prepare(
+    'SELECT termination_date FROM hr_employees WHERE id = ?',
+  ).get(emp.id);
+  // Should be today's date (YYYY-MM-DD format)
+  const today = new Date().toISOString().slice(0, 10);
+  assert.equal(refreshed.termination_date, today);
+});
+
+test('hr: terminateEmployee throws on already-terminated', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  await terminateEmployee(db, emp.id, { user_id: 1 }, 0);
+  await assert.rejects(
+    terminateEmployee(db, emp.id, { user_id: 1 }, 0),
+    /already terminated/,
+  );
+});
+
+test('hr: full state machine cycle: active → suspended → active → on_leave → terminated', async () => {
+  const db = makeMemoryDb();
+  const emp = await makeEmployee(db);
+  // 1. active → suspended
+  let out = await suspendEmployee(db, emp.id, { user_id: 1 }, 0);
+  assert.equal(out.status, 'suspended');
+  // 2. suspended → active (reactivate)
+  out = await reactivateEmployee(db, emp.id, { user_id: 1 }, 0);
+  assert.equal(out.status, 'active');
+  // 3. active → on_leave
+  out = await setEmployeeOnLeave(db, emp.id, { user_id: 1, reason: 'sabbatical' }, 0);
+  assert.equal(out.status, 'on_leave');
+  // 4. on_leave → terminated
+  out = await terminateEmployee(db, emp.id, { user_id: 1, reason: 'career change' }, 0);
+  assert.equal(out.status, 'terminated');
 });
