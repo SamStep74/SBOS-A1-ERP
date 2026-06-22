@@ -3302,6 +3302,150 @@ else
 fi
 echo
 
+echo "=== STEP 5ac: Office document detection (Wave 62) ==="
+# Smoke coverage for the W62 OOXML/ODF detection. We verify:
+#   1. DOCX bytes claimed as DOCX is accepted (201)
+#   2. XLSX bytes claimed as XLSX is accepted (201)
+#   3. ODT mimetype bytes claimed as ODT is accepted (201)
+#   4. DOCX bytes claimed as XLSX is REJECTED (400) — smuggling
+#   5. PPTX bytes claimed as DOCX is REJECTED (400) — smuggling
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS_DIR" node -e '
+  const http = require("node:http");
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function postRaw(p, body, headers) {
+    return req({
+      host: "127.0.0.1", port: Number(process.env.PORT),
+      path: p, method: "POST",
+      headers: Object.assign({
+        "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+        "content-type": "application/octet-stream",
+        "content-length": body ? body.length : 0,
+      }, headers || {}),
+    }, body);
+  }
+
+  (async () => {
+    // Find an invoice id (smoke creates several earlier).
+    const listRes = await req({
+      host: "127.0.0.1", port: Number(process.env.PORT),
+      path: "/api/finance/invoices?limit=1", method: "GET",
+      headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+    });
+    if (listRes.status !== 200 || !listRes.body.items || listRes.body.items.length === 0) {
+      console.log("  FAIL no invoices available");
+      process.exit(1);
+    }
+    const invoiceId = listRes.body.items[0].id;
+
+    // 1) DOCX accepted
+    const docx = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("[Content_Types].xml"),
+      Buffer.from("word/document.xml"),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r1 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      docx,
+      { "x-filename": "w62_smoke.docx", "x-mime-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    );
+    if (r1.status !== 201) {
+      console.log("  FAIL DOCX accepted expected 201 got " + r1.status);
+      process.exit(1);
+    }
+    console.log("  DOCX accepted");
+
+    // 2) XLSX accepted
+    const xlsx = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("[Content_Types].xml"),
+      Buffer.from("xl/workbook.xml"),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r2 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      xlsx,
+      { "x-filename": "w62_smoke.xlsx", "x-mime-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    );
+    if (r2.status !== 201) {
+      console.log("  FAIL XLSX accepted expected 201 got " + r2.status);
+      process.exit(1);
+    }
+    console.log("  XLSX accepted");
+
+    // 3) ODT accepted
+    const odt = Buffer.concat([
+      Buffer.from("application/vnd.oasis.opendocument.text"),
+      Buffer.from("\n# rest of mimetype entry fake content"),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r3 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      odt,
+      { "x-filename": "w62_smoke.odt", "x-mime-type": "application/vnd.oasis.opendocument.text" },
+    );
+    if (r3.status !== 201) {
+      console.log("  FAIL ODT accepted expected 201 got " + r3.status);
+      process.exit(1);
+    }
+    console.log("  ODT accepted");
+
+    // 4) DOCX bytes claimed as XLSX is REJECTED
+    const r4 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      docx,
+      { "x-filename": "w62_smoke.docx", "x-mime-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    );
+    if (r4.status !== 400) {
+      console.log("  FAIL docx-claimed-as-xlsx expected 400 got " + r4.status);
+      process.exit(1);
+    }
+    console.log("  docx-claimed-as-xlsx rejected");
+
+    // 5) PPTX bytes claimed as DOCX is REJECTED
+    const pptx = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("ppt/presentation.xml"),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r5 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      pptx,
+      { "x-filename": "w62_smoke.pptx", "x-mime-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    );
+    if (r5.status !== 400) {
+      console.log("  FAIL pptx-claimed-as-docx expected 400 got " + r5.status);
+      process.exit(1);
+    }
+    console.log("  pptx-claimed-as-docx rejected");
+
+    console.log("  OK office document detection");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  office document detection OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

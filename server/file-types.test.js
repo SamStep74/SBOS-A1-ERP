@@ -251,3 +251,131 @@ test('detectMimeType: listKnownTypes includes the new W61 types', () => {
     assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
   }
 });
+
+// ─── W62: Office document detection (OOXML + ODF) ───
+
+// OOXML documents are ZIP containers with a specific entry
+// path that identifies the format. We synthesise a fake
+// "ZIP" by prepending the PK\x03\x04 magic + a bit of
+// padding + the entry-name marker. The detection function
+// is a substring search, so the padding/marker layout
+// just needs to put the marker inside the buffer.
+
+// DOCX — word/document.xml inside the ZIP.
+const DOCX = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),       // ZIP magic
+  Buffer.from('[Content_Types].xml fake header'),
+  Buffer.from('word/document.xml'),            // DOCX marker
+  Buffer.alloc(50, 0x00),
+]);
+
+// XLSX — xl/workbook.xml inside the ZIP.
+const XLSX = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from('[Content_Types].xml fake header'),
+  Buffer.from('xl/workbook.xml'),              // XLSX marker
+  Buffer.alloc(50, 0x00),
+]);
+
+// PPTX — ppt/presentation.xml inside the ZIP.
+const PPTX = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from('[Content_Types].xml fake header'),
+  Buffer.from('ppt/presentation.xml'),         // PPTX marker
+  Buffer.alloc(50, 0x00),
+]);
+
+// ODF documents store the mimetype UNCOMPRESSED at the
+// very start of the file. Detection looks for the exact
+// mimetype string at offset 0 (no ZIP magic at the start
+// of the actual content — the local-file-header sits
+// BEFORE the mimetype entry's payload).
+
+// ODT — application/vnd.oasis.opendocument.text at offset 0.
+const ODT = Buffer.concat([
+  Buffer.from('application/vnd.oasis.opendocument.text'),
+  Buffer.from('\n# rest of mimetype entry fake content'),
+  Buffer.alloc(50, 0x00),
+]);
+
+// ODS — application/vnd.oasis.opendocument.spreadsheet at offset 0.
+const ODS = Buffer.concat([
+  Buffer.from('application/vnd.oasis.opendocument.spreadsheet'),
+  Buffer.from('\n# rest of mimetype entry fake content'),
+  Buffer.alloc(50, 0x00),
+]);
+
+// ODP — application/vnd.oasis.opendocument.presentation at offset 0.
+const ODP = Buffer.concat([
+  Buffer.from('application/vnd.oasis.opendocument.presentation'),
+  Buffer.from('\n# rest of mimetype entry fake content'),
+  Buffer.alloc(50, 0x00),
+]);
+
+test('detectMimeType: DOCX (ZIP with word/document.xml)', () => {
+  assert.equal(detectMimeType(DOCX), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+});
+test('detectMimeType: XLSX (ZIP with xl/workbook.xml)', () => {
+  assert.equal(detectMimeType(XLSX), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+});
+test('detectMimeType: PPTX (ZIP with ppt/presentation.xml)', () => {
+  assert.equal(detectMimeType(PPTX), 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+});
+test('detectMimeType: ODT (mimetype at offset 0)', () => {
+  assert.equal(detectMimeType(ODT), 'application/vnd.oasis.opendocument.text');
+});
+test('detectMimeType: ODS (mimetype at offset 0)', () => {
+  assert.equal(detectMimeType(ODS), 'application/vnd.oasis.opendocument.spreadsheet');
+});
+test('detectMimeType: ODP (mimetype at offset 0)', () => {
+  assert.equal(detectMimeType(ODP), 'application/vnd.oasis.opendocument.presentation');
+});
+
+// Order matters: when the buffer starts with the ODF mimetype
+// string (which doesn't begin with the ZIP magic), the OOXML
+// branch should NOT match — the OOXML branch requires PK\x03\x04
+// at offset 0. Likewise a generic ZIP without any office
+// marker should still detect as application/zip.
+test('detectMimeType: generic ZIP without office markers is still ZIP', () => {
+  const genericZip = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+    Buffer.from('hello world from a plain ZIP entry'),
+    Buffer.alloc(50, 0x00),
+  ]);
+  assert.equal(detectMimeType(genericZip), 'application/zip');
+});
+
+test('verifyMimeType: DOCX claimed as application/zip is REJECTED', () => {
+  // Claiming a generic ZIP type when the bytes are actually
+  // a DOCX is a smuggling pattern — accept the upload but
+  // reject because the claimed mime is wrong.
+  const r = verifyMimeType(DOCX, 'application/zip');
+  assert.equal(r.matches, false);
+});
+
+test('verifyMimeType: XLSX claimed as DOCX is REJECTED', () => {
+  // Distinct OOXML formats are NOT interchangeable.
+  const r = verifyMimeType(XLSX, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  assert.equal(r.matches, false);
+});
+
+test('verifyMimeType: ODT bytes claimed as ODT is accepted', () => {
+  const r = verifyMimeType(ODT, 'application/vnd.oasis.opendocument.text');
+  assert.equal(r.matches, true);
+});
+
+test('detectMimeType: listKnownTypes includes the new W62 types', () => {
+  // Smoke check: every new type is exposed in the catalog
+  // so operators / docs can see what's supported.
+  const known = listKnownTypes().map((t) => t.mime);
+  for (const m of [
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.oasis.opendocument.text',
+    'application/vnd.oasis.opendocument.spreadsheet',
+    'application/vnd.oasis.opendocument.presentation',
+  ]) {
+    assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
+  }
+});

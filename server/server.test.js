@@ -1882,6 +1882,127 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(r.status, 201);
   });
 
+  // ─── Wave 62: Office document detection (OOXML + ODF) ───
+
+  test('62a. POST attachment with DOCX bytes + DOCX claim is accepted', async () => {
+    // DOCX = ZIP magic + word/document.xml somewhere inside.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from('[Content_Types].xml'),
+      Buffer.from('word/document.xml'),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w62_smoke.docx',
+          'x-mime-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201, `expected 201 got ${r.status}`);
+  });
+
+  test('62b. POST attachment with XLSX bytes + XLSX claim is accepted', async () => {
+    // XLSX = ZIP magic + xl/workbook.xml.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from('[Content_Types].xml'),
+      Buffer.from('xl/workbook.xml'),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w62_smoke.xlsx',
+          'x-mime-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201);
+  });
+
+  test('62c. POST attachment with DOCX bytes claimed as XLSX is REJECTED', async () => {
+    // Distinct OOXML formats are NOT interchangeable. The
+    // bytes are DOCX but the claim is XLSX — smuggling.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from('word/document.xml'),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w62_docx_as_xlsx.docx',
+          'x-mime-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400, 'docx-claimed-as-xlsx must be rejected');
+  });
+
+  test('62d. POST attachment with ODT mimetype bytes + ODT claim is accepted', async () => {
+    // ODT stores the mimetype uncompressed at offset 0.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from('application/vnd.oasis.opendocument.text'),
+      Buffer.from('\n# rest of mimetype entry fake content'),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w62_smoke.odt',
+          'x-mime-type': 'application/vnd.oasis.opendocument.text',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201);
+  });
+
+  test('62e. POST attachment with PPTX bytes claimed as DOCX is REJECTED', async () => {
+    // PPTX bytes (ppt/presentation.xml) claimed as DOCX
+    // (wordprocessingml.document) is a smuggling attempt.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from('ppt/presentation.xml'),
+      Buffer.alloc(50, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w62_pptx_as_docx.pptx',
+          'x-mime-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400, 'pptx-claimed-as-docx must be rejected');
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

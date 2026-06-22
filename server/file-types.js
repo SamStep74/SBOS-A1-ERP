@@ -1,4 +1,4 @@
-// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61).
+// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61 + Wave 62).
 //
 // Magic-byte detection for the common file types operators
 // attach to invoices. Pairs with Wave 56 attachment upload
@@ -10,7 +10,7 @@
 // system would accept it. This module closes the gap by
 // verifying the actual bytes match the claimed mime type.
 //
-// Coverage (W58 base + W61 extension):
+// Coverage (W58 base + W61 extension + W62 OOXML/ODF):
 //   - application/pdf     %PDF-1.<digit>  (or %PDF-)
 //   - image/jpeg          FF D8 FF
 //   - image/png           89 50 4E 47 0D 0A 1A 0A
@@ -22,17 +22,24 @@
 //   - video/mp4           ftyp + isom brand         [W61]
 //   - video/quicktime     ftyp + qt  brand          [W61]
 //   - video/x-msvideo     RIFF....AVI               [W61]
+//   - OOXML (DOCX/XLSX/PPTX)                       [W62]
+//     * wordprocessingml.document   ZIP + word/document.xml
+//     * spreadsheetml.sheet         ZIP + xl/workbook.xml
+//     * presentationml.presentation ZIP + ppt/presentation.xml
+//   - ODF (ODT/ODS/ODP)                            [W62]
+//     * application/vnd.oasis.opendocument.text       at offset 0
+//     * application/vnd.oasis.opendocument.spreadsheet at offset 0
+//     * application/vnd.oasis.opendocument.presentation at offset 0
 //   - text/plain          first 512B is printable ASCII or valid UTF-8
-//   - application/zip     50 4B 03 04
+//   - application/zip     50 4B 03 04 (no OOXML/ODF markers found)
 //   - application/json    parses as JSON (if mime is application/json)
 //
-// W61 deliberately does NOT distinguish DOCX/XLSX/PPTX from
-// generic ZIP — that would require inspecting the ZIP central
-// directory (in the END of the file, not the first 512 bytes).
-// A separate W62 can add ZIP-content sniffing if the operator
-// demand is there. For now, ZIP-based Office docs are accepted
-// when claimed as application/zip; the extension blocklist
-// still applies at the upload layer.
+// W62 closes the W61 "Office docs detect as generic ZIP" gap
+// by scanning the buffer for OOXML entry-name markers
+// (word/document.xml etc.) AND by detecting ODF's uncompressed
+// mimetype entry at offset 0. Both checks are linear scans
+// over the buffer — the 25MB attachment cap keeps the worst-
+// case cost at ~25ms on a modern CPU.
 //
 // Anything else (octet-stream, custom types) is treated as
 // "unknown" and the bytes are accepted as-is. The blocklist
@@ -83,16 +90,106 @@ const SIGNATURES = [
     },
   },
   {
+    // W62: OOXML detection. A file is detected as DOCX/XLSX/
+    // PPTX if it starts with the ZIP magic AND contains the
+    // OOXML-mandatory entry-name marker somewhere in the
+    // buffer. We search the WHOLE buffer (not just the first
+    // 512 bytes) because ZIP local-file-headers + the central
+    // directory are interleaved with the entry data; the
+    // marker can be anywhere.
+    //
+    // The OOXML format REQUIRES [Content_Types].xml at the
+    // start, then the document-specific entry (word/document.
+    // xml for DOCX, xl/workbook.xml for XLSX, ppt/presentation
+    // .xml for PPTX). For a real Office doc these entries
+    // appear within the first ~4KB of compressed data.
+    //
+    // Checked BEFORE the generic ZIP signature so a DOCX
+    // file is detected as DOCX, not as generic ZIP. (First
+    // match wins.)
+    //
+    // Implementation: use Buffer.indexOf to find the marker
+    // string. The marker is an ASCII byte sequence so the
+    // search is fast (V8 uses optimized memchr for this).
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    label: 'DOCX',
+    check: (buf) =>
+      buf.length >= 4 &&
+      buf[0] === 0x50 && buf[1] === 0x4b &&
+      buf[2] === 0x03 && buf[3] === 0x04 &&
+      buf.indexOf(Buffer.from('word/document.xml')) !== -1,
+  },
+  {
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    label: 'XLSX',
+    check: (buf) =>
+      buf.length >= 4 &&
+      buf[0] === 0x50 && buf[1] === 0x4b &&
+      buf[2] === 0x03 && buf[3] === 0x04 &&
+      buf.indexOf(Buffer.from('xl/workbook.xml')) !== -1,
+  },
+  {
+    mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    label: 'PPTX',
+    check: (buf) =>
+      buf.length >= 4 &&
+      buf[0] === 0x50 && buf[1] === 0x4b &&
+      buf[2] === 0x03 && buf[3] === 0x04 &&
+      buf.indexOf(Buffer.from('ppt/presentation.xml')) !== -1,
+  },
+  {
     mime: 'application/zip',
     label: 'ZIP',
-    // ZIP local file header signature: 50 4B 03 04
-    // (also matches DOCX, XLSX, JAR — all are ZIP containers)
+    // ZIP local file header signature: 50 4B 03 04.
+    // Checked AFTER the OOXML branches so a real DOCX/XLSX/
+    // PPTX file is detected as the specific OOXML type, not
+    // as a generic ZIP. A buffer with ZIP magic + no OOXML
+    // marker falls through to this branch.
     check: (buf) =>
       buf.length >= 4 &&
       buf[0] === 0x50 &&
       buf[1] === 0x4b &&
       buf[2] === 0x03 &&
       buf[3] === 0x04,
+  },
+  {
+    // W62: ODF detection. OpenDocument files are ZIP
+    // containers with a mandatory `mimetype` entry stored
+    // UNCOMPRESSED at the very start of the file. The
+    // detection is therefore a simple prefix check on the
+    // first ~80 bytes (no scanning the whole buffer needed).
+    //
+    // The three canonical ODF mimetype strings:
+    //   - application/vnd.oasis.opendocument.text       (ODT)
+    //   - application/vnd.oasis.opendocument.spreadsheet (ODS)
+    //   - application/vnd.oasis.opendocument.presentation (ODP)
+    //
+    // Each branch checks the corresponding prefix. We do
+    // NOT require the ZIP magic at offset 0 because the
+    // local-file-header sits BEFORE the mimetype entry's
+    // payload (and ODF stores the mimetype uncompressed).
+    mime: 'application/vnd.oasis.opendocument.text',
+    label: 'ODT',
+    check: (buf) =>
+      buf.length >= 39 &&
+      buf.slice(0, 39).toString('ascii') ===
+        'application/vnd.oasis.opendocument.text',
+  },
+  {
+    mime: 'application/vnd.oasis.opendocument.spreadsheet',
+    label: 'ODS',
+    check: (buf) =>
+      buf.length >= 46 &&
+      buf.slice(0, 46).toString('ascii') ===
+        'application/vnd.oasis.opendocument.spreadsheet',
+  },
+  {
+    mime: 'application/vnd.oasis.opendocument.presentation',
+    label: 'ODP',
+    check: (buf) =>
+      buf.length >= 47 &&
+      buf.slice(0, 47).toString('ascii') ===
+        'application/vnd.oasis.opendocument.presentation',
   },
   {
     // W61: BMP — Windows Bitmap. Magic: "BM" at offset 0.
