@@ -28,10 +28,11 @@ LOG=$TESTDIR/server.log
 LOG2=$TESTDIR/server-restart.log
 PIDFILE=$TESTDIR/server.pid
 DB=$TESTDIR/.sbos.db
+SMOKE_BACKUP_DIR=$TESTDIR/backups
 
 # Reset test state
-mavis-trash "$DB" "$LOG" "$LOG2" 2>/dev/null
-mkdir -p "$TESTDIR"
+mavis-trash "$DB" "$LOG" "$LOG2" "$SMOKE_BACKUP_DIR" 2>/dev/null
+mkdir -p "$TESTDIR" "$SMOKE_BACKUP_DIR"
 cd "$TESTDIR"
 
 echo "=== STEP 1: Fresh state ==="
@@ -39,7 +40,7 @@ echo "=== STEP 1: Fresh state ==="
 echo
 
 echo "=== STEP 2: Boot server ==="
-PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG" 2>&1 &
+PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$PIDFILE"
 echo "PID=$SERVER_PID PORT=$PORT DB=$DB"
@@ -1864,6 +1865,128 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5r: Backup listing + validate (Wave 51) ==="
+# Smoke coverage for the new backup file list + validate endpoints.
+# - GET /api/rbac/backup returns 200 with items array
+# - POST /api/rbac/backup/validate rejects non-sqlite bytes (400)
+# - POST /api/rbac/backup/validate accepts a valid sqlite file (200)
+# - After the validate call, the new validate-*.db file is visible
+#   in the next GET /api/rbac/backup response (proves the file
+#   actually got saved to the backup dir).
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_BACKUP_DIR="$SMOKE_BACKUP_DIR" node -e "
+  const http = require('node:http');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { DatabaseSync } = require('node:sqlite');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = Buffer.alloc(0);
+        res.on('data', d => buf = Buffer.concat([buf, d]));
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed, raw: buf });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  function post(p, body, contentType) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: {
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': contentType,
+        'content-length': body ? body.length : 0,
+      },
+    }, body);
+  }
+
+  (async () => {
+    // 1. GET /api/rbac/backup returns 200 + items array.
+    // The dir may be empty or contain backups from prior runs.
+    const list1 = await get('/api/rbac/backup');
+    if (list1.status !== 200 || !Array.isArray(list1.body.items)) {
+      console.log('  FAIL GET /api/rbac/backup: status=' + list1.status + ' body=' + JSON.stringify(list1.body).slice(0, 100));
+      process.exit(1);
+    }
+    const beforeCount = list1.body.items.length;
+    console.log('  PASS 200 GET /api/rbac/backup returns items array (n=' + beforeCount + ')');
+
+    // 2. POST /api/rbac/backup/validate rejects non-sqlite bytes
+    // with 400 + {error: 'invalid_backup'}.
+    const bad = await post('/api/rbac/backup/validate', Buffer.from('not a sqlite file at all'), 'application/octet-stream');
+    if (bad.status !== 400 || bad.body.error !== 'invalid_backup') {
+      console.log('  FAIL validate garbage: status=' + bad.status + ' body=' + JSON.stringify(bad.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 400 POST /api/rbac/backup/validate rejects non-sqlite bytes (invalid_backup)');
+
+    // 3. POST /api/rbac/backup/validate accepts a valid sqlite file.
+    // Build a tiny sqlite db with one table + one row.
+    const tmpPath = path.join(os.tmpdir(), 'smoke-validate-' + Date.now() + '.db');
+    const h = new DatabaseSync(tmpPath);
+    h.exec('CREATE TABLE smoke (id INTEGER, name TEXT)');
+    h.prepare('INSERT INTO smoke VALUES (?, ?)').run(1, 'backup-test');
+    h.close();
+    const buf = fs.readFileSync(tmpPath);
+    fs.unlinkSync(tmpPath);
+
+    const ok = await post('/api/rbac/backup/validate', buf, 'application/octet-stream');
+    if (ok.status !== 200 || ok.body.ok !== true || ok.body.integrity !== 'ok') {
+      console.log('  FAIL validate valid: status=' + ok.status + ' body=' + JSON.stringify(ok.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (ok.body.table_count < 1) {
+      console.log('  FAIL validate valid: table_count=' + ok.body.table_count);
+      process.exit(1);
+    }
+    console.log('  PASS 200 POST /api/rbac/backup/validate accepts valid sqlite (integrity=ok, table_count=' + ok.body.table_count + ')');
+
+    // 4. After the validate call, the new file shows up in the
+    // GET /api/rbac/backup listing — proves the validate endpoint
+    // actually saved the file to the backup dir.
+    const list2 = await get('/api/rbac/backup');
+    if (list2.status !== 200 || !Array.isArray(list2.body.items)) {
+      console.log('  FAIL GET /api/rbac/backup (after): status=' + list2.status);
+      process.exit(1);
+    }
+    if (list2.body.items.length !== beforeCount + 1) {
+      console.log('  FAIL validate file visible: before=' + beforeCount + ' after=' + list2.body.items.length);
+      process.exit(1);
+    }
+    // The new item should be named validate-*.db.
+    const newest = list2.body.items[list2.body.items.length - 1];
+    if (!newest.filename || !newest.filename.startsWith('validate-')) {
+      console.log('  FAIL new file name pattern: got ' + newest.filename);
+      process.exit(1);
+    }
+    console.log('  PASS validate file visible in GET /api/rbac/backup (newest=' + newest.filename + ', size_bytes=' + newest.size_bytes + ')');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  backup list + validate OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
@@ -1884,7 +2007,7 @@ tail -8 "$LOG"
 echo
 
 echo "=== STEP 6: Restart (idempotency) ==="
-PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG2" 2>&1 &
+PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG2" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$PIDFILE"
 sleep 2

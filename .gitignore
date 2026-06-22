@@ -36,3 +36,7 @@ coverage/
 # TypeScript build info
 *.tsbuildinfo
 .sbos.db
+
+# Backup artifacts (Wave 51+)
+# $SBOS_BACKUP_DIR — runtime DB snapshots + validate uploads.
+backups/

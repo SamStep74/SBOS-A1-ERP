@@ -38,6 +38,8 @@
 //   POST   /api/rbac/approvals/:id/reject             (security.approval.decide)
 //   GET    /api/rbac/me/permissions                   (auth required) — return effective set
 //   POST   /api/rbac/backup                          (system.backup.run) — DR snapshot
+//   GET    /api/rbac/backup                          (system.backup.read) — list backups
+//   POST   /api/rbac/backup/validate                 (system.backup.run) — validate an uploaded backup
 //
 // The router expects to be registered with a Fastify app that has:
 //   - app.authenticate preHandler in place (sets request.user)
@@ -52,7 +54,14 @@ import {
   getParentChain,
 } from './roleMatrix.js';
 import { requirePermFastify, requireAnyPerm, resolveEffectivePermissions } from './guards.js';
-import { unlinkSync, readFileSync } from 'node:fs';
+import {
+  unlinkSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -733,6 +742,53 @@ function registerRbacRoutes(app, opts = {}) {
 
   // ───── Backup ─────
 
+  // GET /api/rbac/backup — list available backup files in the
+  // configured backup directory. Returns each file's name + size +
+  // mtime. Useful for the DR "what backups do I have?" drill-down
+  // before picking one to restore.
+  //
+  // Backup files live in $SBOS_BACKUP_DIR (default ./backups).
+  // Filenames follow the pattern sbos-backup-YYYY-MM-DD.db (the
+  // convention set by POST /api/rbac/backup). Files that don't
+  // match the pattern are ignored (operator-uploaded scratch files).
+  app.get(
+    '/api/rbac/backup',
+    { preHandler: requirePermFastify('system.backup.read') },
+    async (_request) => {
+      const backupDir = process.env.SBOS_BACKUP_DIR || './backups';
+      let files;
+      try {
+        const names = readdirSync(backupDir);
+        files = names
+          // Two file types live in the backup dir:
+          //  - sbos-backup-YYYY-MM-DD.db   (snapshot from POST /backup)
+          //  - validate-{random}.db        (uploaded file from
+          //    POST /backup/validate, kept for the operator to
+          //    inspect before committing to a restore)
+          // Both are visible to operators so they can audit what's
+          // been uploaded. Anything else (e.g. operator-dropped
+          // ad-hoc files) is hidden.
+          .filter(
+            (n) =>
+              /^sbos-backup-\d{4}-\d{2}-\d{2}\.db$/.test(n) ||
+              /^validate-[0-9a-f]{16}\.db$/.test(n),
+          )
+          .map((n) => {
+            const stat = statSync(join(backupDir, n));
+            return {
+              filename: n,
+              size_bytes: stat.size,
+              mtime: stat.mtime.toISOString(),
+            };
+          })
+          .sort((a, b) => b.mtime.localeCompare(a.mtime)); // newest first
+      } catch (_e) {
+        files = []; // dir doesn't exist yet (no backups taken)
+      }
+      return { items: files };
+    },
+  );
+
   // POST /api/rbac/backup — disaster-recovery snapshot. Uses
   // SQLite's VACUUM INTO to write a consistent point-in-time copy
   // of the entire database to a tmp file, then streams it to the
@@ -793,6 +849,107 @@ function registerRbacRoutes(app, opts = {}) {
       } finally {
         try { unlinkSync(tmpPath); } catch (_e) { /* best-effort */ }
       }
+    },
+  );
+
+  // POST /api/rbac/backup/validate — accept a backup file as raw
+  // bytes (Content-Type: application/octet-stream) and verify it's
+  // a valid sqlite database by opening it in a transient handle
+  // and running integrity_check. The file is saved to
+  // $SBOS_BACKUP_DIR/validate-{random}.db so the operator can
+  // inspect it before committing to a restore.
+  //
+  // Returns 200 with {ok: true, filename, size_bytes, integrity}
+  // (the integrity value is 'ok' on a healthy DB) or 400 on
+  // validation failure with the specific error.
+  //
+  // The endpoint does NOT actually restore the DB — that's a
+  // separate destructive operation. The validate endpoint is
+  // the "let me check this backup before I commit to it" step.
+  // Restoring requires a server restart (the live DB connection
+  // can't be swapped mid-process), which the operator can
+  // trigger manually after seeing the validate result.
+  app.post(
+    '/api/rbac/backup/validate',
+    { preHandler: requirePermFastify('system.backup.run') },
+    async (request, reply) => {
+      // Read the raw body. The body-parser middleware (express.json
+      // at /index.js) doesn't handle raw bytes; we need to read
+      // from the underlying request stream.
+      const chunks = [];
+      const contentType = String(request.headers['content-type'] || '');
+      if (!/^application\/octet-stream\b/.test(contentType)) {
+        return reply.code(415).send({
+          error: 'unsupported_media_type',
+          message: 'Content-Type must be application/octet-stream',
+        });
+      }
+      for await (const chunk of request.raw || []) {
+        chunks.push(chunk);
+      }
+      const body = Buffer.concat(chunks);
+      if (body.length === 0) {
+        return reply.code(400).send({ error: 'empty_body' });
+      }
+      // Magic-string check: a valid sqlite file starts with
+      // 'SQLite format 3\0' (16 bytes).
+      if (body.length < 16 || body.slice(0, 16).toString('utf8') !== 'SQLite format 3\u0000') {
+        return reply.code(400).send({
+          error: 'invalid_backup',
+          message: 'file does not start with the SQLite magic string',
+        });
+      }
+      // Save to a tmp file inside the backup dir so the operator
+      // can inspect it + it's available for the eventual restore.
+      const backupDir = process.env.SBOS_BACKUP_DIR || './backups';
+      // Ensure the dir exists — the GET /api/rbac/backup endpoint
+      // is happy with a missing dir (returns empty list), but the
+      // validate endpoint writes to it so we need to create it on
+      // demand. recursive: true is a no-op if the dir already exists.
+      mkdirSync(backupDir, { recursive: true });
+      const tmpName = `validate-${randomBytes(8).toString('hex')}.db`;
+      const tmpPath = join(backupDir, tmpName);
+      writeFileSync(tmpPath, body);
+      // Open it in a transient handle + run integrity_check.
+      // We use the underlying better-sqlite3-compatible API via
+      // the existing node:sqlite DatabaseSync. The handle is
+      // scoped to this function so it closes when the route
+      // returns (no leak).
+      let integrity;
+      let tableCount;
+      try {
+        const { DatabaseSync } = await import('node:sqlite');
+        const handle = new DatabaseSync(tmpPath);
+        try {
+          const integrityRow = handle.prepare('PRAGMA integrity_check').get();
+          integrity = (integrityRow && integrityRow.integrity_check) || 'unknown';
+          const tables = handle.prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'",
+          ).get();
+          tableCount = Number(tables.n || 0);
+        } finally {
+          handle.close();
+        }
+      } catch (err) {
+        return reply.code(400).send({
+          error: 'integrity_check_failed',
+          message: err && err.message ? err.message : 'unable to open as sqlite',
+        });
+      }
+      if (integrity !== 'ok') {
+        return reply.code(400).send({
+          error: 'integrity_check_failed',
+          integrity,
+          message: `integrity_check returned: ${integrity}`,
+        });
+      }
+      return reply.code(200).send({
+        ok: true,
+        filename: tmpName,
+        size_bytes: body.length,
+        table_count: tableCount,
+        integrity,
+      });
     },
   );
 

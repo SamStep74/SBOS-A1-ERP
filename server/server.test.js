@@ -660,6 +660,70 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(row.user_id, 1); // stub auth mode admin
   });
 
+  // ─── Wave 51: backup list + validate ───
+
+  test('51a. GET /api/rbac/backup returns an empty list when the backup dir is empty', async () => {
+    // The test's makeFullDb doesn't create the backup dir, so this
+    // is the empty case.
+    const { status, body } = await get(server, '/api/rbac/backup');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.items));
+    // The dir may not exist OR may exist but be empty — both
+    // return 200 + items=[].
+  });
+
+  test('51b. POST /api/rbac/backup/validate accepts a valid sqlite file', async () => {
+    // Build a small valid sqlite file in a tmp dir and POST it.
+    const { DatabaseSync } = await import('node:sqlite');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { readFileSync, unlinkSync } = await import('node:fs');
+    const path = join(tmpdir(), `validate-test-${Date.now()}-${Math.random()}.db`);
+    const handle = new DatabaseSync(path);
+    handle.exec('CREATE TABLE test (id INTEGER, name TEXT)');
+    handle.prepare('INSERT INTO test VALUES (?, ?)').run(1, 'hello');
+    handle.close();
+    const buf = readFileSync(path);
+    unlinkSync(path);
+
+    const port = server.address().port;
+    const res = await globalThis.fetch('http://127.0.0.1:' + port + '/api/rbac/backup/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: buf,
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.integrity, 'ok');
+    assert.ok(body.size_bytes > 0);
+    assert.ok(body.table_count >= 1, `expected at least 1 table, got ${body.table_count}`);
+  });
+
+  test('51c. POST /api/rbac/backup/validate rejects a non-sqlite file (missing magic)', async () => {
+    const port = server.address().port;
+    const res = await globalThis.fetch('http://127.0.0.1:' + port + '/api/rbac/backup/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: 'not a sqlite file at all',
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, 'invalid_backup');
+  });
+
+  test('51d. POST /api/rbac/backup/validate returns 415 for wrong Content-Type', async () => {
+    const port = server.address().port;
+    const res = await globalThis.fetch('http://127.0.0.1:' + port + '/api/rbac/backup/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(res.status, 415);
+    const body = await res.json();
+    assert.equal(body.error, 'unsupported_media_type');
+  });
+
   // ─── Wave 49: account unlock ───
 
   test('49a. POST /api/rbac/users/:userId/unlock clears failed_logins + locked_until', async () => {

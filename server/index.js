@@ -148,6 +148,12 @@ function makeFastifyFacade(expressApp, { db }) {
           body: req.body,
           headers: req.headers,
           ip: req.ip,
+          // Expose the raw IncomingMessage so routes that need to
+          // read non-JSON request bodies (e.g. POST a sqlite file as
+          // application/octet-stream for /api/rbac/backup/validate)
+          // can iterate the stream. express.json() skips non-JSON
+          // content types so the stream is still readable here.
+          raw: req,
         };
         // Build a Fastify-shaped `reply`.
         let sent = false;
@@ -210,6 +216,7 @@ function makeFastifyFacade(expressApp, { db }) {
         body: req.body,
         headers: req.headers,
         ip: req.ip,
+        raw: req,
       };
       let sent = false;
       let statusCode = 200;
