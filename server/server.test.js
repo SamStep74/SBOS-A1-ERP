@@ -1761,6 +1761,127 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(remaining.n, 2);
   });
 
+  // ─── Wave 61: extended file-type detection (BMP, TIFF, WEBP, ICO, MP4, MOV, AVI) ───
+
+  test('61a. POST attachment with real BMP bytes + image/bmp claim is accepted', async () => {
+    // BMP magic = 0x42 0x4D ("BM") at offset 0.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x42, 0x4d]),
+      Buffer.alloc(50, 0xff),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w61_bmp.bmp',
+          'x-mime-type': 'image/bmp',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201, `expected 201 got ${r.status}`);
+  });
+
+  test('61b. POST attachment with MP4 bytes + video/mp4 claim is accepted', async () => {
+    // MP4 = ftyp at offset 4 + isom brand at offset 8.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x20]),
+      Buffer.from('ftyp'),
+      Buffer.from('isom'),
+      Buffer.alloc(20, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w61_mp4.mp4',
+          'x-mime-type': 'video/mp4',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201);
+  });
+
+  test('61c. POST attachment with WEBP bytes claimed as image/png is REJECTED', async () => {
+    // WEBP bytes (RIFF + WEBP brand) claimed as PNG.
+    // The verifyMimeType check should reject the mismatch.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from('RIFF'),
+      Buffer.alloc(4, 0x10),
+      Buffer.from('WEBP'),
+      Buffer.alloc(20, 0xff),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w61_webp_as_png.webp',
+          'x-mime-type': 'image/png',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400, 'webp-claimed-as-png must be rejected');
+  });
+
+  test('61d. POST attachment with MP4 bytes claimed as video/quicktime is REJECTED', async () => {
+    // MP4 (isom brand) claimed as MOV (qt  brand) is a
+    // smuggling attempt. The isom brand makes the bytes MP4,
+    // not MOV; verifyMimeType must reject.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x20]),
+      Buffer.from('ftyp'),
+      Buffer.from('isom'),
+      Buffer.alloc(20, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w61_mp4_as_mov.mp4',
+          'x-mime-type': 'video/quicktime',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400, 'mp4-claimed-as-mov must be rejected');
+  });
+
+  test('61e. POST attachment with TIFF little-endian bytes + image/tiff is accepted', async () => {
+    // TIFF LE = II*\0 (0x49 0x49 0x2A 0x00).
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x49, 0x49, 0x2a, 0x00]),
+      Buffer.alloc(20, 0x00),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w61_tiff_le.tiff',
+          'x-mime-type': 'image/tiff',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201);
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

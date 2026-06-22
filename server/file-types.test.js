@@ -141,3 +141,113 @@ test('verifyMimeType: PNG bytes falsely claimed as PDF are rejected', () => {
   assert.equal(pngAsPdf.matches, false);
   assert.equal(pngAsPdf.detected, 'image/png');
 });
+
+// ─── W61: extended file-type coverage (images + video) ───
+
+// BMP — Windows Bitmap. Magic: "BM" (0x42 0x4D) at offset 0.
+const BMP = Buffer.concat([Buffer.from([0x42, 0x4d]), Buffer.alloc(50, 0xff)]);
+
+// TIFF — little-endian (II*\0) and big-endian (MM\0*).
+const TIFF_LE = Buffer.concat([Buffer.from([0x49, 0x49, 0x2a, 0x00]), Buffer.alloc(20, 0)]);
+const TIFF_BE = Buffer.concat([Buffer.from([0x4d, 0x4d, 0x00, 0x2a]), Buffer.alloc(20, 0)]);
+
+// WEBP — RIFF container with WEBP brand at offset 8.
+const WEBP = Buffer.concat([
+  Buffer.from('RIFF'),
+  Buffer.alloc(4, 0x10),     // file size (placeholder)
+  Buffer.from('WEBP'),
+  Buffer.from('VP8 '),       // sub-chunk
+  Buffer.alloc(20, 0xff),
+]);
+
+// ICO — Windows icon. Magic: \x00\x00\x01\x00.
+const ICO = Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), Buffer.alloc(40, 0)]);
+
+// MP4 — ISO base media file format. ftyp at offset 4 + 'isom' brand.
+// Layout: [size:4][ftyp:4][brand:4][...]
+const MP4 = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x20]),     // size
+  Buffer.from('ftyp'),
+  Buffer.from('isom'),                       // brand
+  Buffer.alloc(20, 0x00),
+]);
+
+// MOV — QuickTime. Same ftyp layout but brand is 'qt  '.
+const MOV = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x20]),
+  Buffer.from('ftyp'),
+  Buffer.from('qt  '),
+  Buffer.alloc(20, 0x00),
+]);
+
+// AVI — RIFF container with AVI brand at offset 8.
+const AVI = Buffer.concat([
+  Buffer.from('RIFF'),
+  Buffer.alloc(4, 0x10),
+  Buffer.from('AVI '),
+  Buffer.from('LIST'),
+  Buffer.alloc(20, 0xff),
+]);
+
+test('detectMimeType: BMP', () => {
+  assert.equal(detectMimeType(BMP), 'image/bmp');
+});
+test('detectMimeType: TIFF (little-endian)', () => {
+  assert.equal(detectMimeType(TIFF_LE), 'image/tiff');
+});
+test('detectMimeType: TIFF (big-endian)', () => {
+  assert.equal(detectMimeType(TIFF_BE), 'image/tiff');
+});
+test('detectMimeType: WEBP', () => {
+  assert.equal(detectMimeType(WEBP), 'image/webp');
+});
+test('detectMimeType: ICO', () => {
+  assert.equal(detectMimeType(ICO), 'image/x-icon');
+});
+test('detectMimeType: MP4 (isom brand)', () => {
+  assert.equal(detectMimeType(MP4), 'video/mp4');
+});
+test('detectMimeType: MOV (qt  brand)', () => {
+  assert.equal(detectMimeType(MOV), 'video/quicktime');
+});
+test('detectMimeType: AVI', () => {
+  assert.equal(detectMimeType(AVI), 'video/x-msvideo');
+});
+
+test('verifyMimeType: BMP claimed as JPEG is rejected', () => {
+  const r = verifyMimeType(BMP, 'image/jpeg');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'image/bmp');
+});
+test('verifyMimeType: MP4 claimed as image/png is rejected', () => {
+  const r = verifyMimeType(MP4, 'image/png');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'video/mp4');
+});
+test('verifyMimeType: AVI bytes claimed as video/quicktime is rejected', () => {
+  const r = verifyMimeType(AVI, 'video/quicktime');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'video/x-msvideo');
+});
+test('verifyMimeType: real MP4 claimed as video/mp4 is accepted', () => {
+  const r = verifyMimeType(MP4, 'video/mp4');
+  assert.equal(r.matches, true);
+  assert.equal(r.detected, 'video/mp4');
+});
+
+test('detectMimeType: listKnownTypes includes the new W61 types', () => {
+  // Smoke check: every new type is exposed in the catalog
+  // so operators / docs can see what's supported.
+  const known = listKnownTypes().map((t) => t.mime);
+  for (const m of [
+    'image/bmp',
+    'image/tiff',
+    'image/webp',
+    'image/x-icon',
+    'video/mp4',
+    'video/quicktime',
+    'video/x-msvideo',
+  ]) {
+    assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
+  }
+});

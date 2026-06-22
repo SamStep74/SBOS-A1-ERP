@@ -3162,6 +3162,146 @@ else
 fi
 echo
 
+echo "=== STEP 5ab: Extended file-type detection (Wave 61) ==="
+# Smoke coverage for the W61 extension: BMP, TIFF, WEBP, ICO,
+# MP4, MOV, AVI. We verify that:
+#   1. Real BMP bytes claimed as image/bmp is accepted (201)
+#   2. Real MP4 bytes claimed as video/mp4 is accepted (201)
+#   3. Real TIFF LE bytes claimed as image/tiff is accepted (201)
+#   4. Real WEBP bytes claimed as image/png is REJECTED (400)
+#   5. MP4 bytes claimed as video/quicktime is REJECTED (400)
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS_DIR" node -e '
+  const http = require("node:http");
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function postRaw(p, body, headers) {
+    return req({
+      host: "127.0.0.1", port: Number(process.env.PORT),
+      path: p, method: "POST",
+      headers: Object.assign({
+        "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+        "content-type": "application/octet-stream",
+        "content-length": body ? body.length : 0,
+      }, headers || {}),
+    }, body);
+  }
+
+  (async () => {
+    // Find an invoice id (smoke creates several earlier).
+    const listRes = await req({
+      host: "127.0.0.1", port: Number(process.env.PORT),
+      path: "/api/finance/invoices?limit=1", method: "GET",
+      headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+    });
+    if (listRes.status !== 200 || !listRes.body.items || listRes.body.items.length === 0) {
+      console.log("  FAIL no invoices available");
+      process.exit(1);
+    }
+    const invoiceId = listRes.body.items[0].id;
+
+    // 1) BMP accepted
+    const bmp = Buffer.concat([Buffer.from([0x42, 0x4d]), Buffer.alloc(50, 0xff)]);
+    const r1 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      bmp,
+      { "x-filename": "w61_smoke.bmp", "x-mime-type": "image/bmp" },
+    );
+    if (r1.status !== 201) {
+      console.log("  FAIL BMP accepted expected 201 got " + r1.status);
+      process.exit(1);
+    }
+    console.log("  BMP accepted");
+
+    // 2) MP4 accepted
+    const mp4 = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x20]),
+      Buffer.from("ftyp"),
+      Buffer.from("isom"),
+      Buffer.alloc(20, 0x00),
+    ]);
+    const r2 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      mp4,
+      { "x-filename": "w61_smoke.mp4", "x-mime-type": "video/mp4" },
+    );
+    if (r2.status !== 201) {
+      console.log("  FAIL MP4 accepted expected 201 got " + r2.status);
+      process.exit(1);
+    }
+    console.log("  MP4 accepted");
+
+    // 3) TIFF LE accepted
+    const tiff = Buffer.concat([
+      Buffer.from([0x49, 0x49, 0x2a, 0x00]),
+      Buffer.alloc(20, 0x00),
+    ]);
+    const r3 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      tiff,
+      { "x-filename": "w61_smoke.tiff", "x-mime-type": "image/tiff" },
+    );
+    if (r3.status !== 201) {
+      console.log("  FAIL TIFF accepted expected 201 got " + r3.status);
+      process.exit(1);
+    }
+    console.log("  TIFF accepted");
+
+    // 4) WEBP claimed as PNG is REJECTED
+    const webp = Buffer.concat([
+      Buffer.from("RIFF"),
+      Buffer.alloc(4, 0x10),
+      Buffer.from("WEBP"),
+      Buffer.alloc(20, 0xff),
+    ]);
+    const r4 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      webp,
+      { "x-filename": "w61_smoke.webp", "x-mime-type": "image/png" },
+    );
+    if (r4.status !== 400) {
+      console.log("  FAIL webp-claimed-as-png expected 400 got " + r4.status);
+      process.exit(1);
+    }
+    console.log("  webp-claimed-as-png rejected");
+
+    // 5) MP4 claimed as MOV is REJECTED
+    const r5 = await postRaw(
+      `/api/finance/invoices/${invoiceId}/attachments`,
+      mp4,
+      { "x-filename": "w61_smoke.mp4", "x-mime-type": "video/quicktime" },
+    );
+    if (r5.status !== 400) {
+      console.log("  FAIL mp4-claimed-as-mov expected 400 got " + r5.status);
+      process.exit(1);
+    }
+    console.log("  mp4-claimed-as-mov rejected");
+
+    console.log("  OK extended file-type detection");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  extended file-type detection OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
