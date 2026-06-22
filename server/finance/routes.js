@@ -252,6 +252,7 @@ import {
   toggleReportSchedule,
   recordReportExecution,
   listReportExecutions,
+  resetScheduleRetries,
 } from './reportScheduler.js';
 import { runReportNow } from './scheduleRunner.js';
 import {
@@ -3383,6 +3384,28 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const enabled = Number(req.body?.enabled ?? 1);
       const out = await toggleReportSchedule(pgAdapter, id, { enabled }, tenantId);
+      res.status(200).json(out);
+    } catch (err) {
+      if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {
+        return res.status(404).json({ error: 'not_found', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // POST /api/finance/reports/schedules/:id/reset-retries
+  //   Clears the schedule's retry state (W105-1): retry_count=0,
+  //   last_retry_at=null, next_run_at=NOW. Used by the operator
+  //   to manually trigger a retry after a schedule was
+  //   "exhausted" by the W105-1 retry mechanism.
+  //
+  //   Returns 200 with the updated schedule.
+  //   Returns 404 if the schedule doesn't exist.
+  app.post('/api/finance/reports/schedules/:id/reset-retries', requireTenant, requirePerm('reports.dashboard.read'), async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const tenantId = req.tenantId;
+      const out = await resetScheduleRetries(pgAdapter, id, tenantId);
       res.status(200).json(out);
     } catch (err) {
       if (err && err.name === 'ValueError' && /not found in tenant/i.test(err.message)) {

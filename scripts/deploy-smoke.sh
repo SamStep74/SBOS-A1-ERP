@@ -3858,6 +3858,100 @@ fi
 
 
 
+echo "=== STEP 7p3: Report schedule retry (W105-1) ==="
+# Tests the W105-1 retry mechanism. The schedule is created
+# with max_retries=2, then we POST /reset-retries (which
+# also serves as a smoke for the new endpoint). The
+# schedule's retry_count + last_retry_at should be cleared
+# + next_run_at bumped to ~NOW.
+LOG7P3="$TESTDIR/server-7p3.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7P3" 2>&1 &
+SERVER_PID_7P3=$!
+SMOKE_RC=0
+cleanup_7p3() { kill -9 $SERVER_PID_7P3 2>/dev/null; wait $SERVER_PID_7P3 2>/dev/null; }
+trap cleanup_7p3 EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7p3"
+    tail -20 "$LOG7P3"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7P3=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7P3" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7P3" ]; then
+    echo "  FAIL: STEP 7p3 server did not print admin session token"
+    tail -20 "$LOG7P3"
+    SMOKE_RC=1
+  else
+    # Create a schedule with max_retries=2
+    CREATE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7P3" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"Retry smoke","report_type":"data_quality","cron_expression":"0 9 * * 1","max_retries":2}')
+    SCHED_ID=$(echo "$CREATE_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -z "$SCHED_ID" ]; then
+      echo "  FAIL: create schedule returned no id: $CREATE_OUT"
+      SMOKE_RC=1
+    else
+      # Verify the schedule was created with max_retries=2
+      MAX_RT=$(sqlite3 "$DB" "SELECT max_retries FROM report_schedules WHERE id = $SCHED_ID;" 2>/dev/null)
+      if [ "$MAX_RT" = "2" ]; then
+        echo "  OK setup: schedule created with max_retries=2"
+      else
+        echo "  FAIL: max_retries is '$MAX_RT', expected '2'"
+        SMOKE_RC=1
+      fi
+
+      # Manually set the schedule into a "retry cycle" state
+      sqlite3 "$DB" "UPDATE report_schedules SET retry_count = 2, last_retry_at = '2026-06-22T10:00:00', next_run_at = '2026-06-22T10:05:00' WHERE id = $SCHED_ID;" 2>/dev/null
+
+      # POST /reset-retries
+      RESET_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules/$SCHED_ID/reset-retries" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7P3" -H "X-Tenant-Id: 0")
+      if echo "$RESET_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['retry_count'] == 0, f'expected retry_count=0, got {d[\"retry_count\"]}'
+assert d['last_retry_at'] is None, f'expected last_retry_at=null, got {d[\"last_retry_at\"]}'
+# next_run_at should be approximately NOW
+from datetime import datetime, timezone
+now_ms = datetime.now(timezone.utc).timestamp() * 1000
+next_ms = datetime.fromisoformat(d['next_run_at'].replace('Z', '+00:00')).timestamp() * 1000
+diff = abs(next_ms - now_ms)
+assert diff < 5000, f'next_run_at too far from NOW: diff={diff}ms'
+print('OK')
+" 2>/dev/null; then
+        echo "  OK reset-retries: retry_count=0, last_retry_at=null, next_run_at~=NOW"
+      else
+        echo "  FAIL: reset-retries response: $RESET_OUT"
+        SMOKE_RC=1
+      fi
+
+      # 404 on non-existent schedule
+      NOT_FOUND=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules/99999/reset-retries" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7P3" -H "X-Tenant-Id: 0")
+      if [ "$NOT_FOUND" = "404" ]; then
+        echo "  OK reset-retries non-existent schedule returns 404"
+      else
+        echo "  FAIL: reset-retries non-existent returned $NOT_FOUND (expected 404)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7P3 2>/dev/null
+wait $SERVER_PID_7P3 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 echo "=== STEP 7p2: Scheduler concurrency guard (W104-1) ==="
 # Tests the W104-1 concurrency guard + observability. The
 # scheduler worker has an inProgress flag that prevents

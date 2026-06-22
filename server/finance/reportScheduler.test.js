@@ -1,4 +1,5 @@
 // Phase 3 reporting wave 3 (W96-1) — scheduled report tests.
+// Phase 3 reporting wave 8 (W105-1) — retry tests.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +10,7 @@ import {
   toggleReportSchedule,
   recordReportExecution,
   listReportExecutions,
+  resetScheduleRetries,
   ValueError,
 } from './reportScheduler.js';
 
@@ -28,6 +30,11 @@ function makeMockDb() {
     const s = sql.trim().toUpperCase();
     if (/INTO\s+FINANCE\.REPORT_SCHEDULES/i.test(s) && /RETURNING/i.test(s)) return 'sched-insert';
     if (/INTO\s+FINANCE\.REPORT_EXECUTIONS/i.test(s) && /RETURNING/i.test(s)) return 'exec-insert';
+    // W105-1: resetScheduleRetries issues an UPDATE with
+    // "RETRY_COUNT = 0" in the SET clause. The mock
+    // matches this BEFORE the generic 'sched-update' so
+    // the params are read in the right order.
+    if (/UPDATE\s+FINANCE\.REPORT_SCHEDULES/i.test(s) && /RETRY_COUNT\s*=\s*0/i.test(s)) return 'sched-retry-reset';
     if (/UPDATE\s+FINANCE\.REPORT_SCHEDULES/i.test(s)) return 'sched-update';
     // getReportSchedule: SELECT * FROM ... WHERE id = $1 AND tenant_id = $2
     // (more specific than the list query — the list has only
@@ -46,6 +53,8 @@ function makeMockDb() {
 
     if (kind === 'sched-insert') {
       const id = nextId(schedules);
+      // W105-1: the INSERT now has 11 columns (max_retries
+      // was added as the 11th). The mock reads by position.
       schedules.set(id, {
         id,
         tenant_id: Number(ps[0]),
@@ -56,6 +65,15 @@ function makeMockDb() {
         params: ps[5] ?? null,
         notify_email: ps[6] ?? null,
         created_by: ps[7] != null ? Number(ps[7]) : null,
+        // W105-1: the old INSERT had 10 columns; the new
+        // one has 11 (max_retries). The mock previously
+        // didn't read ps[8] and ps[9] (notify_webhook_*);
+        // it does now (see the production INSERT).
+        notify_webhook_url: ps[8] ?? null,
+        notify_webhook_secret: ps[9] ?? null,
+        max_retries: ps[10] != null ? Number(ps[10]) : 3,
+        retry_count: 0,
+        last_retry_at: null,
         last_run_at: null,
         next_run_at: null,
         created_at: '2026-01-01',
@@ -89,6 +107,23 @@ function makeMockDb() {
       const sched = schedules.get(scheduleId);
       if (sched && sched.tenant_id === tenantId) {
         sched.enabled = enabled;
+        sched.updated_at = '2026-01-02';
+        return { rows: [], changes: 1 };
+      }
+      return { rows: [], changes: 0 };
+    }
+    if (kind === 'sched-retry-reset') {
+      // resetScheduleRetries: UPDATE retry_count=0,
+      // last_retry_at=NULL, next_run_at=$1 WHERE id=$2 AND tenant_id=$3
+      // params: [next_run_at, id, tenant_id]
+      const nextRunAt = ps[0];
+      const scheduleId = Number(ps[1]);
+      const tenantId = Number(ps[2]);
+      const sched = schedules.get(scheduleId);
+      if (sched && sched.tenant_id === tenantId) {
+        sched.retry_count = 0;
+        sched.last_retry_at = null;
+        sched.next_run_at = nextRunAt;
         sched.updated_at = '2026-01-02';
         return { rows: [], changes: 1 };
       }
@@ -350,4 +385,95 @@ test('reportScheduler: listReportExecutions filters by scheduleId + status', asy
   const failedAll = await listReportExecutions(db, 0, { status: 'failed' });
   assert.equal(failedAll.length, 1);
   assert.equal(failedAll[0].schedule_id, s1.id);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// W105-1: resetScheduleRetries
+// ────────────────────────────────────────────────────────────────────────
+
+test('resetScheduleRetries: clears retry_count + last_retry_at + bumps next_run_at', async () => {
+  const db = makeMockDb();
+  // Create a schedule with retry state set
+  const { id } = await createReportSchedule(
+    db,
+    {
+      name: 'Retry smoke',
+      report_type: 'ar_aging',
+      cron_expression: '0 9 * * 1',
+      max_retries: 3,
+    },
+    0,
+  );
+  // Manually mutate the schedule to simulate a retry
+  // cycle (retry_count=2, last_retry_at set, next_run_at
+  // in the past). We do this via the mock's setters.
+  const sched = db._db.schedules.get(id);
+  sched.retry_count = 2;
+  sched.last_retry_at = '2026-06-22T10:00:00.000Z';
+  sched.next_run_at = '2026-06-22T10:05:00.000Z';
+
+  // Now reset
+  const result = await resetScheduleRetries(db, id, 0);
+  assert.equal(result.retry_count, 0);
+  assert.equal(result.last_retry_at, null);
+  // next_run_at is bumped to NOW (approximately)
+  const nextRunMs = new Date(result.next_run_at).getTime();
+  const nowMs = Date.now();
+  assert.ok(Math.abs(nextRunMs - nowMs) < 5000);
+});
+
+test('resetScheduleRetries: 404 on non-existent schedule', async () => {
+  const db = makeMockDb();
+  await assert.rejects(
+    resetScheduleRetries(db, 99999, 0),
+    /not found/,
+  );
+});
+
+test('createReportSchedule: accepts max_retries parameter (default 3)', async () => {
+  const db = makeMockDb();
+  // Default
+  const def = await createReportSchedule(
+    db,
+    { name: 'A', report_type: 'ar_aging', cron_expression: '0 9 * * 1' },
+    0,
+  );
+  const defRow = db._db.schedules.get(def.id);
+  assert.equal(defRow.max_retries, 3);
+  // Custom
+  const custom = await createReportSchedule(
+    db,
+    { name: 'B', report_type: 'ar_aging', cron_expression: '0 9 * * 1', max_retries: 5 },
+    0,
+  );
+  const customRow = db._db.schedules.get(custom.id);
+  assert.equal(customRow.max_retries, 5);
+  // Zero (disable retry)
+  const zero = await createReportSchedule(
+    db,
+    { name: 'C', report_type: 'ar_aging', cron_expression: '0 9 * * 1', max_retries: 0 },
+    0,
+  );
+  const zeroRow = db._db.schedules.get(zero.id);
+  assert.equal(zeroRow.max_retries, 0);
+});
+
+test('createReportSchedule: rejects invalid max_retries', async () => {
+  const db = makeMockDb();
+  await assert.rejects(
+    createReportSchedule(
+      db,
+      { name: 'A', report_type: 'ar_aging', cron_expression: '0 9 * * 1', max_retries: 11 },
+      0,
+    ),
+    /max_retries must be/,
+  );
+  await assert.rejects(
+    createReportSchedule(
+      db,
+      { name: 'A', report_type: 'ar_aging', cron_expression: '0 9 * * 1', max_retries: -1 },
+      0,
+    ),
+    /max_retries must be/,
+  );
 });

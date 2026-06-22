@@ -120,6 +120,15 @@ function validateCreateReportScheduleInput(input) {
   if (input.created_by !== undefined && input.created_by !== null) {
     assertPositiveInt(input.created_by, 'created_by');
   }
+  // W105-1: max_retries per schedule. 0 disables retry
+  // (the original W97-1 behavior — wait for the next cron
+  // fire). Default 3. Cap at 10 to prevent pathological
+  // settings.
+  if (input.max_retries !== undefined && input.max_retries !== null) {
+    if (!Number.isInteger(input.max_retries) || input.max_retries < 0 || input.max_retries > 10) {
+      throw new ValueError('max_retries must be an integer between 0 and 10');
+    }
+  }
 }
 
 function validateRecordReportExecutionInput(input) {
@@ -168,8 +177,9 @@ export async function createReportSchedule(db, input, tenantId = 0) {
     db,
     `INSERT INTO finance.report_schedules
        (tenant_id, name, report_type, cron_expression,
-        enabled, params, notify_email, notify_webhook_url, notify_webhook_secret, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        enabled, params, notify_email, notify_webhook_url, notify_webhook_secret,
+        created_by, max_retries)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id`,
     [
       tenantId,
@@ -182,6 +192,7 @@ export async function createReportSchedule(db, input, tenantId = 0) {
       input.notify_webhook_url ?? null,
       input.notify_webhook_secret ?? null,
       input.created_by ?? null,
+      input.max_retries ?? 3,
     ],
   );
   let id;
@@ -245,6 +256,7 @@ export async function getReportSchedule(db, scheduleId, tenantId = 0) {
             enabled, params, notify_email,
             notify_webhook_url, notify_webhook_secret,
             last_run_at, next_run_at,
+            retry_count, max_retries, last_retry_at,
             created_by, created_at, updated_at
        FROM finance.report_schedules
       WHERE id = $1 AND tenant_id = $2`,
@@ -398,5 +410,44 @@ export async function listReportExecutions(
       [tenantId],
     );
   }
-  return result.rows;
+  return result.rows || [];
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// resetScheduleRetries (W105-1) — clear the retry state.
+//
+// The retry mechanism (in tickOnce) bumps retry_count
+// after a failed run, with exponential backoff. After
+// max_retries, the schedule is "exhausted" and waits
+// for the next cron fire. The operator can use this
+// function to manually clear the retry state and
+// trigger an immediate retry.
+//
+// What it does:
+//   1. retry_count = 0
+//   2. last_retry_at = NULL
+//   3. next_run_at = now (so the next tick fires immediately)
+//
+// Returns the updated schedule row. 404 if the schedule
+// doesn't exist in the tenant.
+export async function resetScheduleRetries(db, scheduleId, tenantId = 0) {
+  assertPositiveInt(scheduleId, 'scheduleId');
+  assertTenantId(tenantId);
+  // Verify the schedule exists (raises ValueError if not).
+  // We do this BEFORE the update so we return a clean 404
+  // for missing schedules.
+  await getReportSchedule(db, scheduleId, tenantId);
+  const now = new Date().toISOString();
+  await runQuery(
+    db,
+    `UPDATE finance.report_schedules
+        SET retry_count = 0,
+            last_retry_at = NULL,
+            next_run_at = $1,
+            updated_at = datetime('now')
+      WHERE id = $2 AND tenant_id = $3`,
+    [now, scheduleId, tenantId],
+  );
+  // Return the updated row.
+  return await getReportSchedule(db, scheduleId, tenantId);
 }

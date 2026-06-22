@@ -218,6 +218,34 @@ export function computeNextRunAt(expression, now) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Retry backoff (W105-1).
+//
+// Returns the backoff interval (in ms) for retry #N
+// (N is 1-indexed: retry_count=1 means the first retry
+// after a failure). The schedule uses exponential
+// backoff capped at the last entry: 1m, 5m, 15m.
+//
+// The cap is intentional: a weekly schedule that
+// fails every retry attempt will see the retry
+// resolve after 1+5+15 = 21 minutes total, well within
+// the operator's "is this thing broken?" attention
+// window. Without the cap, an unbounded exponential
+// would push the retry to hours away.
+const RETRY_BACKOFFS_MS = Object.freeze([
+  60_000,        // 1 minute
+  5 * 60_000,    // 5 minutes
+  15 * 60_000,   // 15 minutes
+]);
+
+export function computeRetryBackoffMs(retryCount) {
+  if (!Number.isInteger(retryCount) || retryCount < 1) {
+    return RETRY_BACKOFFS_MS[0];
+  }
+  const idx = Math.min(retryCount - 1, RETRY_BACKOFFS_MS.length - 1);
+  return RETRY_BACKOFFS_MS[idx];
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Report dispatch
 // ────────────────────────────────────────────────────────────────────────
 
@@ -492,20 +520,67 @@ export async function tickOnce(
       }
     }
     // Update next_run_at.
-    let nextNextRun = null;
-    try {
-      nextNextRun = computeNextRunAt(sched.cron_expression, completedAt);
-    } catch (e) {
-      console.error('[scheduler] computeNextRunAt failed:', e && e.message ? e.message : e);
+    //
+    // W105-1: retry logic. If the run failed and the
+    // schedule has max_retries > 0, bump next_run_at to
+    // the next backoff interval (1m, 5m, 15m) and
+    // increment retry_count. If the run succeeded, reset
+    // retry_count to 0. If the run failed but retry_count
+    // is at the cap, fall through to the normal cron
+    // cadence (the schedule is "exhausted"; the operator
+    // can reset via resetScheduleRetries).
+    let nextNextRun;
+    let nextRetryCount;
+    let nextLastRetryAt;
+    if (status === 'failed') {
+      const maxRetries = Number(sched.max_retries ?? 3);
+      const currentRetryCount = Number(sched.retry_count ?? 0);
+      if (currentRetryCount < maxRetries) {
+        // Schedule a retry: bump next_run_at to NOW + backoff.
+        const newRetryCount = currentRetryCount + 1;
+        const backoffMs = computeRetryBackoffMs(newRetryCount);
+        const retryAt = new Date(completedAt.getTime() + backoffMs);
+        nextNextRun = retryAt;
+        nextRetryCount = newRetryCount;
+        nextLastRetryAt = completedAt;
+      } else {
+        // Schedule exhausted; fall through to the normal
+        // cron fire. The operator can reset.
+        try {
+          nextNextRun = computeNextRunAt(sched.cron_expression, completedAt);
+        } catch (e) {
+          console.error('[scheduler] computeNextRunAt failed:', e && e.message ? e.message : e);
+        }
+        nextRetryCount = currentRetryCount;
+        nextLastRetryAt = completedAt;
+      }
+    } else {
+      // Successful run: reset retry_count + bump next_run_at
+      // to the next cron fire.
+      try {
+        nextNextRun = computeNextRunAt(sched.cron_expression, completedAt);
+      } catch (e) {
+        console.error('[scheduler] computeNextRunAt failed:', e && e.message ? e.message : e);
+      }
+      nextRetryCount = 0;
+      nextLastRetryAt = null;
     }
     try {
       await runQuery(
         db,
         `UPDATE finance.report_schedules
             SET next_run_at = $1,
+                retry_count = $2,
+                last_retry_at = $3,
                 updated_at = datetime('now')
-          WHERE id = $2 AND tenant_id = $3`,
-        [nextNextRun ? nextNextRun.toISOString() : null, Number(sched.id), tenantId],
+          WHERE id = $4 AND tenant_id = $5`,
+        [
+          nextNextRun ? nextNextRun.toISOString() : null,
+          nextRetryCount ?? 0,
+          nextLastRetryAt ? nextLastRetryAt.toISOString() : null,
+          Number(sched.id),
+          tenantId,
+        ],
       );
     } catch (e) {
       console.error('[scheduler] update next_run_at failed:', e && e.message ? e.message : e);
