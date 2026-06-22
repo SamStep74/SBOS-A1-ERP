@@ -15,6 +15,7 @@ import {
   startRetentionSnapshot,
   streamRetentionHistoryCsv,
   diffRetentionSnapshots,
+  streamRetentionDiffCsv,
 } from './retentionHistory.js';
 
 function makeHistoryDb() {
@@ -305,4 +306,71 @@ test('diffRetentionSnapshots: returns empty diffs when from === to', () => {
   assert.equal(diff.added.length, 0);
   assert.equal(diff.removed.length, 0);
   assert.equal(diff.changed.length, 0);
+});
+
+// ─── W69: retention diff CSV export ───
+
+test('streamRetentionDiffCsv: emits the headers first then per-section data', async () => {
+  const db = makeHistoryDb();
+  // Seed two snapshots so the diff has data.
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-08 10:00:00', retentionDays: 180, hasExplicit: true, auditRows: 120 });
+  seedSnapshot(db, { tenantId: 7, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 30 });
+  const text = await collect(
+    streamRetentionDiffCsv(db, {
+      from: '2026-06-01 10:00:00',
+      to: '2026-06-08 10:00:00',
+    }),
+  );
+  // The CSV has three sections, each with its own
+  // header line: # ADDED, # REMOVED, # CHANGED.
+  // Verify the section markers are present.
+  assert.match(text, /# ADDED/);
+  assert.match(text, /# REMOVED/);
+  assert.match(text, /# CHANGED/);
+  // The CHANGED section header has the documented columns.
+  assert.match(text, /tenant_id,retention_days_from,retention_days_to,/);
+});
+
+test('streamRetentionDiffCsv: emits header-only output when diff is empty', async () => {
+  const db = makeHistoryDb();
+  const text = await collect(
+    streamRetentionDiffCsv(db, {
+      from: '2020-01-01 00:00:00',
+      to: '2099-01-01 00:00:00',
+    }),
+  );
+  // Section markers + no data rows.
+  assert.match(text, /# ADDED/);
+  assert.match(text, /# REMOVED/);
+  assert.match(text, /# CHANGED/);
+  // No data rows under any section (we seeded none).
+  // Every line is either a section marker (# ...), a
+  // column header (tenant_id...), or blank (the gap
+  // between sections).
+  const lines = text.split('\n');
+  for (const line of lines) {
+    if (line === '') continue; // blank between sections
+    assert.ok(
+      line.startsWith('#') || line.startsWith('tenant_id'),
+      `unexpected line: ${line}`,
+    );
+  }
+});
+
+test('streamRetentionDiffCsv: surfaces the added tenant in the ADDED section', async () => {
+  const db = makeHistoryDb();
+  // Baseline: tenant 0 only.
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-01 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  // New: tenant 0 + tenant 7.
+  seedSnapshot(db, { tenantId: 0, snapshotAt: '2026-06-08 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 100 });
+  seedSnapshot(db, { tenantId: 7, snapshotAt: '2026-06-08 10:00:00', retentionDays: 90, hasExplicit: true, auditRows: 30 });
+  const text = await collect(
+    streamRetentionDiffCsv(db, {
+      from: '2026-06-01 10:00:00',
+      to: '2026-06-08 10:00:00',
+    }),
+  );
+  // The ADDED section has one tenant_id=7 row.
+  assert.match(text, /# ADDED\ntenant_id\n7/);
 });

@@ -475,3 +475,116 @@ export function diffRetentionSnapshots(db, opts = {}) {
     changed: changed.sort((a, b) => a.tenant_id - b.tenant_id),
   };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// W69: retention diff CSV export.
+//
+// streamRetentionDiffCsv — async generator that yields the
+// diff as CSV. Three sections (ADDED / REMOVED / CHANGED),
+// each prefixed with a "# <SECTION>" marker line so
+// spreadsheet tools can import the file with named regions.
+// Mirrors the W40/W64/W67 stream-pattern: header first,
+// memory-bounded chunks, RFC 4180 escapes.
+// ────────────────────────────────────────────────────────────────────────
+
+function diffCsvEscape(value) {
+  if (value == null) return '';
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function diffCsvLine(values) {
+  return values.map(diffCsvEscape).join(',') + '\n';
+}
+
+// Stream the diff as CSV. Three sections:
+//
+//   # ADDED
+//   tenant_id
+//   7
+//   9
+//
+//   # REMOVED
+//   tenant_id
+//   5
+//
+//   # CHANGED
+//   tenant_id,retention_days_from,retention_days_to,has_explicit_config_from,has_explicit_config_to,audit_row_count_from,audit_row_count_to,last_purge_at_from,last_purge_at_to,last_purge_count_from,last_purge_count_to
+//   0,90,180,1,1,100,120,2026-06-01 10:00:00,2026-06-08 10:00:00,17,5
+//
+// The "# <SECTION>" markers let spreadsheet tools split
+// the file by section. Standard CSV parsers (pandas,
+// Excel) handle these as a single column with section-
+// prefix text — operators may need to post-process, but
+// the file is still valid CSV.
+//
+// @param {object} db  raw node:sqlite handle
+// @param {object} opts { from, to }
+// @param {number} [chunkSize=500]  rows per yield
+export async function* streamRetentionDiffCsv(db, opts = {}, chunkSize = 500) {
+  const size = Math.min(Math.max(Number(chunkSize) || 500, 1), 5000);
+  const diff = diffRetentionSnapshots(db, opts);
+  // Section 1: ADDED
+  yield '# ADDED\n';
+  yield diffCsvLine(['tenant_id']);
+  let buf = [];
+  for (const tid of diff.added) {
+    buf.push(diffCsvLine([tid]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) yield buf.join('');
+  // Section 2: REMOVED
+  yield '\n# REMOVED\n';
+  yield diffCsvLine(['tenant_id']);
+  buf = [];
+  for (const tid of diff.removed) {
+    buf.push(diffCsvLine([tid]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) yield buf.join('');
+  // Section 3: CHANGED
+  yield '\n# CHANGED\n';
+  yield diffCsvLine([
+    'tenant_id',
+    'retention_days_from',
+    'retention_days_to',
+    'has_explicit_config_from',
+    'has_explicit_config_to',
+    'audit_row_count_from',
+    'audit_row_count_to',
+    'last_purge_at_from',
+    'last_purge_at_to',
+    'last_purge_count_from',
+    'last_purge_count_to',
+  ]);
+  buf = [];
+  for (const c of diff.changed) {
+    buf.push(diffCsvLine([
+      c.tenant_id,
+      c.retention_days.from,
+      c.retention_days.to,
+      c.has_explicit_config.from ? 1 : 0,
+      c.has_explicit_config.to ? 1 : 0,
+      c.audit_row_count.from,
+      c.audit_row_count.to,
+      c.last_purge_at.from,
+      c.last_purge_at.to,
+      c.last_purge_count.from,
+      c.last_purge_count.to,
+    ]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) yield buf.join('');
+}

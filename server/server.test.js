@@ -2274,6 +2274,34 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(Array.isArray(r1.body.changed));
   });
 
+  // ─── Wave 69: retention diff CSV export ───
+
+  test('69a. GET /api/finance/audit/retention/history/diff/export returns text/csv with the section markers', async () => {
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/retention/history/diff/export?from=2020-01-01%2000:00:00&to=2099-01-01%2000:00:00`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /^text\/csv/);
+    assert.match(
+      res.headers.get('content-disposition') || '',
+      /^attachment; filename="retention-diff-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    const text = await res.text();
+    // The three section markers are present.
+    assert.match(text, /# ADDED/);
+    assert.match(text, /# REMOVED/);
+    assert.match(text, /# CHANGED/);
+  });
+
+  test('69b. GET diff export without from/to returns 400', async () => {
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/retention/history/diff/export`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, 'invalid_request');
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

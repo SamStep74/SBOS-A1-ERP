@@ -32,6 +32,7 @@
 //   POST   /api/finance/audit/retention/history/snapshot (security.audit.retention.update) — W66 manual snapshot
 //   GET    /api/finance/audit/retention/history/export  (security.audit.read)          — W67 CSV export
 //   GET    /api/finance/audit/retention/history/diff    (security.audit.read)          — W68 per-tenant diff between two snapshots
+//   GET    /api/finance/audit/retention/history/diff/export (security.audit.read)        — W69 diff CSV export
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -172,6 +173,7 @@ import {
   snapshotRetentionDashboard,
   streamRetentionHistoryCsv,
   diffRetentionSnapshots,
+  streamRetentionDiffCsv,
 } from './retentionHistory.js';
 import {
   createCatalogItem,
@@ -1915,6 +1917,60 @@ export function registerFinanceRoutes(app, opts = {}) {
       } catch (err) {
         // diffRetentionSnapshots throws RangeError on
         // missing from/to. Map to 400.
+        if (err instanceof RangeError) {
+          return res
+            .status(400)
+            .json({ error: 'invalid_request', message: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/history/diff/export —
+  // CSV export of the W68 diff. Streams text/csv with
+  // attachment filename + three section markers
+  // (# ADDED / # REMOVED / # CHANGED) so spreadsheet
+  // tools can split the file by region.
+  //
+  // Query params (required): from, to. Same shape as
+  // the diff GET.
+  //
+  // Perm gate: `security.audit.read` (same as the
+  // diff GET).
+  app.get(
+    '/api/finance/audit/retention/history/diff/export',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const today = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="retention-diff-${today}.csv"`,
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        // The diff is cross-tenant by design. The
+        // calling tenant can only see their own
+        // history, so the diff is already tenant-
+        // scoped naturally. No additional filter
+        // needed (unlike the diff JSON endpoint which
+        // explicitly filters to req.tenantId).
+        for await (const chunk of streamRetentionDiffCsv(rawDb, {
+          from: req.query.from,
+          to: req.query.to,
+        })) {
+          res.write(chunk);
+        }
+        res.end();
+      } catch (err) {
         if (err instanceof RangeError) {
           return res
             .status(400)

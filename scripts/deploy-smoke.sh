@@ -3960,6 +3960,65 @@ else
 fi
 echo
 
+echo "=== STEP 5aj: Retention diff CSV export (Wave 69) ==="
+# Smoke coverage for the W69 diff CSV export. We verify:
+#   1. GET export returns 200 + text/csv + attachment filename
+#   2. The three section markers (# ADDED / # REMOVED / # CHANGED) are present
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          resolve({ status: res.statusCode, headers: res.headers, body: buf });
+        });
+      });
+      r.end();
+    });
+  }
+
+  (async () => {
+    const r = await get(
+      "/api/finance/audit/retention/history/diff/export?from=2020-01-01%2000:00:00&to=2099-01-01%2000:00:00",
+    );
+    if (r.status !== 200) {
+      console.log("  FAIL export status " + r.status);
+      process.exit(1);
+    }
+    if (!/^text\/csv/.test(r.headers["content-type"] || "")) {
+      console.log("  FAIL content-type " + r.headers["content-type"]);
+      process.exit(1);
+    }
+    if (!/^attachment; filename="retention-diff-\d{4}-\d{2}-\d{2}\.csv"$/.test(r.headers["content-disposition"] || "")) {
+      console.log("  FAIL content-disposition " + r.headers["content-disposition"]);
+      process.exit(1);
+    }
+    for (const marker of ["# ADDED", "# REMOVED", "# CHANGED"]) {
+      if (r.body.indexOf(marker) === -1) {
+        console.log("  FAIL missing section marker " + marker);
+        process.exit(1);
+      }
+    }
+    console.log("  CSV export has all 3 section markers");
+
+    console.log("  OK retention diff CSV export");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  retention diff CSV export OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
