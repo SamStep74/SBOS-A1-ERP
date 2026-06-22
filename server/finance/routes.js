@@ -251,6 +251,7 @@ import {
   recordReportExecution,
   listReportExecutions,
 } from './reportScheduler.js';
+import { runReportNow } from './scheduleRunner.js';
 import {
   listJournalEntries,
   getJournalEntry,
@@ -3407,6 +3408,55 @@ export function registerFinanceRoutes(app, opts = {}) {
       res.status(200).json({ items });
     } catch (err) {
       if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 reporting wave 6 (W103-1) — run-now admin endpoint.
+  // ────────────────────────────────────────────────────────────────────
+
+  // POST /api/finance/reports/schedules/:id/run-now
+  //   Force a schedule to run immediately (without waiting
+  //   for the next cron tick). The execution is recorded
+  //   in finance.report_executions with triggered_by='manual'.
+  //   The schedule's next_run_at is NOT changed — a manual
+  //   run is an additional execution in the history, not
+  //   a shift in the cron cadence.
+  //
+  //   Use cases:
+  //   - Verify a data quality fix without waiting for the
+  //     next scheduled tick
+  //   - Re-run a report that failed in the last tick
+  //   - Pre-flight a new schedule before enabling it
+  //
+  //   Perm gate: finance.reports.execute (high sensitivity).
+  //
+  //   Returns 200 with { execution_id, schedule_id,
+  //   report_type, status, duration_ms, result, error? }
+  //   on success.
+  //   Returns 404 if the schedule doesn't exist in the tenant.
+  //   Returns 400 on dispatch error (the function records
+  //   the failure as a 'failed' execution and returns 400
+  //   with the error message).
+  app.post('/api/finance/reports/schedules/:id/run-now', requireTenant, requirePerm('finance.reports.execute'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const scheduleId = Number(req.params.id);
+      // The email service is stored on app.locals by
+      // createApp(). If the worker hasn't been started
+      // (opts.scheduler === false), emailService is null
+      // and the run still works — emails are just skipped.
+      const emailService = req.app.locals.emailService ?? null;
+      const result = await runReportNow(pgAdapter, pgAdapter, scheduleId, tenantId, undefined, emailService);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        if (/not found in tenant/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
         return res.status(400).json({ error: 'bad_request', message: err.message });
       }
       next(err);

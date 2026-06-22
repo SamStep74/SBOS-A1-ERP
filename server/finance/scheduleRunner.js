@@ -25,6 +25,7 @@
 import {
   listReportSchedules,
   recordReportExecution,
+  getReportSchedule,
 } from './reportScheduler.js';
 import {
   getArAging,
@@ -583,5 +584,123 @@ export function startScheduler({
     },
     tickOnce: () => tickOnce(db, pgAdapter, new Date(), tenantId, dispatchTable, emailService),
     tickMs,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// runReportNow (W103-1) — operator-forced manual run.
+//
+// The scheduler worker (W97-1) fires on a cron schedule.
+// Sometimes the operator needs to trigger a report
+// immediately — e.g.:
+//   - After fixing a data quality issue, run the data
+//     quality report NOW to verify the fix
+//   - Re-run a report that failed in the last tick
+//   - Pre-flight a new schedule before enabling it
+//
+// runReportNow is the one-shot equivalent of one tickOnce
+// iteration. It:
+//   1. Verifies the schedule exists in the tenant
+//   2. Dispatches the report (same dispatch table as
+//      the scheduler)
+//   3. Records the execution with triggered_by = 'manual'
+//      (the audit UI can distinguish manual vs scheduled)
+//   4. Sends the notification email (if configured)
+//   5. Returns the result + execution log id
+//
+// The function does NOT change the schedule's next_run_at
+// — a manual run doesn't shift the cron schedule. The
+// schedule fires on its normal cadence; the manual run is
+// an additional execution in the history.
+//
+// Errors:
+//   404 if the schedule doesn't exist in the tenant
+//   (the schedule module's getReportSchedule raises
+//   ValueError with "not found in tenant" — the route
+//   layer maps to 404)
+//
+// Returns:
+//   { execution_id, schedule_id, report_type,
+//     status, duration_ms, result }
+export async function runReportNow(
+  db,
+  pgAdapter,
+  scheduleId,
+  tenantId = 0,
+  dispatchTable = DEFAULT_DISPATCH,
+  emailService = null,
+) {
+  assertPositiveInt(scheduleId, 'scheduleId');
+  assertNonNegativeInt(tenantId, 'tenantId');
+  // getReportSchedule raises ValueError with
+  // "schedule <id> not found in tenant <tenantId>" if
+  // the row doesn't exist. The route layer maps to 404.
+  const sched = await getReportSchedule(db, scheduleId, tenantId);
+  const now = new Date();
+  const startedAt = new Date(now.getTime());
+  let result;
+  let error = null;
+  try {
+    result = await dispatchReport(
+      sched.report_type,
+      db,
+      pgAdapter,
+      sched.params,
+      now,
+      dispatchTable,
+    );
+  } catch (e) {
+    error = e && e.message ? e.message : String(e);
+  }
+  const completedAt = new Date(now.getTime());
+  const durationMs = completedAt.getTime() - startedAt.getTime();
+  const resultJson = error === null ? JSON.stringify(result) : null;
+  const status = error === null ? 'completed' : 'failed';
+  let executionId;
+  try {
+    const { id } = await recordReportExecution(
+      db,
+      {
+        schedule_id: Number(sched.id),
+        report_type: sched.report_type,
+        status,
+        started_at: startedAt.toISOString(),
+        completed_at: completedAt.toISOString(),
+        duration_ms: durationMs,
+        result_json: resultJson,
+        error_message: error,
+        triggered_by: 'manual',
+      },
+      tenantId,
+    );
+    executionId = id;
+  } catch (e) {
+    throw new ValueError(
+      `runReportNow: failed to record execution: ${e && e.message ? e.message : e}`,
+    );
+  }
+  // Email (if configured). Failures here don't fail the
+  // run; we just log (the schedule is not silently broken
+  // because the email failed).
+  if (sched.notify_email && !error) {
+    try {
+      await sendNotificationEmail(
+        sched.notify_email,
+        sched.report_type,
+        resultJson || '',
+        emailService,
+      );
+    } catch (e) {
+      console.error('[runReportNow] email send failed:', e && e.message ? e.message : e);
+    }
+  }
+  return {
+    execution_id: executionId,
+    schedule_id: Number(sched.id),
+    report_type: sched.report_type,
+    status,
+    duration_ms: durationMs,
+    result: error === null ? result : null,
+    error: error,
   };
 }

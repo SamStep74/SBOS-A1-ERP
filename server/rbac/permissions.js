@@ -2463,6 +2463,12 @@ const PERMISSIONS = Object.freeze({
     label: 'View dashboards',
     description: 'View dashboards.',
   },
+  'finance.reports.execute': {
+    category: 'reports',
+    sensitivity: 'high',
+    label: 'Execute scheduled reports',
+    description: 'Manually trigger a scheduled report to run immediately. Use with care — manual runs are recorded in the audit log with triggered_by="manual".',
+  },
   'reports.dashboard.update': {
     category: 'reports',
     sensitivity: 'medium',

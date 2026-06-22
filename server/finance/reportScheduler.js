@@ -140,6 +140,14 @@ function validateRecordReportExecutionInput(input) {
   }
   assertOptionalString(input.result_json, 'result_json', { max: 65536 });
   assertOptionalString(input.error_message, 'error_message', { max: 4096 });
+  // triggered_by: 'scheduler' (default) or 'manual' (forced run).
+  // W103-1 introduced manual runs. The validation accepts
+  // any of the two; other values are rejected.
+  if (input.triggered_by !== undefined && input.triggered_by !== null) {
+    if (!['scheduler', 'manual'].includes(input.triggered_by)) {
+      throw new ValueError("triggered_by must be one of: 'scheduler', 'manual'");
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -294,8 +302,8 @@ export async function recordReportExecution(db, input, tenantId = 0) {
     `INSERT INTO finance.report_executions
        (tenant_id, schedule_id, report_type, status,
         started_at, completed_at, duration_ms,
-        result_json, error_message)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        result_json, error_message, triggered_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       tenantId,
@@ -307,6 +315,7 @@ export async function recordReportExecution(db, input, tenantId = 0) {
       input.duration_ms ?? null,
       input.result_json ?? null,
       input.error_message ?? null,
+      input.triggered_by ?? 'scheduler',
     ],
   );
   let id;

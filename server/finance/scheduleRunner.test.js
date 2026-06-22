@@ -1,4 +1,5 @@
 // Phase 3 reporting wave 4 (W97-1) — scheduler worker tests.
+// Phase 3 reporting wave 6 (W103-1) — run-now tests.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,6 +8,7 @@ import {
   dispatchReport,
   tickOnce,
   startScheduler,
+  runReportNow,
   sendNotificationEmail,
   ValueError,
 } from './scheduleRunner.js';
@@ -58,6 +60,9 @@ function makeMockDb() {
         duration_ms: ps[6] != null ? Number(ps[6]) : null,
         result_json: ps[7] ?? null,
         error_message: ps[8] ?? null,
+        // W103-1: the 10th param is triggered_by. Default
+        // 'scheduler' if the param is missing (W97-1 path).
+        triggered_by: ps[9] ?? 'scheduler',
       });
       return { rows: [{ id }] };
     }
@@ -562,4 +567,111 @@ test('startScheduler: missing pgAdapter throws TypeError', () => {
     () => startScheduler({ db, tickMs: 5000 }),
     /requires opts.pgAdapter/,
   );
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// runReportNow (W103-1)
+// ────────────────────────────────────────────────────────────────────────
+
+test('runReportNow: happy path dispatches + records execution with triggered_by=manual', async () => {
+  const db = makeMockDb();
+  const schedule = db.seedSchedule({ report_type: 'ar_aging' });
+  const result = await runReportNow(db, null, schedule.id, 0, STUB_DISPATCH);
+  assert.ok(result.execution_id > 0);
+  assert.equal(result.schedule_id, schedule.id);
+  assert.equal(result.report_type, 'ar_aging');
+  assert.equal(result.status, 'completed');
+  // The execution row was recorded with triggered_by='manual'
+  const exec = db.executions.get(result.execution_id);
+  assert.equal(exec.triggered_by, 'manual');
+  assert.equal(exec.status, 'completed');
+});
+
+test('runReportNow: 404-style ValueError when schedule does not exist', async () => {
+  const db = makeMockDb();
+  await assert.rejects(
+    runReportNow(db, null, 99999, 0, STUB_DISPATCH),
+    /not found/,
+  );
+});
+
+test('runReportNow: dispatch failure records a failed execution and returns error', async () => {
+  const db = makeMockDb();
+  const schedule = db.seedSchedule({ report_type: 'ar_aging' });
+  const throwingDispatch = {
+    ar_aging: async () => {
+      throw new Error('dispatch boom');
+    },
+  };
+  const result = await runReportNow(db, null, schedule.id, 0, throwingDispatch);
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /dispatch boom/);
+  const exec = db.executions.get(result.execution_id);
+  assert.equal(exec.status, 'failed');
+  assert.equal(exec.triggered_by, 'manual');
+  assert.equal(exec.error_message, 'dispatch boom');
+});
+
+test('runReportNow: validates scheduleId is a positive integer', async () => {
+  const db = makeMockDb();
+  await assert.rejects(
+    runReportNow(db, null, 0, 0, STUB_DISPATCH),
+    /positive integer/,
+  );
+  await assert.rejects(
+    runReportNow(db, null, -1, 0, STUB_DISPATCH),
+    /positive integer/,
+  );
+  await assert.rejects(
+    runReportNow(db, null, 'abc', 0, STUB_DISPATCH),
+    /positive integer/,
+  );
+});
+
+test('runReportNow: validates tenantId is a non-negative integer', async () => {
+  const db = makeMockDb();
+  await assert.rejects(
+    runReportNow(db, null, 1, -1, STUB_DISPATCH),
+    /tenantId/,
+  );
+});
+
+test('runReportNow: returns the dispatch result on success', async () => {
+  const db = makeMockDb();
+  const schedule = db.seedSchedule({ report_type: 'ar_aging' });
+  const result = await runReportNow(db, null, schedule.id, 0, STUB_DISPATCH);
+  assert.equal(result.status, 'completed');
+  assert.ok(result.result);
+  assert.equal(result.result.asOfDate, '2026-06-22');
+  assert.equal(result.duration_ms >= 0, true);
+});
+
+test('runReportNow: uses schedule.params (not params from the request)', async () => {
+  // The schedule has params asOfDate=2025-12-31. The
+  // runReportNow call doesn't take params — it reads
+  // them from the schedule row.
+  const db = makeMockDb();
+  const schedule = db.seedSchedule({
+    report_type: 'ar_aging',
+    params: JSON.stringify({ asOfDate: '2025-12-31' }),
+  });
+  const result = await runReportNow(db, null, schedule.id, 0, STUB_DISPATCH);
+  assert.equal(result.result.asOfDate, '2025-12-31');
+});
+
+test('runReportNow: dispatches immediately (does not wait for cron)', async () => {
+  // The schedule has cron '0 9 * * 1' (Mondays at 9am).
+  // Calling runReportNow on a Tuesday should still work —
+  // the cron is irrelevant for manual runs.
+  const db = makeMockDb();
+  const schedule = db.seedSchedule({
+    report_type: 'ar_aging',
+    cron_expression: '0 9 * * 1',
+    next_run_at: '2026-06-29T09:00:00.000Z', // next Monday
+  });
+  const result = await runReportNow(db, null, schedule.id, 0, STUB_DISPATCH);
+  assert.equal(result.status, 'completed');
+  // The schedule's next_run_at is NOT changed.
+  const after = db.schedules.get(schedule.id);
+  assert.equal(after.next_run_at, '2026-06-29T09:00:00.000Z');
 });

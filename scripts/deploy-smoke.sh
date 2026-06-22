@@ -3592,6 +3592,109 @@ fi
 
 
 
+echo "=== STEP 7p1: Run-now admin endpoint (W103-1) ==="
+# Tests POST /api/finance/reports/schedules/:id/run-now —
+# the operator-forced manual run endpoint. We create a
+# schedule, force a run, verify the execution is recorded
+# with triggered_by='manual', then verify the next_run_at
+# is NOT changed (the manual run is an additional execution
+# in the history, not a shift in the cron cadence).
+LOG7P="$TESTDIR/server-7p.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7P" 2>&1 &
+SERVER_PID_7P=$!
+SMOKE_RC=0
+cleanup_7p() { kill -9 $SERVER_PID_7P 2>/dev/null; wait $SERVER_PID_7P 2>/dev/null; }
+trap cleanup_7p EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7p"
+    tail -20 "$LOG7P"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7P=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7P" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7P" ]; then
+    echo "  FAIL: STEP 7p server did not print admin session token"
+    tail -20 "$LOG7P"
+    SMOKE_RC=1
+  else
+    # Create a schedule with a cron that won't fire for a while
+    CREATE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7P" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"Run-now smoke","report_type":"data_quality","cron_expression":"0 9 * * 1"}')
+    SCHED_ID=$(echo "$CREATE_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -z "$SCHED_ID" ]; then
+      echo "  FAIL: create schedule returned no id: $CREATE_OUT"
+      SMOKE_RC=1
+    else
+      echo "  OK setup: created schedule id=$SCHED_ID"
+
+      # Capture the next_run_at before the manual run
+      NEXT_RUN_BEFORE=$(sqlite3 "$DB" "SELECT next_run_at FROM report_schedules WHERE id = $SCHED_ID;" 2>/dev/null)
+
+      # Force a run
+      RUN_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules/$SCHED_ID/run-now" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7P" -H "X-Tenant-Id: 0")
+      if echo "$RUN_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['status'] == 'completed', f'expected completed, got {d[\"status\"]}'
+assert d['schedule_id'] == $SCHED_ID
+assert d['report_type'] == 'data_quality'
+assert d['execution_id'] > 0
+assert d['result'] is not None
+print('OK', d['execution_id'])
+" 2>/dev/null; then
+        echo "  OK run-now happy path: status=completed, result returned"
+      else
+        echo "  FAIL: run-now happy path failed: $RUN_OUT"
+        SMOKE_RC=1
+      fi
+
+      # Verify the execution is recorded with triggered_by='manual'
+      TRIGGERED=$(sqlite3 "$DB" "SELECT triggered_by FROM report_executions WHERE schedule_id = $SCHED_ID ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+      if [ "$TRIGGERED" = "manual" ]; then
+        echo "  OK execution recorded with triggered_by=manual"
+      else
+        echo "  FAIL: triggered_by is '$TRIGGERED', expected 'manual'"
+        SMOKE_RC=1
+      fi
+
+      # Verify the schedule's next_run_at is NOT changed
+      NEXT_RUN_AFTER=$(sqlite3 "$DB" "SELECT next_run_at FROM report_schedules WHERE id = $SCHED_ID;" 2>/dev/null)
+      if [ "$NEXT_RUN_BEFORE" = "$NEXT_RUN_AFTER" ]; then
+        echo "  OK next_run_at unchanged after manual run"
+      else
+        echo "  FAIL: next_run_at changed: $NEXT_RUN_BEFORE → $NEXT_RUN_AFTER"
+        SMOKE_RC=1
+      fi
+
+      # 404 on non-existent schedule
+      NOT_FOUND=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules/99999/run-now" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7P" -H "X-Tenant-Id: 0")
+      if [ "$NOT_FOUND" = "404" ]; then
+        echo "  OK run-now non-existent schedule returns 404"
+      else
+        echo "  FAIL: run-now non-existent returned $NOT_FOUND (expected 404)"
+        SMOKE_RC=1
+      fi
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7P 2>/dev/null
+wait $SERVER_PID_7P 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 echo "=== STEP 7o: Email service capture mode (W101-1) ==="
 # Verifies the email service starts in capture mode and a
 # test send writes a JSONL entry to the capture dir. We
