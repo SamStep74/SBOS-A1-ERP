@@ -2907,6 +2907,156 @@ if [ $SMOKE_RC != 0 ]; then
 fi
 
 
+echo "=== STEP 7n: AI apply customer merge (W99-1) ==="
+# Tests the MUTATION counterpart to the W94-1 advisory:
+#   POST /api/finance/ai/apply-merge
+#   GET  /api/finance/ai/merge-log
+#
+# The endpoint re-assigns the secondary's invoices to the
+# primary, archives the secondary, and records an audit row
+# in finance.customer_merge_log.
+LOG7N="$TESTDIR/server-7n.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7N" 2>&1 &
+SERVER_PID_7N=$!
+SMOKE_RC=0
+cleanup_7n() { kill -9 $SERVER_PID_7N 2>/dev/null; wait $SERVER_PID_7N 2>/dev/null; }
+trap cleanup_7n EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7n"
+    tail -20 "$LOG7N"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7N=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7N" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7N" ]; then
+    echo "  FAIL: STEP 7n server did not print admin session token"
+    tail -20 "$LOG7N"
+    SMOKE_RC=1
+  else
+    # Seed: 2 customers with the same HVVH + 1 invoice on the secondary.
+    # Direct SQL is faster than going through the HTTP layer for each row.
+    PRIMARY_ID=$(sqlite3 "$DB" "INSERT INTO customers (tenant_id, name, hvhh, archived) VALUES (0, 'Acme Primary', '123456789', 0); SELECT last_insert_rowid();" 2>/dev/null)
+    SECONDARY_ID=$(sqlite3 "$DB" "INSERT INTO customers (tenant_id, name, hvhh, archived) VALUES (0, 'Acme Duplicate', '123456789', 0); SELECT last_insert_rowid();" 2>/dev/null)
+    INVOICE_ID=$(sqlite3 "$DB" "INSERT INTO invoices (tenant_id, customer_id, invoice_number, issue_date, due_date, subtotal_amd, vat_amd, total_amd, status) VALUES (0, $SECONDARY_ID, 'INV-MERGE-001', '2026-06-22', '2026-07-22', 10000, 2000, 12000, 'sent'); SELECT last_insert_rowid();" 2>/dev/null)
+
+    # 404 for non-existent primary
+    NOT_FOUND=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/ai/apply-merge" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"primary_id\":99999,\"secondary_id\":$SECONDARY_ID}")
+    if [ "$NOT_FOUND" = "404" ]; then
+      echo "  OK apply-merge non-existent primary returns 404"
+    else
+      echo "  FAIL: apply-merge non-existent primary returned $NOT_FOUND (expected 404)"
+      SMOKE_RC=1
+    fi
+
+    # Happy path: apply the merge
+    MERGE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/ai/apply-merge" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"primary_id\":$PRIMARY_ID,\"secondary_id\":$SECONDARY_ID,\"reason\":\"smoke test merge\"}")
+    if echo "$MERGE_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert 'merge_log_id' in d, 'missing merge_log_id'
+assert d['primary_id'] == $PRIMARY_ID, 'wrong primary_id'
+assert d['secondary_id'] == $SECONDARY_ID, 'wrong secondary_id'
+assert d['invoices_reassigned'] == 1, f'expected 1 reassigned, got {d[\"invoices_reassigned\"]}'
+assert d['payments_reassigned'] == 0, f'expected 0 payments, got {d[\"payments_reassigned\"]}'
+print('OK', d['merge_log_id'])
+" 2>/dev/null; then
+      echo "  OK apply-merge happy path: 1 invoice re-assigned, audit row created"
+    else
+      echo "  FAIL: apply-merge happy path failed: $MERGE_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Second merge attempt should fail (secondary is now archived)
+    REPLAY=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/ai/apply-merge" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"primary_id\":$PRIMARY_ID,\"secondary_id\":$SECONDARY_ID}")
+    if [ "$REPLAY" = "400" ]; then
+      echo "  OK re-apply on archived secondary returns 400"
+    else
+      echo "  FAIL: re-apply on archived secondary returned $REPLAY (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # 400 when primary and secondary are the same
+    SAME=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/finance/ai/apply-merge" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d "{\"primary_id\":$PRIMARY_ID,\"secondary_id\":$PRIMARY_ID}")
+    if [ "$SAME" = "400" ]; then
+      echo "  OK apply-merge same primary/secondary returns 400"
+    else
+      echo "  FAIL: apply-merge same primary/secondary returned $SAME (expected 400)"
+      SMOKE_RC=1
+    fi
+
+    # Invoice now belongs to the primary (verify via direct SQL)
+    NEW_OWNER=$(sqlite3 "$DB" "SELECT customer_id FROM invoices WHERE id = $INVOICE_ID;" 2>/dev/null)
+    if [ "$NEW_OWNER" = "$PRIMARY_ID" ]; then
+      echo "  OK invoice re-assigned to primary"
+    else
+      echo "  FAIL: invoice owner is $NEW_OWNER, expected $PRIMARY_ID"
+      SMOKE_RC=1
+    fi
+
+    # Secondary is now archived (verify via direct SQL)
+    ARCHIVED=$(sqlite3 "$DB" "SELECT archived FROM customers WHERE id = $SECONDARY_ID;" 2>/dev/null)
+    if [ "$ARCHIVED" = "1" ]; then
+      echo "  OK secondary customer is archived"
+    else
+      echo "  FAIL: secondary archived flag is $ARCHIVED, expected 1"
+      SMOKE_RC=1
+    fi
+
+    # Audit row was recorded
+    AUDIT_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM customer_merge_log WHERE secondary_customer_id = $SECONDARY_ID;" 2>/dev/null)
+    if [ "$AUDIT_COUNT" = "1" ]; then
+      echo "  OK merge audit row recorded in customer_merge_log"
+    else
+      echo "  FAIL: expected 1 audit row, got $AUDIT_COUNT"
+      SMOKE_RC=1
+    fi
+
+    # GET /api/finance/ai/merge-log returns the audit row
+    LOG_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/ai/merge-log" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7N" -H "X-Tenant-Id: 0")
+    if echo "$LOG_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('items', [])
+assert len(items) == 1, f'expected 1 log row, got {len(items)}'
+assert items[0]['primary_customer_id'] == $PRIMARY_ID
+assert items[0]['secondary_customer_id'] == $SECONDARY_ID
+assert items[0]['invoices_reassigned_count'] == 1
+print('OK', len(items))
+" 2>/dev/null; then
+      echo "  OK GET /api/finance/ai/merge-log returns the audit row"
+    else
+      echo "  FAIL: merge-log endpoint returned unexpected shape: $LOG_OUT"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7N 2>/dev/null
+wait $SERVER_PID_7N 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 
 echo
 echo "=== STEP 8: Summary ==="

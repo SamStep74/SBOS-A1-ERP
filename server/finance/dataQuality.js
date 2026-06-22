@@ -35,10 +35,11 @@ async function runQuery(db, sql, params) {
   return { rows: [] };
 }
 
-// assertPositiveInt is reserved for future functions that
-// accept positive IDs (e.g. findOrphanedRecords). Marked
-// with _ to keep eslint quiet until wave 2.
-function _assertPositiveInt(value, name) {
+// assertPositiveInt is used by applyCustomerMerge (W99-1)
+// for primary_id, secondary_id, applied_by_user_id
+// validation. Other functions in this module use direct
+// checks (the function bodies are short enough to inline).
+function assertPositiveInt(value, name) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new ValueError(`${name} must be a positive integer`);
   }
@@ -595,4 +596,270 @@ export async function getDataQualityAlerts(db, tenantId = 0, threshold = 80) {
   });
 
   return alerts;
+}
+// ────────────────────────────────────────────────────────────────────────
+// applyCustomerMerge — W99-1 mutation counterpart to suggestMergeCandidates.
+//
+// The advisory (W94-1) says "merge these two customers". This
+// function actually does it.
+//
+// The merge is a one-way soft delete + re-assign:
+//   1. Verify both customers exist in the tenant (404 if either is missing).
+//   2. Verify the two customers are different (400 if same id).
+//   3. Verify the secondary is NOT already archived (400 if archived —
+//      prevents double-merging the same customer into two primaries).
+//   4. Re-assign all finance.invoices.customer_id from secondary to primary
+//      (within the tenant scope).
+//   5. Record the merge in finance.customer_merge_log (audit row with
+//      the operator, reason, and counts).
+//   6. Set finance.customers.archived = 1 on the secondary (soft delete).
+//
+// Returns:
+//   { merge_log_id, primary_id, secondary_id,
+//     invoices_reassigned, payments_reassigned }
+//
+// Errors:
+//   ValueError with a clear message — the route layer maps to 400.
+//   Missing customer maps to a ValueError too (the route layer maps
+//   to 404, see the route definition).
+//
+// The function is tenant-scoped via the WHERE clauses; it cannot
+// accidentally merge across tenants.
+export async function applyCustomerMerge(db, input, tenantId = 0) {
+  assertTenantId(tenantId);
+  if (!input || typeof input !== 'object') {
+    throw new ValueError('input is required');
+  }
+  const primaryId = Number(input.primary_id);
+  const secondaryId = Number(input.secondary_id);
+  assertPositiveInt(primaryId, 'primary_id');
+  assertPositiveInt(secondaryId, 'secondary_id');
+  if (primaryId === secondaryId) {
+    throw new ValueError('primary_id and secondary_id must be different');
+  }
+  // Reason is optional but bounded — the audit log is human-readable.
+  let reason = null;
+  if (input.reason !== null && input.reason !== undefined) {
+    if (typeof input.reason !== 'string') {
+      throw new ValueError('reason must be a string or null');
+    }
+    if (input.reason.length > 1024) {
+      throw new ValueError('reason must be at most 1024 characters');
+    }
+    reason = input.reason;
+  }
+  // applied_by_user_id is optional (the route layer will pass the
+  // current user id; this function is also callable from tests
+  // without a user).
+  let appliedByUserId = null;
+  if (input.applied_by_user_id !== null && input.applied_by_user_id !== undefined) {
+    assertPositiveInt(input.applied_by_user_id, 'applied_by_user_id');
+    appliedByUserId = input.applied_by_user_id;
+  }
+
+  // Look up both customers in the same query. The query is
+  // tenant-scoped via the tenant_id column; cross-tenant
+  // returns 0 rows which we map to 404.
+  const custResult = await runQuery(
+    db,
+    `SELECT id, name, archived
+       FROM finance.customers
+      WHERE tenant_id = $1 AND id IN ($2, $3)`,
+    [tenantId, primaryId, secondaryId],
+  );
+  const custRows = custResult.rows || [];
+  if (custRows.length === 0) {
+    throw new ValueError(
+      `customers not found in tenant ${tenantId} (primary_id=${primaryId}, secondary_id=${secondaryId})`,
+    );
+  }
+  const found = new Map();
+  for (const row of custRows) found.set(Number(row.id), row);
+  if (!found.has(primaryId)) {
+    throw new ValueError(`primary customer ${primaryId} not found in tenant ${tenantId}`);
+  }
+  if (!found.has(secondaryId)) {
+    throw new ValueError(`secondary customer ${secondaryId} not found in tenant ${tenantId}`);
+  }
+  const secondaryRow = found.get(secondaryId);
+  if (Number(secondaryRow.archived) === 1) {
+    throw new ValueError(
+      `secondary customer ${secondaryId} is already archived; cannot merge again`,
+    );
+  }
+
+  // Re-assign invoices from secondary to primary. We count
+  // BEFORE + AFTER, then the delta is the re-assigned count.
+  // This is adapter-agnostic (works for both pg and sqlite
+  // because both return rowCount from UPDATE; we use SELECT
+  // for the count to keep the logic uniform).
+  const invCountBefore = await runQuery(
+    db,
+    `SELECT COUNT(*) AS n
+       FROM finance.invoices
+      WHERE tenant_id = $1 AND customer_id = $2`,
+    [tenantId, primaryId],
+  );
+  const payCountBefore = await runQuery(
+    db,
+    `SELECT COUNT(*) AS n
+       FROM finance.payments p
+       JOIN finance.invoices i ON i.id = p.invoice_id
+      WHERE i.tenant_id = $1 AND i.customer_id = $2`,
+    [tenantId, primaryId],
+  );
+  const beforeInvoices = Number(invCountBefore.rows?.[0]?.n ?? 0);
+  const beforePayments = Number(payCountBefore.rows?.[0]?.n ?? 0);
+
+  // The actual re-assignment. UPDATE is scoped by both
+  // tenant_id (always-on) and the secondary customer_id. A
+  // secondary in another tenant is invisible to this UPDATE.
+  await runQuery(
+    db,
+    `UPDATE finance.invoices
+        SET customer_id = $1,
+            updated_at = datetime('now')
+      WHERE tenant_id = $2 AND customer_id = $3`,
+    [primaryId, tenantId, secondaryId],
+  );
+
+  const invCountAfter = await runQuery(
+    db,
+    `SELECT COUNT(*) AS n
+       FROM finance.invoices
+      WHERE tenant_id = $1 AND customer_id = $2`,
+    [tenantId, primaryId],
+  );
+  const payCountAfter = await runQuery(
+    db,
+    `SELECT COUNT(*) AS n
+       FROM finance.payments p
+       JOIN finance.invoices i ON i.id = p.invoice_id
+      WHERE i.tenant_id = $1 AND i.customer_id = $2`,
+    [tenantId, primaryId],
+  );
+  const afterInvoices = Number(invCountAfter.rows?.[0]?.n ?? 0);
+  const afterPayments = Number(payCountAfter.rows?.[0]?.n ?? 0);
+  const invoicesReassigned = afterInvoices - beforeInvoices;
+  const paymentsReassigned = afterPayments - beforePayments;
+
+  // Soft-delete the secondary. Updated_at is bumped so the
+  // audit UI can show "this customer was archived at...".
+  await runQuery(
+    db,
+    `UPDATE finance.customers
+        SET archived = 1,
+            updated_at = datetime('now')
+      WHERE id = $1 AND tenant_id = $2`,
+    [secondaryId, tenantId],
+  );
+
+  // Record the audit row. The audit is append-only — no
+  // UPDATE on this table from any code path.
+  const auditIns = await runQuery(
+    db,
+    `INSERT INTO finance.customer_merge_log
+       (tenant_id, primary_customer_id, secondary_customer_id,
+        invoices_reassigned_count, payments_reassigned_count,
+        applied_by_user_id, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id`,
+    [
+      tenantId,
+      primaryId,
+      secondaryId,
+      invoicesReassigned,
+      paymentsReassigned,
+      appliedByUserId,
+      reason,
+    ],
+  );
+  let mergeLogId;
+  if (auditIns.rows && auditIns.rows.length > 0 && auditIns.rows[0].id != null) {
+    mergeLogId = Number(auditIns.rows[0].id);
+  } else {
+    // Fallback for adapters that don't support RETURNING.
+    const lastId = await runQuery(db, 'SELECT LAST_INSERT_ROWID()', []);
+    mergeLogId = Number(lastId.rows[0].id);
+  }
+
+  return {
+    merge_log_id: mergeLogId,
+    primary_id: primaryId,
+    secondary_id: secondaryId,
+    invoices_reassigned: invoicesReassigned,
+    payments_reassigned: paymentsReassigned,
+  };
+}
+
+/**
+ * List customer merge log rows for the tenant. Ordered by
+ * created_at DESC (most recent first — the operator wants
+ * to see the latest merges at the top). Optional filter
+ * by primary_customer_id or secondary_customer_id.
+ */
+export async function listCustomerMergeLog(
+  db,
+  tenantId = 0,
+  { primaryId = null, secondaryId = null, limit = 50 } = {},
+) {
+  assertTenantId(tenantId);
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 500) {
+    throw new ValueError('limit must be a positive integer between 1 and 500');
+  }
+  let result;
+  if (primaryId !== null && secondaryId !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, primary_customer_id, secondary_customer_id,
+              invoices_reassigned_count, payments_reassigned_count,
+              applied_by_user_id, reason, created_at
+         FROM finance.customer_merge_log
+        WHERE tenant_id = $1
+          AND primary_customer_id = $2
+          AND secondary_customer_id = $3
+        ORDER BY created_at DESC, id DESC
+        LIMIT $4`,
+      [tenantId, primaryId, secondaryId, limit],
+    );
+  } else if (primaryId !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, primary_customer_id, secondary_customer_id,
+              invoices_reassigned_count, payments_reassigned_count,
+              applied_by_user_id, reason, created_at
+         FROM finance.customer_merge_log
+        WHERE tenant_id = $1
+          AND primary_customer_id = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3`,
+      [tenantId, primaryId, limit],
+    );
+  } else if (secondaryId !== null) {
+    result = await runQuery(
+      db,
+      `SELECT id, primary_customer_id, secondary_customer_id,
+              invoices_reassigned_count, payments_reassigned_count,
+              applied_by_user_id, reason, created_at
+         FROM finance.customer_merge_log
+        WHERE tenant_id = $1
+          AND secondary_customer_id = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3`,
+      [tenantId, secondaryId, limit],
+    );
+  } else {
+    result = await runQuery(
+      db,
+      `SELECT id, primary_customer_id, secondary_customer_id,
+              invoices_reassigned_count, payments_reassigned_count,
+              applied_by_user_id, reason, created_at
+         FROM finance.customer_merge_log
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
+      [tenantId, limit],
+    );
+  }
+  return result.rows || [];
 }

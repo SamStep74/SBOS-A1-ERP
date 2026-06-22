@@ -313,6 +313,7 @@ const PERMISSION_SETS = Object.freeze({
       'crm.deal.delete',
       'finance.customer.create',
       'finance.customer.update',
+      'finance.customer.merge',
       'finance.customer.read',
       'crm.deal.assign',
       'crm.deal.export',

@@ -509,6 +509,12 @@ const PERMISSIONS = Object.freeze({
     label: 'Edit customer',
     description: 'Edit a customer record (name, HVVH, address, email).',
   },
+  'finance.customer.merge': {
+    category: 'finance',
+    sensitivity: 'high',
+    label: 'Merge customers',
+    description: 'Re-assign invoices + payments from one customer to another, archive the secondary, and record a merge audit row. Use with care — the merge is one-way and audit-logged.',
+  },
   'finance.customer.read': {
     category: 'finance',
     sensitivity: 'low',

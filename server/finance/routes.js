@@ -236,6 +236,8 @@ import {
   getDataQualitySummary,
   suggestMergeCandidates,
   getDataQualityAlerts,
+  applyCustomerMerge,
+  listCustomerMergeLog,
 } from './dataQuality.js';
 import {
   createReportSchedule,
@@ -3145,6 +3147,74 @@ export function registerFinanceRoutes(app, opts = {}) {
       const tenantId = req.tenantId;
       const threshold = req.query.threshold ? Number(req.query.threshold) : 80;
       const items = await getDataQualityAlerts(pgAdapter, tenantId, threshold);
+      res.status(200).json({ items });
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 3 AI agents wave 3 (W99-1) — apply customer merge.
+  // ────────────────────────────────────────────────────────────────────
+
+  // POST /api/finance/ai/apply-merge
+  //   Re-assign invoices from secondary to primary, archive
+  //   the secondary, record an audit row in
+  //   finance.customer_merge_log. Perm-gated by
+  //   finance.customer.merge (a high-sensitivity perm; only
+  //   the CRMOperator role holds it by default).
+  //
+  //   Body: { primary_id, secondary_id, reason?, applied_by_user_id? }
+  //     - primary_id, secondary_id: required positive integers
+  //     - reason: optional operator note (≤ 1024 chars)
+  //     - applied_by_user_id: optional; defaults to the current user
+  //       (req.user.id) if not provided in the body
+  //
+  //   Returns 200 with { merge_log_id, primary_id, secondary_id,
+  //   invoices_reassigned, payments_reassigned } on success.
+  //   Returns 400 for ValueError (bad input, already archived,
+  //   same primary/secondary).
+  app.post('/api/finance/ai/apply-merge', requireTenant, requirePerm('finance.customer.merge'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const body = req.body || {};
+      // Default applied_by_user_id to the current user if not provided.
+      const input = {
+        primary_id: body.primary_id,
+        secondary_id: body.secondary_id,
+        reason: body.reason ?? null,
+        applied_by_user_id: body.applied_by_user_id ?? (req.user && req.user.id) ?? null,
+      };
+      const result = await applyCustomerMerge(pgAdapter, input, tenantId);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err && err.name === 'ValueError') {
+        // Distinguish "not found" (404) from "bad input" (400).
+        // The pure function throws ValueError for both; we use
+        // the message prefix to decide.
+        if (/not found/i.test(err.message)) {
+          return res.status(404).json({ error: 'not_found', message: err.message });
+        }
+        return res.status(400).json({ error: 'bad_request', message: err.message });
+      }
+      next(err);
+    }
+  });
+
+  // GET /api/finance/ai/merge-log
+  //   List merge log rows for the tenant. Ordered by created_at
+  //   DESC (most recent first). Optional filter by primary_id or
+  //   secondary_id. Default limit 50, max 500.
+  app.get('/api/finance/ai/merge-log', requireTenant, requirePerm('finance.customer.merge'), async (req, res, next) => {
+    try {
+      const tenantId = req.tenantId;
+      const primaryId = req.query.primary_id ? Number(req.query.primary_id) : null;
+      const secondaryId = req.query.secondary_id ? Number(req.query.secondary_id) : null;
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+      const items = await listCustomerMergeLog(pgAdapter, tenantId, { primaryId, secondaryId, limit });
       res.status(200).json({ items });
     } catch (err) {
       if (err && err.name === 'ValueError') {
