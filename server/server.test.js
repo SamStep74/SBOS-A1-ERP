@@ -156,6 +156,20 @@ function makeFinanceDb() {
       last_purge_count INTEGER,
       last_purge_days INTEGER
     );
+    -- Migration 0035 (W66 retention history) — mirror the
+    -- production prefix-stripped shape: the table is
+    -- finance.retention_history on pg and retention_history
+    -- on sqlite.
+    CREATE TABLE retention_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL,
+      snapshot_at TEXT NOT NULL,
+      retention_days INTEGER NOT NULL,
+      has_explicit_config INTEGER NOT NULL DEFAULT 0,
+      audit_row_count INTEGER NOT NULL DEFAULT 0,
+      last_purge_at TEXT,
+      last_purge_count INTEGER
+    );
     /* Migration 0007 (inventory): ported schema mirror. The actual
        table name on sqlite is 'catalog_items' (no finance.
        prefix) because the migration runner strips it. Same for
@@ -2156,6 +2170,44 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     const r = await postJson(server, '/api/finance/audit/retention/digest', {});
     assert.equal(r.status, 400);
     assert.equal(r.body.error, 'invalid_request');
+  });
+
+  // ─── Wave 66: retention history snapshots ───
+
+  test('66a. POST /api/finance/audit/retention/history/snapshot returns the count', async () => {
+    // Clean prior history.
+    full.db.prepare(`DELETE FROM retention_history WHERE tenant_id = 0`).run();
+    const r = await postJson(
+      server,
+      '/api/finance/audit/retention/history/snapshot',
+      {},
+    );
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    // tenant 0 has audit rows from earlier tests, so the
+    // snapshot must include at least 1 row.
+    assert.ok(r.body.snapshots >= 1, `expected >= 1 snapshot, got ${r.body.snapshots}`);
+  });
+
+  test('66b. GET /api/finance/audit/retention/history returns the snapshot list', async () => {
+    // 66a already took a snapshot. Read it back.
+    const r = await get(server, '/api/finance/audit/retention/history');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+    // The items list is sorted newest first.
+    for (let i = 1; i < r.body.items.length; i += 1) {
+      assert.ok(
+        r.body.items[i - 1].snapshot_at >= r.body.items[i].snapshot_at,
+        'history must be sorted newest first',
+      );
+    }
+    // Each item has the documented shape.
+    const item = r.body.items[0];
+    assert.ok(typeof item.tenant_id === 'number');
+    assert.ok(typeof item.retention_days === 'number');
+    assert.ok(typeof item.has_explicit_config === 'boolean');
+    assert.ok(typeof item.audit_row_count === 'number');
+    assert.ok(typeof item.snapshot_at === 'string');
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {

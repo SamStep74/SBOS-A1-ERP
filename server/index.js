@@ -719,6 +719,29 @@ export async function createApp({
     app.locals.auditRetention = auditHandle;
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // W66: retention history auto-snapshot worker.
+  //
+  // Opt-in via SBOS_RETENTION_HISTORY_ENABLED=true. The
+  // default is OFF so existing deploys see no behavior
+  // change. When enabled, the worker captures the
+  // dashboard periodically (default 24h, floored at
+  // 60s) into finance.retention_history.
+  // ────────────────────────────────────────────────────────────────
+  if (process.env.SBOS_RETENTION_HISTORY_ENABLED === 'true') {
+    const { startRetentionSnapshot } = await import(
+      './finance/retentionHistory.js'
+    );
+    const historyTickMs = process.env.SBOS_RETENTION_HISTORY_TICK_MS
+      ? Number(process.env.SBOS_RETENTION_HISTORY_TICK_MS)
+      : 24 * 60 * 60 * 1000;
+    const historyHandle = startRetentionSnapshot({
+      db: dbRef.current,
+      tickMs: historyTickMs,
+    });
+    app.locals.retentionHistory = historyHandle;
+  }
+
   // Generic 500.
   app.use((err, req, res, _next) => {
     console.error('[server] unhandled error:', err && err.stack ? err.stack : err);

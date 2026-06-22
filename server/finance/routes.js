@@ -28,6 +28,8 @@
 //   GET    /api/finance/audit/retention/dashboard        (security.audit.read)          — W63 dashboard
 //   GET    /api/finance/audit/retention/dashboard/export (security.audit.read)          — W64 CSV export
 //   POST   /api/finance/audit/retention/digest          (security.audit.export)         — W65 weekly digest email
+//   GET    /api/finance/audit/retention/history         (security.audit.read)          — W66 per-tenant snapshot history
+//   POST   /api/finance/audit/retention/history/snapshot (security.audit.retention.update) — W66 manual snapshot
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -163,6 +165,10 @@ import {
   getRetentionDigestSummary,
   buildRetentionDigestBody,
 } from './auditRetention.js';
+import {
+  listRetentionHistory,
+  snapshotRetentionDashboard,
+} from './retentionHistory.js';
 import {
   createCatalogItem,
   listCatalogItems,
@@ -1718,6 +1724,77 @@ export function registerFinanceRoutes(app, opts = {}) {
           summary,
           body: text,
         });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/history — per-tenant
+  // history of retention snapshots. The CFO can answer
+  // "what did the retention state look like last Tuesday?"
+  // by reading the history.
+  //
+  // Query params:
+  //   since:  optional ISO timestamp (lower bound)
+  //   until:  optional ISO timestamp (upper bound)
+  //   limit:  default 100, max 1000
+  //
+  // Returns: { items: [...] } sorted by snapshot_at DESC.
+  // The route is tenant-scoped: the calling tenant sees
+  // only its own history (req.tenantId from the
+  // requireTenant middleware). Cross-tenant access would
+  // require a CFO-level perm; not exposed here.
+  //
+  // Perm gate: `security.audit.read` (same as the
+  // dashboard GET).
+  app.get(
+    '/api/finance/audit/retention/history',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const history = listRetentionHistory(rawDb, {
+          tenantId: req.tenantId,
+          since: req.query.since,
+          until: req.query.until,
+          limit: req.query.limit,
+        });
+        res.status(200).json(history);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/audit/retention/history/snapshot —
+  // manually trigger a snapshot. Useful in tests + the
+  // smoke runner; production deploys use the opt-in
+  // auto-snapshot worker (SBOS_RETENTION_HISTORY_ENABLED).
+  //
+  // Perm gate: `security.audit.retention.update` (same
+  // as the manual purge route — both are write-side ops
+  // on the retention state).
+  app.post(
+    '/api/finance/audit/retention/history/snapshot',
+    requireTenant,
+    requirePerm('security.audit.retention.update'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const count = snapshotRetentionDashboard(rawDb);
+        res.status(200).json({ ok: true, snapshots: count });
       } catch (err) {
         next(err);
       }

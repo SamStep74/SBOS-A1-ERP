@@ -40,3 +40,9 @@ coverage/
 # Backup artifacts (Wave 51+)
 # $SBOS_BACKUP_DIR — runtime DB snapshots + validate uploads.
 backups/
+
+# Runtime artifacts (Wave 65+)
+# $SBOS_EMAILS_CAPTURE_DIR — email service capture mode writes here.
+# Tests + smoke runs produce *.jsonl files that should never be
+# committed (they're test output, not source).
+var/

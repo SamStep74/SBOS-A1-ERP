@@ -3716,6 +3716,118 @@ else
 fi
 echo
 
+echo "=== STEP 5ag: Retention history snapshots (Wave 66) ==="
+# Smoke coverage for the W66 history module. We verify:
+#   1. POST snapshot returns 200 with count >= 1
+#   2. GET history returns 200 with items array
+#   3. Items are sorted newest first
+#   4. Each item has the documented shape
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body || {});
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) POST snapshot returns 200 with count
+    const r1 = await sendJson("POST", "/api/finance/audit/retention/history/snapshot", {});
+    if (r1.status !== 200) {
+      console.log("  FAIL snapshot status " + r1.status);
+      process.exit(1);
+    }
+    if (r1.body.ok !== true || typeof r1.body.snapshots !== "number") {
+      console.log("  FAIL snapshot response shape: " + JSON.stringify(r1.body));
+      process.exit(1);
+    }
+    if (r1.body.snapshots < 1) {
+      console.log("  FAIL expected >= 1 snapshot, got " + r1.body.snapshots);
+      process.exit(1);
+    }
+    console.log("  snapshot took " + r1.body.snapshots + " rows");
+
+    // 2) GET history returns 200 with items
+    const r2 = await get("/api/finance/audit/retention/history");
+    if (r2.status !== 200) {
+      console.log("  FAIL history status " + r2.status);
+      process.exit(1);
+    }
+    if (!Array.isArray(r2.body.items) || r2.body.items.length < 1) {
+      console.log("  FAIL history items missing or empty");
+      process.exit(1);
+    }
+    console.log("  history returned " + r2.body.items.length + " items");
+
+    // 3) Items sorted newest first
+    for (let i = 1; i < r2.body.items.length; i += 1) {
+      if (r2.body.items[i - 1].snapshot_at < r2.body.items[i].snapshot_at) {
+        console.log("  FAIL history not sorted newest first at index " + i);
+        process.exit(1);
+      }
+    }
+    console.log("  items sorted newest first");
+
+    // 4) Each item has the documented shape
+    const item = r2.body.items[0];
+    for (const field of ["tenant_id", "snapshot_at", "retention_days", "has_explicit_config", "audit_row_count"]) {
+      if (item[field] === undefined) {
+        console.log("  FAIL item missing field " + field);
+        process.exit(1);
+      }
+    }
+    console.log("  item shape OK");
+
+    console.log("  OK retention history");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  retention history OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
