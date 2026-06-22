@@ -43,7 +43,9 @@
 //
 // The router expects to be registered with a Fastify app that has:
 //   - app.authenticate preHandler in place (sets request.user)
-//   - this.db (sqlite) on the app instance OR injected via opts.db
+//   - this.db (sqlite) on the app instance OR injected via opts.dbRef
+//     (the legacy opts.db is captured at registration time; for the
+//     live-swap use case, pass opts.dbRef instead)
 import { PERMISSIONS, PERMISSIONS_VERSION, getDefinition, byCategory } from './permissions.js';
 import { ROLES, validateCustomRole, listRoleIds } from './roles.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
@@ -61,6 +63,8 @@ import {
   statSync,
   writeFileSync,
   mkdirSync,
+  existsSync,
+  copyFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -85,9 +89,30 @@ import {
 } from './approvals.js';
 
 function registerRbacRoutes(app, opts = {}) {
-  const db = opts.db || app.db;
-  if (!db) {
-    throw new Error('rbac routes require db: pass opts.db or set app.db');
+  // The live sqlite handle can be swapped at runtime — POST
+  // /api/rbac/backup/restore closes the current handle, replaces
+  // the underlying file, and reopens. To support that, every
+  // route reads through `dbRef.current` (a mutable holder) instead
+  // of capturing the handle in a const.
+  //
+  // Two ways to wire this in:
+  //   1. Pass `opts.dbRef = { current: <handle> }` directly.
+  //   2. Pass `opts.db = <handle>` (legacy — captured at registration
+  //      time, the live swap will NOT propagate to RBAC routes).
+  //
+  // For the live-swap use case, callers MUST use option 1.
+  const dbRef = opts.dbRef || { current: opts.db || app.db };
+  if (!dbRef.current) {
+    throw new Error('rbac routes require db: pass opts.dbRef, opts.db, or set app.db');
+  }
+  // swapDb (if provided) is the canonical way to replace the live
+  // handle. The restore route uses it to close the current handle,
+  // write the new file in its place, reopen, and update the holder.
+  // If not provided, the restore route is unavailable (the legacy
+  // registration path).
+  const swapDb = opts.swapDb || null;
+  function getDb() {
+    return dbRef.current;
   }
 
   // ───── Role lookup helpers ─────
@@ -109,7 +134,7 @@ function registerRbacRoutes(app, opts = {}) {
   function loadRoleFromDb(id) {
     // Returns the DB row in the same shape as the in-code ROLES[id]
     // (camelCase), or null if the id is not in the table.
-    const row = db
+    const row = getDb()
       .prepare(
         `SELECT id, label, description, parent, is_system, app_set_json,
                 mfa_required, session_hard_limit_minutes, can_be_impersonated
@@ -213,7 +238,7 @@ function registerRbacRoutes(app, opts = {}) {
       };
     });
     // Append DB-only custom roles.
-    const customRows = db
+    const customRows = getDb()
       .prepare(
         `SELECT id, label, description, parent, is_system,
                 app_set_json, mfa_required, session_hard_limit_minutes, can_be_impersonated
@@ -246,7 +271,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.role.create') },
     async (request, reply) => {
       const validated = validateCustomRole(request.body);
-      const stmt = db.prepare(`
+      const stmt = getDb().prepare(`
       INSERT INTO sbos_rbac_roles (
         id, tenant_id, label, description, parent, is_system,
         app_set_json, mfa_required, session_hard_limit_minutes, can_be_impersonated, created_by
@@ -287,7 +312,7 @@ function registerRbacRoutes(app, opts = {}) {
         const body = request.body || {};
         const next = { ...r };
         for (const k of allowed) if (k in body) next[k] = body[k];
-        db.prepare(
+        getDb().prepare(
           `
         UPDATE sbos_rbac_roles
            SET label = ?, description = ?, app_set_json = ?, mfa_required = ?,
@@ -307,7 +332,7 @@ function registerRbacRoutes(app, opts = {}) {
       }
       // Custom roles: re-validate the merged result.
       const merged = validateCustomRole({ ...r, ...request.body });
-      db.prepare(
+      getDb().prepare(
         `
       UPDATE sbos_rbac_roles
          SET label = ?, description = ?, parent = ?, app_set_json = ?,
@@ -338,11 +363,11 @@ function registerRbacRoutes(app, opts = {}) {
       if (!r) return reply.code(404).send({ error: 'not_found' });
       if (r.isSystem) return reply.code(409).send({ error: 'system_role_immutable' });
       // Refuse if anyone still holds this role.
-      const used = db
+      const used = getDb()
         .prepare(`SELECT COUNT(*) AS c FROM sbos_rbac_user_roles WHERE role_id = ?`)
         .get(id);
       if (used && used.c > 0) return reply.code(409).send({ error: 'role_in_use', count: used.c });
-      db.prepare(`DELETE FROM sbos_rbac_roles WHERE id = ? AND is_system = 0`).run(id);
+      getDb().prepare(`DELETE FROM sbos_rbac_roles WHERE id = ? AND is_system = 0`).run(id);
       return reply.code(204).send();
     },
   );
@@ -354,7 +379,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.user.read') },
     async (request, reply) => {
       const userId = Number(request.params.userId);
-      const u = db
+      const u = getDb()
         .prepare(
           `
       SELECT u.id, u.username, u.email, u.role AS primary_role, u.tenant_id, u.org_id, u.mfa_required, u.mfa_verified
@@ -364,7 +389,7 @@ function registerRbacRoutes(app, opts = {}) {
         .get(userId);
       if (!u) return reply.code(404).send({ error: 'user_not_found' });
 
-      const directPS = db
+      const directPS = getDb()
         .prepare(
           `
       SELECT permission_set_id FROM sbos_rbac_user_permission_sets
@@ -403,9 +428,9 @@ function registerRbacRoutes(app, opts = {}) {
       const body = request.body || {};
       const psId = String(body.permissionSetId || '');
       if (!PERMISSION_SETS[psId]) return reply.code(400).send({ error: 'invalid_permission_set' });
-      const tenant = db.prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
+      const tenant = getDb().prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
       if (!tenant) return reply.code(404).send({ error: 'user_not_found' });
-      db.prepare(
+      getDb().prepare(
         `
       INSERT INTO sbos_rbac_user_permission_sets (user_id, permission_set_id, tenant_id, granted_by, expires_at)
       VALUES (?, ?, ?, ?, ?)
@@ -424,9 +449,9 @@ function registerRbacRoutes(app, opts = {}) {
     async (request, reply) => {
       const userId = Number(request.params.userId);
       const psId = String(request.params.ps);
-      const tenant = db.prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
+      const tenant = getDb().prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
       if (!tenant) return reply.code(404).send({ error: 'user_not_found' });
-      db.prepare(
+      getDb().prepare(
         `DELETE FROM sbos_rbac_user_permission_sets WHERE user_id = ? AND permission_set_id = ? AND tenant_id = ?`,
       ).run(userId, psId, tenant.tenant_id || 0);
       return reply.code(204).send();
@@ -441,9 +466,9 @@ function registerRbacRoutes(app, opts = {}) {
       const body = request.body || {};
       const roleId = String(body.roleId || '');
       if (!ROLES[roleId]) return reply.code(400).send({ error: 'invalid_role' });
-      const tenant = db.prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
+      const tenant = getDb().prepare(`SELECT tenant_id FROM users WHERE id = ?`).get(userId);
       if (!tenant) return reply.code(404).send({ error: 'user_not_found' });
-      db.prepare(
+      getDb().prepare(
         `
       INSERT INTO sbos_rbac_user_roles (user_id, role_id, tenant_id, assigned_by)
       VALUES (?, ?, ?, ?)
@@ -454,7 +479,7 @@ function registerRbacRoutes(app, opts = {}) {
       ).run(userId, roleId, tenant.tenant_id || 0, request.user.id);
       // Mirror to users.role column if it exists, for the fast-path middleware.
       try {
-        db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(roleId, userId);
+        getDb().prepare(`UPDATE users SET role = ? WHERE id = ?`).run(roleId, userId);
       } catch (_) {
         /* users.role may not exist in some deployments */
       }
@@ -479,7 +504,7 @@ function registerRbacRoutes(app, opts = {}) {
       if (!Number.isInteger(userId) || userId <= 0) {
         return reply.code(404).send({ error: 'not_found' });
       }
-      const user = db
+      const user = getDb()
         .prepare(
           `SELECT id, tenant_id, failed_logins, locked_until FROM users WHERE id = ?`,
         )
@@ -489,7 +514,7 @@ function registerRbacRoutes(app, opts = {}) {
         failed_logins: Number(user.failed_logins || 0),
         locked_until: user.locked_until || null,
       };
-      db.prepare(
+      getDb().prepare(
         `UPDATE users
             SET failed_logins = 0,
                 locked_until = NULL
@@ -536,7 +561,7 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/profiles',
     { preHandler: requirePermFastify('security.profile.read') },
     async () => {
-      return { items: listProfiles(db) };
+      return { items: listProfiles(getDb()) };
     },
   );
 
@@ -545,7 +570,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.profile.create') },
     async (request, reply) => {
       try {
-        const row = createProfile(db, {
+        const row = createProfile(getDb(), {
           ...(request.body || {}),
           created_by: request.user ? String(request.user.id || '') : null,
         });
@@ -560,7 +585,7 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/profiles/:id',
     { preHandler: requirePermFastify('security.profile.read') },
     async (request, reply) => {
-      const row = getProfile(db, request.params.id);
+      const row = getProfile(getDb(), request.params.id);
       if (!row) return reply.code(404).send({ error: 'profile_not_found' });
       return row;
     },
@@ -575,7 +600,7 @@ function registerRbacRoutes(app, opts = {}) {
         if (!Number.isInteger(userId) || userId <= 0) {
           return reply.code(400).send({ error: 'invalid_user_id' });
         }
-        const result = applyProfile(db, request.params.id, userId);
+        const result = applyProfile(getDb(), request.params.id, userId);
         return reply.code(200).send(result);
       } catch (err) {
         return replyProfileError(reply, err);
@@ -588,7 +613,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.profile.delete') },
     async (request, reply) => {
       try {
-        deleteProfile(db, request.params.id);
+        deleteProfile(getDb(), request.params.id);
         return reply.code(204).send();
       } catch (err) {
         return replyProfileError(reply, err);
@@ -603,7 +628,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.permission_set.read') },
     async () => {
       return {
-        items: db
+        items: getDb()
           .prepare(
             `SELECT field_path, min_permission, is_visible, label, updated_at
                             FROM sbos_rbac_field_policies WHERE tenant_id = 0
@@ -627,7 +652,7 @@ function registerRbacRoutes(app, opts = {}) {
       if (!body.minPermission || !PERMISSIONS[body.minPermission]) {
         return reply.code(400).send({ error: 'invalid_min_permission' });
       }
-      db.prepare(
+      getDb().prepare(
         `
       INSERT INTO sbos_rbac_field_policies (field_path, tenant_id, min_permission, is_visible, label, updated_by)
       VALUES (?, 0, ?, ?, ?, ?)
@@ -656,7 +681,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.permission_set.read') },
     async () => {
       return {
-        items: db
+        items: getDb()
           .prepare(
             `SELECT resource, scope, predicate, description, updated_at
                             FROM sbos_rbac_record_rules WHERE tenant_id = 0
@@ -684,7 +709,7 @@ function registerRbacRoutes(app, opts = {}) {
       ) {
         return reply.code(400).send({ error: 'predicate_required_for_custom_scope' });
       }
-      db.prepare(
+      getDb().prepare(
         `
       INSERT INTO sbos_rbac_record_rules (resource, tenant_id, scope, predicate, description, updated_by)
       VALUES (?, 0, ?, ?, ?, ?)
@@ -714,7 +739,7 @@ function registerRbacRoutes(app, opts = {}) {
     async (request) => {
       const limit = Math.min(Number(request.query.limit) || 100, 500);
       return {
-        items: db
+        items: getDb()
           .prepare(
             `
         SELECT id, user_id, role_id, created_at, last_seen_at, expires_at, ip, mfa_factor, mfa_verified_at, impersonator_id
@@ -733,7 +758,7 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/sessions/:id',
     { preHandler: requirePermFastify('security.session.revoke') },
     async (request, reply) => {
-      db.prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(
+      getDb().prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(
         request.params.id,
       );
       return reply.code(204).send();
@@ -805,7 +830,7 @@ function registerRbacRoutes(app, opts = {}) {
     '/api/rbac/backup',
     { preHandler: requirePermFastify('system.backup.run') },
     async (request, reply) => {
-      const row = db.prepare('PRAGMA database_list').get();
+      const row = getDb().prepare('PRAGMA database_list').get();
       const dbFile = row && row.file;
       if (!dbFile) {
         return reply
@@ -815,7 +840,7 @@ function registerRbacRoutes(app, opts = {}) {
       // Audit BEFORE the snapshot (so the audit log entry is in
       // the snapshot itself — important for forensics).
       try {
-        db.prepare(
+        getDb().prepare(
           `INSERT INTO audit (tenant_id, user_id, username, action, resource, method, path, status_code, payload_json, request_id)
            VALUES (?, ?, ?, 'backup.run', 'database', 'POST', '/api/rbac/backup', 200, '{}', ?)`,
         ).run(
@@ -831,7 +856,7 @@ function registerRbacRoutes(app, opts = {}) {
       // Write a consistent snapshot via VACUUM INTO.
       const tmpPath = join(tmpdir(), `sbos-backup-${randomBytes(8).toString('hex')}.db`);
       try {
-        db.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+        getDb().exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
       } catch (err) {
         return reply.code(500).send({
           error: 'backup_failed',
@@ -953,6 +978,194 @@ function registerRbacRoutes(app, opts = {}) {
     },
   );
 
+  // POST /api/rbac/backup/restore — disaster-recovery restore.
+  // The operator picks a previously-validated backup file
+  // (sbos-backup-YYYY-MM-DD.db) and the server replaces the live
+  // sqlite file in place. The swap is:
+  //   1. Pre-snapshot the CURRENT live db to ./backups/pre-restore-
+  //      {timestamp}.db via VACUUM INTO (rollback safety net)
+  //   2. Close the current sqlite handle
+  //   3. Copy the chosen backup file over the live db path
+  //   4. Open a fresh sqlite handle from the now-replaced file
+  //   5. swapDb(newHandle) — updates the holder + app.locals.db
+  //   6. Sanity check: the new handle has at least 1 table
+  //   7. Audit log entry on the NEW handle
+  //   8. Return 200 with the pre-restore name + table count
+  //
+  // The endpoint is intentionally conservative: it refuses any
+  // filename that doesn't match the canonical pattern (prevents
+  // path traversal), refuses in-memory dbs, and creates a
+  // pre-restore snapshot the operator can roll back to.
+  //
+  // Perm gate: system.backup.run (high sensitivity).
+  app.post(
+    '/api/rbac/backup/restore',
+    { preHandler: requirePermFastify('system.backup.run') },
+    async (request, reply) => {
+      // swapDb must be wired in — the legacy registration path
+      // (no live-swap support) refuses to expose this endpoint.
+      if (!swapDb) {
+        return reply.code(501).send({
+          error: 'restore_not_supported',
+          message: 'live restore requires the app to be wired with opts.swapDb',
+        });
+      }
+      const body = request.body || {};
+      const filename = String(body.filename || '');
+      // Reject anything that doesn't match the canonical backup
+      // filename pattern. This is the path-traversal guard: the
+      // operator can only reference files of the form
+      // sbos-backup-YYYY-MM-DD.db, never arbitrary paths.
+      if (!/^sbos-backup-\d{4}-\d{2}-\d{2}\.db$/.test(filename)) {
+        return reply.code(400).send({
+          error: 'invalid_filename',
+          message: 'filename must match sbos-backup-YYYY-MM-DD.db',
+        });
+      }
+      const backupDir = process.env.SBOS_BACKUP_DIR || './backups';
+      const backupPath = join(backupDir, filename);
+      if (!existsSync(backupPath)) {
+        return reply.code(404).send({
+          error: 'backup_not_found',
+          message: `no backup file at ${filename}`,
+        });
+      }
+      // Quick magic check — re-validating the file before
+      // swapping prevents trashing a live db with a corrupt file.
+      const buf = readFileSync(backupPath);
+      if (
+        buf.length < 16 ||
+        buf.slice(0, 16).toString('utf8') !== 'SQLite format 3\u0000'
+      ) {
+        return reply.code(400).send({
+          error: 'invalid_backup',
+          message: 'file does not start with the SQLite magic string',
+        });
+      }
+      // Get the current live db path BEFORE we swap. After the
+      // swap, the new handle's PRAGMA database_list would return
+      // the new (backup) file's path, not the original.
+      const currentRow = getDb().prepare('PRAGMA database_list').get();
+      const currentPath = currentRow && currentRow.file;
+      if (!currentPath || currentPath === ':memory:') {
+        return reply.code(501).send({
+          error: 'in_memory_db',
+          message: 'cannot restore to an in-memory database',
+        });
+      }
+      // Step 1: pre-restore snapshot. The handle is still open
+      // here; VACUUM INTO is the safest way to copy a live sqlite
+      // db (it serializes writes).
+      mkdirSync(backupDir, { recursive: true });
+      const ts = new Date()
+        .toISOString()
+        .replace(/[:.]/g, '-')
+        .slice(0, 19);
+      const preRestoreName = `pre-restore-${ts}.db`;
+      const preRestorePath = join(backupDir, preRestoreName);
+      getDb().exec(
+        `VACUUM INTO '${preRestorePath.replace(/'/g, "''")}'`,
+      );
+      // Step 2-5: close, copy, reopen, swap.
+      const { DatabaseSync } = await import('node:sqlite');
+      // Close the current handle via swapDb (it handles close +
+      // ref update). We pass a temporary placeholder; we'll reopen
+      // a real handle from the new file just after.
+      swapDb(null);
+      try {
+        // Step 3: copy the chosen backup over the live path.
+        copyFileSync(backupPath, currentPath);
+        // Step 4: open a new handle from the now-replaced file.
+        const newHandle = new DatabaseSync(currentPath);
+        // Step 5: swap in the new handle.
+        swapDb(newHandle);
+        // Step 6: sanity check — the new handle must have at
+        // least 1 table. An empty db would be a sign of a corrupt
+        // or unrelated backup.
+        const tables = newHandle
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'",
+          )
+          .get();
+        const tableCount = Number(tables.n || 0);
+        if (tableCount === 0) {
+          // Roll back: restore the pre-restore snapshot.
+          try {
+            newHandle.close();
+            copyFileSync(preRestorePath, currentPath);
+            swapDb(new DatabaseSync(currentPath));
+          } catch (_rollbackErr) {
+            // If rollback fails, the live db is in a bad state.
+            // Best-effort: just close. The operator can manually
+            // recover from the pre-restore file.
+          }
+          return reply.code(400).send({
+            error: 'empty_backup',
+            message: 'backup file contains no tables; rolled back',
+            pre_restore: preRestoreName,
+          });
+        }
+        // Step 7: audit log on the NEW handle.
+        try {
+          newHandle
+            .prepare(
+              `INSERT INTO audit_events
+                 (action, resource, resource_id, tenant_id, user_id, payload_json, decision, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+            )
+            .run(
+              'backup.restore',
+              'database',
+              filename,
+              request.user ? request.user.tenant_id || 0 : 0,
+              request.user ? request.user.id : 0,
+              JSON.stringify({
+                pre_restore: preRestoreName,
+                restored: filename,
+                table_count: tableCount,
+              }),
+              'allow',
+            );
+        } catch (_auditErr) {
+          // The audit write happens on the NEW db. If the audit
+          // table doesn't exist there, we don't want to fail the
+          // whole restore. (The pre-restore snapshot is still
+          // available for manual rollback if needed.)
+        }
+        // Step 8: return 200.
+        return reply.code(200).send({
+          ok: true,
+          pre_restore: preRestoreName,
+          restored: filename,
+          table_count: tableCount,
+        });
+      } catch (err) {
+        // Restore failed mid-way. Best-effort rollback: try to
+        // restore from the pre-restore snapshot.
+        try {
+          copyFileSync(preRestorePath, currentPath);
+          swapDb(new DatabaseSync(currentPath));
+        } catch (_rollbackErr) {
+          // The live db file is in an inconsistent state. The
+          // pre-restore snapshot is the operator's only path
+          // back. Surface the rollback failure to the caller.
+          return reply.code(500).send({
+            error: 'restore_failed_rollback_failed',
+            message: err && err.message ? err.message : 'unknown error',
+            pre_restore: preRestoreName,
+            message_2:
+              'could not roll back; use the pre-restore snapshot to recover',
+          });
+        }
+        return reply.code(500).send({
+          error: 'restore_failed',
+          message: err && err.message ? err.message : 'unknown error',
+          pre_restore: preRestoreName,
+        });
+      }
+    },
+  );
+
   // ───── Audit ─────
 
   app.get(
@@ -972,7 +1185,7 @@ function registerRbacRoutes(app, opts = {}) {
         params.push(Number(request.query.userId));
       }
       return {
-        items: db
+        items: getDb()
           .prepare(
             `
         SELECT id, user_id, permission, decision, resource, reason, ip, session_id, created_at
@@ -1050,9 +1263,9 @@ function registerRbacRoutes(app, opts = {}) {
       // Opportunistically sweep stale rows so the queue UI never
       // shows rows that are past their expires_at. expireStale is
       // idempotent and cheap on the typical small N of pending rows.
-      expireStale(db);
+      expireStale(getDb());
       const limit = Math.min(Number(request.query.limit) || 100, 500);
-      const items = listPendingApprovals(db, {
+      const items = listPendingApprovals(getDb(), {
         tenantId: request.user.tenant_id || 0,
         limit,
       });
@@ -1066,7 +1279,7 @@ function registerRbacRoutes(app, opts = {}) {
     async (request, reply) => {
       const body = request.body || {};
       try {
-        const id = requestApproval(db, {
+        const id = requestApproval(getDb(), {
           tenantId: request.user.tenant_id || 0,
           resource: body.resource,
           action: body.action,
@@ -1088,7 +1301,7 @@ function registerRbacRoutes(app, opts = {}) {
     { preHandler: requirePermFastify('security.approval.decide') },
     async (request, reply) => {
       try {
-        const result = approveRequest(db, {
+        const result = approveRequest(getDb(), {
           approvalId: request.params.id,
           approvedBy: request.user.id,
         });
@@ -1114,7 +1327,7 @@ function registerRbacRoutes(app, opts = {}) {
     async (request, reply) => {
       const body = request.body || {};
       try {
-        const result = rejectRequest(db, {
+        const result = rejectRequest(getDb(), {
           approvalId: request.params.id,
           rejectedBy: request.user.id,
           reason: body.reason,

@@ -1991,6 +1991,141 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_BACKUP_DIR="$SMOKE_BACKUP_DIR" node
   fi
 echo
 
+echo "=== STEP 5s: Backup restore (Wave 52) ==="
+# Smoke coverage for the live restore endpoint. The restore route
+# closes the live sqlite handle, copies the chosen backup over
+# the live db file, and opens a fresh handle. The test verifies:
+#   1. The endpoint refuses a path-traversal filename (400)
+#   2. The endpoint refuses a missing file (404)
+#   3. A valid snapshot restores end-to-end (200, pre_restore name
+#      is returned, the live db is replaced, the server stays
+#      healthy)
+#
+# The smoke runs the live db swap in-place. After the swap, the
+# server continues running on the new handle. The pre-restore
+# snapshot is left in the backup dir so the operator can manually
+# roll back if needed.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_BACKUP_DIR="$SMOKE_BACKUP_DIR" node -e "
+  const http = require('node:http');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let chunks = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          let parsed = buf;
+          const ct = res.headers['content-type'] || '';
+          if (ct.includes('application/json')) {
+            try { parsed = JSON.parse(buf); } catch {}
+          }
+          resolve({ status: res.statusCode, body: parsed, raw: buf, headers: res.headers });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  function postJson(p, body) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: {
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': 'application/json',
+        'content-length': body ? JSON.stringify(body).length : 2,
+      },
+    }, body ? JSON.stringify(body) : '{}');
+  }
+
+  (async () => {
+    // 1. Path-traversal: 400 invalid_filename
+    const trav = await postJson('/api/rbac/backup/restore', { filename: '../../etc/passwd' });
+    if (trav.status !== 400 || trav.body.error !== 'invalid_filename') {
+      console.log('  FAIL path-traversal: status=' + trav.status + ' body=' + JSON.stringify(trav.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 400 restore rejects path-traversal (invalid_filename)');
+
+    // 2. Missing file: 404 backup_not_found
+    const missing = await postJson('/api/rbac/backup/restore', { filename: 'sbos-backup-2099-01-01.db' });
+    if (missing.status !== 404 || missing.body.error !== 'backup_not_found') {
+      console.log('  FAIL missing file: status=' + missing.status + ' body=' + JSON.stringify(missing.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 404 restore returns backup_not_found for missing file');
+
+    // 3. Real restore: take a snapshot, save to backup dir, restore.
+    // The snapshot endpoint returns the live db as application/octet-stream.
+    const backupDir = process.env.SBOS_BACKUP_DIR;
+    const backupList = await get('/api/rbac/backup');
+    if (backupList.status !== 200) {
+      console.log('  FAIL pre-restore list: status=' + backupList.status);
+      process.exit(1);
+    }
+    // Trigger a fresh backup (POST /api/rbac/backup streams the live db).
+    const snap = await req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: '/api/rbac/backup', method: 'POST',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+    if (snap.status !== 200) {
+      console.log('  FAIL take snapshot: status=' + snap.status);
+      process.exit(1);
+    }
+    // Write the snapshot to the backup dir with today's date.
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = 'sbos-backup-' + dateStr + '.db';
+    fs.writeFileSync(path.join(backupDir, filename), snap.raw);
+    console.log('  PASS snapshot written to backups/' + filename + ' (' + snap.raw.length + ' bytes)');
+
+    // 4. Restore the snapshot.
+    const restored = await postJson('/api/rbac/backup/restore', { filename });
+    if (restored.status !== 200 || restored.body.ok !== true) {
+      console.log('  FAIL restore: status=' + restored.status + ' body=' + JSON.stringify(restored.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (!restored.body.pre_restore || !restored.body.pre_restore.startsWith('pre-restore-')) {
+      console.log('  FAIL restore: pre_restore name invalid: ' + restored.body.pre_restore);
+      process.exit(1);
+    }
+    if (restored.body.table_count < 1) {
+      console.log('  FAIL restore: table_count=' + restored.body.table_count);
+      process.exit(1);
+    }
+    console.log('  PASS 200 restore: pre_restore=' + restored.body.pre_restore + ' table_count=' + restored.body.table_count);
+
+    // 5. Post-restore: server must still be healthy (the swap
+    // closed the old handle; the new one must be functional).
+    const health = await get('/api/health');
+    if (health.status !== 200 || health.body.ok !== true) {
+      console.log('  FAIL post-restore health: status=' + health.status + ' body=' + JSON.stringify(health.body).slice(0, 100));
+      process.exit(1);
+    }
+    console.log('  PASS 200 post-restore health (server survived the swap)');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  backup restore OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

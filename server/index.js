@@ -322,23 +322,49 @@ export async function createApp({
   // (`opts.pgAdapter`) is the right interface for the pure
   // functions; this raw handle is for in-house infrastructure
   // writes that the pure functions don't own.
-  app.locals.db = db;
+  //
+  // The db is held in a mutable ref (`dbRef.current`) so it can
+  // be swapped at runtime — POST /api/rbac/backup/restore closes
+  // the current handle, replaces the underlying file, and reopens.
+  // Finance routes pick up the new handle via `req.app.locals.db`
+  // on the next request; RBAC routes use `dbRef.current` directly.
+  const dbRef = { current: db };
+  app.locals.db = dbRef.current;
   app.locals.pgAdapter = pgAdapter;
+  // swapDb is the canonical way to replace the live handle.
+  // Closes the previous handle (best effort) and updates both
+  // the holder and app.locals.db. After calling this, all
+  // route requests will see the new handle.
+  function swapDb(newDb) {
+    if (dbRef.current && dbRef.current !== newDb) {
+      try {
+        dbRef.current.close();
+      } catch (_e) {
+        // best-effort — the file underneath may already be
+        // gone (restored) or the handle may be unusable
+      }
+    }
+    dbRef.current = newDb;
+    app.locals.db = newDb;
+  }
 
   // Body parser — 1mb cap matches the spec.
   app.use(express.json({ limit: '1mb' }));
 
   // Auth middleware (must run before any /api/rbac routes).
-  app.use(makeAuthMiddlewareForApp({ db }));
+  app.use(makeAuthMiddlewareForApp({ db: dbRef.current }));
 
   // The facade exposes a Fastify-compatible API so registerRbacRoutes
   // can register its Fastify-style routes without us rewriting the
   // routes file. We pass the facade AS the app to registerRbacRoutes
   // (it only uses .get/post/patch/put/delete + app.db).
-  const facade = makeFastifyFacade(app, { db });
+  const facade = makeFastifyFacade(app, { db: dbRef.current });
 
   // RBAC routes — Fastify-style; facade captures them, doesn't mount yet.
-  registerRbacRoutes(facade, { db });
+  // Pass dbRef (mutable) + swapDb so the restore route can replace the
+  // live handle. The legacy `db` arg is also passed for callers that
+  // don't support the live-swap use case.
+  registerRbacRoutes(facade, { dbRef, db: dbRef.current, swapDb });
 
   // Flush the facade registrations onto Express (so RBAC routes share
   // the same router stack as the rest).
