@@ -2784,6 +2784,137 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5y: File-type magic-byte detection (Wave 58) ==="
+# Smoke coverage for the Wave 58 file-type check on the
+# attachment upload endpoint. We verify:
+#   1. Real PDF bytes + application/pdf claim is accepted (201)
+#   2. PDF bytes claimed as image/jpeg is REJECTED (400) —
+#      the classic smuggling pattern
+#   3. Executable (MZ) bytes claimed as application/pdf is
+#      REJECTED (400)
+#   4. No x-mime-type (octet-stream default) is always accepted
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS_DIR" node -e "
+  const http = require('node:http');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function postRaw(p, body, headers = {}) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: Object.assign({
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': 'application/octet-stream',
+        'content-length': body ? body.length : 0,
+      }, headers),
+    }, body);
+  }
+
+  (async () => {
+    // Find an invoice id (the smoke creates several earlier).
+    const listRes = await new Promise((resolve) => {
+      const r = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path: '/api/finance/invoices?limit=1', method: 'GET',
+        headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(buf) }));
+      });
+      r.end();
+    });
+    if (listRes.status !== 200 || !listRes.body.items || listRes.body.items.length === 0) {
+      console.log('  FAIL no invoices available');
+      process.exit(1);
+    }
+    const invoiceId = listRes.body.items[0].id;
+
+    // 1. Real PDF bytes + application/pdf → 201.
+    const pdfBytes = Buffer.concat([
+      Buffer.from('%PDF-1.4\n'),
+      Buffer.from('smoke wave 58 pdf ' + Date.now()),
+    ]);
+    const pdfRes = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      pdfBytes,
+      { 'x-filename': 'smoke_w58.pdf', 'x-mime-type': 'application/pdf' },
+    );
+    if (pdfRes.status !== 201) {
+      console.log('  FAIL PDF upload: status=' + pdfRes.status + ' body=' + JSON.stringify(pdfRes.body).slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 201 PDF bytes + application/pdf claim accepted (id=' + pdfRes.body.id + ')');
+
+    // 2. PDF bytes claimed as image/jpeg → 400 (smuggling).
+    const smugRes = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      pdfBytes,
+      { 'x-filename': 'smoke_w58_smuggle.jpg', 'x-mime-type': 'image/jpeg' },
+    );
+    if (smugRes.status !== 400) {
+      console.log('  FAIL smuggling: status=' + smugRes.status + ' body=' + JSON.stringify(smugRes.body).slice(0, 200));
+      process.exit(1);
+    }
+    if (!/mismatch|pdf|jpeg/i.test(JSON.stringify(smugRes.body))) {
+      console.log('  FAIL smuggling: error message should mention mismatch: ' + JSON.stringify(smugRes.body));
+      process.exit(1);
+    }
+    console.log('  PASS 400 PDF bytes claimed as image/jpeg rejected (smuggling detected)');
+
+    // 3. Executable bytes claimed as application/pdf → 400.
+    const exeBytes = Buffer.concat([
+      Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]),
+      Buffer.from('MZ stub, not a real exe ' + Date.now()),
+    ]);
+    const exeRes = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      exeBytes,
+      { 'x-filename': 'smoke_w58_exe.pdf', 'x-mime-type': 'application/pdf' },
+    );
+    if (exeRes.status !== 400) {
+      console.log('  FAIL exe-as-pdf: status=' + exeRes.status + ' body=' + JSON.stringify(exeRes.body).slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 400 executable (MZ) bytes claimed as application/pdf rejected');
+
+    // 4. No x-mime-type → octet-stream default → 201.
+    const unknownBytes = Buffer.from('just some bytes, no claim ' + Date.now());
+    const octRes = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      unknownBytes,
+      { 'x-filename': 'smoke_w58_unknown.bin' },
+    );
+    if (octRes.status !== 201) {
+      console.log('  FAIL octet-stream: status=' + octRes.status + ' body=' + JSON.stringify(octRes.body).slice(0, 200));
+      process.exit(1);
+    }
+    console.log('  PASS 201 no x-mime-type (octet-stream default) accepted');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  file-type magic-byte detection OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

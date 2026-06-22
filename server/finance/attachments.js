@@ -15,6 +15,7 @@
 import { writeFileSync, readFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { join, extname, basename } from 'node:path';
+import { verifyMimeType } from '../file-types.js';
 
 export class AttachmentError extends Error {
   constructor(message, statusCode = 400) {
@@ -83,6 +84,18 @@ export async function addAttachment(pgAdapter, opts) {
   const mimeType = opts.mimeType ? String(opts.mimeType).trim() : 'application/octet-stream';
   if (mimeType && !ALLOWED_MIME.test(mimeType)) {
     throw new AttachmentError('mime_type has an invalid format', 400);
+  }
+  // Wave 58: defense in depth — verify the bytes match the
+  // claimed mime type. Catches the case where someone
+  // renames a malicious file to safe.pdf. The mime-type
+  // check is opt-in for the operator: octet-stream is
+  // accepted as-is (no claim to verify).
+  const typeCheck = verifyMimeType(opts.buffer, mimeType);
+  if (!typeCheck.matches) {
+    throw new AttachmentError(
+      `file-type mismatch: ${typeCheck.reason}`,
+      400,
+    );
   }
   // Hash the bytes for integrity.
   const sha256 = createHash('sha256').update(opts.buffer).digest('hex');

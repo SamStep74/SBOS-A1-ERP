@@ -1303,7 +1303,15 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     // / x-description for metadata. We just verify the upload +
     // metadata roundtrip.
     const port = server.address().port;
-    const body = Buffer.from('fake-pdf-content-' + Date.now());
+    // Use real PDF magic bytes so the Wave 58 file-type check
+    // accepts the upload as application/pdf. (Previous Wave 56
+    // tests used fake bytes + PDF mime; Wave 58's magic-byte
+    // check correctly rejected the mismatch — the test now
+    // uses actual PDF bytes so the rest of the flow is exercised.)
+    const body = Buffer.concat([
+      Buffer.from('%PDF-1.4\n%\x93\x8c\x8b\x9e'),
+      Buffer.from('wave-56-test-' + Date.now()),
+    ]);
     const r = await globalThis.fetch(
       `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
       {
@@ -1473,6 +1481,104 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     // First attempt after reset — not rate-limited. It will
     // return 401 (wrong password) which is the right outcome.
     assert.equal(r.status, 401);
+  });
+
+  // ─── Wave 58: file-type magic-byte detection ───
+
+  test('58a. POST attachment with PDF bytes + application/pdf claim is accepted', async () => {
+    // The Wave 58 file-type check passes when bytes match the
+    // claimed type. Use real PDF magic so the verification
+    // succeeds.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from('%PDF-1.4\n'),
+      Buffer.from('wave-58-valid-' + Date.now()),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w58_valid.pdf',
+          'x-mime-type': 'application/pdf',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201, 'real PDF bytes + PDF claim should be accepted');
+    const j = await r.json();
+    assert.equal(j.mime_type, 'application/pdf');
+  });
+
+  test('58b. POST attachment with PDF bytes claimed as image/jpeg is REJECTED (smuggling)', async () => {
+    // The classic smuggling pattern: take a PDF, claim
+    // image/jpeg. The bytes disagree; the check rejects.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from('%PDF-1.4\n'),
+      Buffer.from('wave-58-smuggle-' + Date.now()),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w58_smuggle.jpg',
+          'x-mime-type': 'image/jpeg',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400);
+    const j = await r.json();
+    assert.equal(j.error, 'invalid_request');
+    assert.ok(/mismatch|pdf.*jpeg|jpeg.*pdf/i.test(j.message), `error message should describe the mismatch: ${j.message}`);
+  });
+
+  test('58c. POST attachment with executable (MZ) bytes claimed as application/pdf is REJECTED', async () => {
+    // The reverse smuggling: take a Windows executable, claim
+    // it's a PDF. The bytes start with 4D 5A (MZ) which is
+    // not a PDF magic; the check rejects.
+    const port = server.address().port;
+    const body = Buffer.concat([
+      Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]),
+      Buffer.from('wave-58-exe-as-pdf-' + Date.now()),
+    ]);
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w58_exe.pdf',
+          'x-mime-type': 'application/pdf',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 400);
+  });
+
+  test('58d. POST attachment with no x-mime-type is accepted (octet-stream is the safe default)', async () => {
+    // When the operator doesn't claim a type (no x-mime-type
+    // header), the route defaults to application/octet-stream,
+    // which is always accepted.
+    const port = server.address().port;
+    const body = Buffer.from('just some bytes, no claim\n');
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'w58_unknown.bin',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201, 'octet-stream is always accepted');
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {
