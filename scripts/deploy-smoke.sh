@@ -3229,6 +3229,85 @@ fi
 
 
 echo
+echo "=== STEP 7p: Webhook notifications (W98-1) ==="
+# Tests the webhook URL/secret fields on the schedules
+# table. The unit tests cover the actual webhook delivery
+# (with mock fetch). Here we just verify the API accepts
+# the new fields + the migration applies cleanly.
+LOG7P="$TESTDIR/server-7p.log"
+PORT=$PORT SBOS_DB=$DB node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG7P" 2>&1 &
+SERVER_PID_7P=$!
+SMOKE_RC=0
+cleanup_7p() { kill -9 $SERVER_PID_7P 2>/dev/null; wait $SERVER_PID_7P 2>/dev/null; }
+trap cleanup_7p EXIT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -s --max-time 1 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok"'; then
+    break
+  fi
+  sleep 1
+  if [ "$i" = "10" ]; then
+    echo "  FAIL: server did not come up for STEP 7p"
+    tail -20 "$LOG7P"
+    SMOKE_RC=1
+  fi
+done
+if [ $SMOKE_RC = 0 ]; then
+  ADMIN_TOKEN_7P=$(grep -oE "admin session token: [A-Za-z0-9_-]+" "$LOG7P" | head -1 | awk '{print $NF}')
+  if [ -z "$ADMIN_TOKEN_7P" ]; then
+    echo "  FAIL: STEP 7p server did not print admin session token"
+    tail -20 "$LOG7P"
+    SMOKE_RC=1
+  else
+    # Create a schedule with a webhook URL + secret
+    CREATE_OUT=$(curl -s -X POST "http://127.0.0.1:$PORT/api/finance/reports/schedules" \
+      -H "Authorization: Bearer $ADMIN_TOKEN_7P" -H "X-Tenant-Id: 0" \
+      -H "content-type: application/json" \
+      -d '{"name":"Webhook test","report_type":"ar_aging","cron_expression":"0 9 * * 1","notify_webhook_url":"https://hooks.example.com/sbos","notify_webhook_secret":"smoke-secret-123"}')
+    SCHED_ID=$(echo "$CREATE_OUT" | python3 -c "import json, sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    if [ -n "$SCHED_ID" ]; then
+      echo "  OK create schedule with webhook fields returns id=$SCHED_ID"
+    else
+      echo "  FAIL: create schedule with webhook failed: $CREATE_OUT"
+      SMOKE_RC=1
+    fi
+
+    # Read it back and confirm the webhook fields are persisted
+    if [ -n "$SCHED_ID" ]; then
+      GET_OUT=$(curl -s "http://127.0.0.1:$PORT/api/finance/reports/schedules/$SCHED_ID" \
+        -H "Authorization: Bearer $ADMIN_TOKEN_7P" -H "X-Tenant-Id: 0")
+      if echo "$GET_OUT" | grep -q '"notify_webhook_url":"https://hooks.example.com/sbos"'; then
+        echo "  OK notify_webhook_url persisted correctly"
+      else
+        echo "  FAIL: notify_webhook_url not in response: $GET_OUT"
+        SMOKE_RC=1
+      fi
+      if echo "$GET_OUT" | grep -q '"notify_webhook_secret":"smoke-secret-123"'; then
+        echo "  OK notify_webhook_secret persisted correctly"
+      else
+        echo "  FAIL: notify_webhook_secret not in response: $GET_OUT"
+        SMOKE_RC=1
+      fi
+    fi
+
+    # Check the migration applied (notify_webhook_url column exists)
+    if sqlite3 "$DB" "PRAGMA table_info(report_schedules)" 2>/dev/null | grep -q "notify_webhook_url"; then
+      echo "  OK notify_webhook_url column exists in report_schedules"
+    else
+      echo "  FAIL: notify_webhook_url column not in report_schedules"
+      SMOKE_RC=1
+    fi
+  fi
+fi
+kill -TERM $SERVER_PID_7P 2>/dev/null
+wait $SERVER_PID_7P 2>/dev/null
+trap - EXIT
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
+
+echo
 echo "=== STEP 8: Summary ==="
   echo "  RESULT: PASS"
   echo "  - All 13 endpoints return expected codes"

@@ -110,6 +110,8 @@ function validateCreateReportScheduleInput(input) {
   assertCronExpression(input.cron_expression);
   assertOptionalString(input.params, 'params', { max: 4096 });
   assertOptionalString(input.notify_email, 'notify_email', { max: 255 });
+  assertOptionalString(input.notify_webhook_url, 'notify_webhook_url', { max: 1024 });
+  assertOptionalString(input.notify_webhook_secret, 'notify_webhook_secret', { max: 256 });
   if (input.enabled !== undefined && input.enabled !== null) {
     if (input.enabled !== 0 && input.enabled !== 1) {
       throw new ValueError('enabled must be 0 or 1');
@@ -158,8 +160,8 @@ export async function createReportSchedule(db, input, tenantId = 0) {
     db,
     `INSERT INTO finance.report_schedules
        (tenant_id, name, report_type, cron_expression,
-        enabled, params, notify_email, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        enabled, params, notify_email, notify_webhook_url, notify_webhook_secret, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       tenantId,
@@ -169,6 +171,8 @@ export async function createReportSchedule(db, input, tenantId = 0) {
       input.enabled ?? 1,
       input.params ?? null,
       input.notify_email ?? null,
+      input.notify_webhook_url ?? null,
+      input.notify_webhook_secret ?? null,
       input.created_by ?? null,
     ],
   );
@@ -197,7 +201,8 @@ export async function listReportSchedules(
     result = await runQuery(
       db,
       `SELECT id, name, report_type, cron_expression, enabled,
-              params, notify_email, last_run_at, next_run_at,
+              params, notify_email, notify_webhook_url, notify_webhook_secret,
+              last_run_at, next_run_at,
               created_by, created_at, updated_at
          FROM finance.report_schedules
         WHERE tenant_id = $1 AND enabled = $2
@@ -229,8 +234,10 @@ export async function getReportSchedule(db, scheduleId, tenantId = 0) {
   const result = await runQuery(
     db,
     `SELECT id, tenant_id, name, report_type, cron_expression,
-            enabled, params, notify_email, last_run_at,
-            next_run_at, created_by, created_at, updated_at
+            enabled, params, notify_email,
+            notify_webhook_url, notify_webhook_secret,
+            last_run_at, next_run_at,
+            created_by, created_at, updated_at
        FROM finance.report_schedules
       WHERE id = $1 AND tenant_id = $2`,
     [scheduleId, tenantId],
