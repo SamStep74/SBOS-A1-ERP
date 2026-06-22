@@ -385,6 +385,13 @@ const PERMISSIONS = Object.freeze({
     label: 'Export audit log',
     description: 'Export audit events to CSV / JSON.',
   },
+  'security.audit.retention.update': {
+    category: 'security',
+    sensitivity: 'high',
+    label: 'Manage audit retention policy',
+    description:
+      'Set or run the per-tenant audit-log retention policy. Read of the config shares security.audit.read.',
+  },
   'security.access.review': {
     category: 'security',
     sensitivity: 'high',

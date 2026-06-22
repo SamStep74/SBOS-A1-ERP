@@ -144,6 +144,15 @@ function makeFinanceDb() {
       request_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Migration 0033 (W60 audit retention) — mirror the
+    -- production prefix-stripped shape: the table is
+    -- finance.audit_retention on pg and audit_retention on sqlite.
+    CREATE TABLE audit_retention (
+      tenant_id INTEGER PRIMARY KEY,
+      retention_days INTEGER NOT NULL DEFAULT 365,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by INTEGER
+    );
     /* Migration 0007 (inventory): ported schema mirror. The actual
        table name on sqlite is 'catalog_items' (no finance.
        prefix) because the migration runner strips it. Same for
@@ -1682,6 +1691,74 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     } finally {
       full.db.prepare(`DELETE FROM users WHERE id = 3`).run();
     }
+  });
+
+  // ─── Wave 60: audit-log retention policy ───
+
+  test('60a. GET /api/finance/audit/retention returns the default config when unset', async () => {
+    // No config row exists for tenant 0 yet. The endpoint should
+    // synthesise the default 365d response.
+    full.db.prepare(`DELETE FROM audit_retention WHERE tenant_id = 0`).run();
+    const r = await get(server, '/api/finance/audit/retention');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.tenant_id, 0);
+    assert.equal(r.body.retention_days, 365);
+    assert.equal(r.body.updated_at, null);
+  });
+
+  test('60b. PUT /api/finance/audit/retention stores the new config', async () => {
+    // Reset, then PUT a 90-day config. The GET should reflect
+    // the stored value (90, not 365).
+    full.db.prepare(`DELETE FROM audit_retention WHERE tenant_id = 0`).run();
+    const put = await putJson(server, '/api/finance/audit/retention', {
+      retention_days: 90,
+    });
+    assert.equal(put.status, 200);
+    assert.equal(put.body.retention_days, 90);
+    const got = await get(server, '/api/finance/audit/retention');
+    assert.equal(got.body.retention_days, 90);
+  });
+
+  test('60c. PUT /api/finance/audit/retention rejects negative days', async () => {
+    // The validator must surface the rejection as 400. We don't
+    // even hit the DB on bad input.
+    const r = await putJson(server, '/api/finance/audit/retention', {
+      retention_days: -1,
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_request');
+  });
+
+  test('60d. POST /api/finance/audit/purge with override deletes old rows', async () => {
+    // Seed three rows: 100 days old, 10 days old, 1 day old.
+    // Purge with retention_days=30 should delete only the
+    // 100-day-old row.
+    const tenantId = 0;
+    const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
+    const recent = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    full.db.prepare(`DELETE FROM audit WHERE tenant_id = ?`).run(tenantId);
+    const ins = full.db.prepare(
+      `INSERT INTO audit (tenant_id, user_id, action, resource, method, path, status_code, created_at)
+       VALUES (?, 1, 'invoice.create', ?, 'POST', '/api/finance/invoices', 200, ?)`,
+    );
+    ins.run(tenantId, 'invoice:1', old);
+    ins.run(tenantId, 'invoice:2', recent);
+    ins.run(tenantId, 'invoice:3', fresh);
+
+    const r = await postJson(server, '/api/finance/audit/purge', {
+      retention_days: 30,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.purged, 1);
+    assert.equal(r.body.retention_days, 30);
+
+    // Verify: the 100-day-old row is gone, the 10- and 1-day-old
+    // rows are still there.
+    const remaining = full.db
+      .prepare(`SELECT COUNT(*) AS n FROM audit WHERE tenant_id = 0`)
+      .get();
+    assert.equal(remaining.n, 2);
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {

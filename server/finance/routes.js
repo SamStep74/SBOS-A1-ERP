@@ -21,6 +21,10 @@
 //   POST   /api/finance/customers
 //   PATCH  /api/finance/customers/:id
 //   GET    /api/finance/audit
+//   GET    /api/finance/audit/export
+//   GET    /api/finance/audit/retention                  (security.audit.read)        — W60 read retention config
+//   PUT    /api/finance/audit/retention                  (security.audit.retention.update) — W60 set retention config
+//   POST   /api/finance/audit/purge                      (security.audit.retention.update) — W60 manual purge
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -146,6 +150,11 @@ import { computeAndCloseVatPeriod } from './vatLedger.js';
 import { exportInvoiceEInvoice } from './einvoiceExport.js';
 import { requireTenant } from './tenant.js';
 import { recordAudit, listAudit, streamAuditCsv } from './audit.js';
+import {
+  getAuditRetention,
+  setAuditRetention,
+  purgeOldAuditEvents,
+} from './auditRetention.js';
 import {
   createCatalogItem,
   listCatalogItems,
@@ -1406,6 +1415,131 @@ export function registerFinanceRoutes(app, opts = {}) {
           }
         }
         res.end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention — read the per-tenant
+  // audit retention config. Returns the current
+  // retention_days (or the default 365 if the operator has
+  // never set it explicitly) + the row's updated_at /
+  // updated_by for audit-trail context.
+  //
+  // Perm gate: `security.audit.read` (same as /audit). Read-
+  // only.
+  app.get(
+    '/api/finance/audit/retention',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const cfg = getAuditRetention(rawDb, req.tenantId);
+        res.status(200).json(cfg);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // PUT /api/finance/audit/retention — set the per-tenant
+  // retention window. Body: { retention_days: <int> }.
+  // 0 = keep forever. Persists the row; subsequent GET
+  // returns the stored config rather than the default.
+  //
+  // Perm gate: `security.audit.retention.update` (new
+  // W60 perm; bound to Admin via AuditRetentionManager).
+  app.put(
+    '/api/finance/audit/retention',
+    requireTenant,
+    requirePerm('security.audit.retention.update'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const body = req.body || {};
+        const days = Number(body.retention_days);
+        if (!Number.isFinite(days) || !Number.isInteger(days) || days < 0) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            message: 'retention_days must be a non-negative integer',
+          });
+        }
+        const updatedBy =
+          req.user && req.user.id != null ? Number(req.user.id) : null;
+        const cfg = setAuditRetention(rawDb, req.tenantId, days, updatedBy);
+        res.status(200).json(cfg);
+      } catch (err) {
+        // setAuditRetention throws RangeError on bad input. Map
+        // to 400 so the operator gets a useful error.
+        if (err instanceof RangeError) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            message: err.message,
+          });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/finance/audit/purge — manually trigger the
+  // purge with the current retention config. Returns the
+  // number of rows deleted. Useful after a one-off
+  // regulatory retention change ("the data is past N years
+  // now, please purge"), or in a smoke test that wants to
+  // verify the purge path.
+  //
+  // Body (optional): { retention_days: <int> } — if present,
+  // uses the override for this run only (does NOT update the
+  // stored config). If absent, uses the stored config.
+  //
+  // Perm gate: `security.audit.retention.update` (same as
+  // the PUT).
+  app.post(
+    '/api/finance/audit/purge',
+    requireTenant,
+    requirePerm('security.audit.retention.update'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const body = req.body || {};
+        let days;
+        if (body.retention_days != null) {
+          const d = Number(body.retention_days);
+          if (!Number.isFinite(d) || !Number.isInteger(d) || d < 0) {
+            return res.status(400).json({
+              error: 'invalid_request',
+              message: 'retention_days must be a non-negative integer',
+            });
+          }
+          days = d;
+        } else {
+          const cfg = getAuditRetention(rawDb, req.tenantId);
+          days = cfg.retention_days;
+        }
+        const purged = purgeOldAuditEvents(rawDb, req.tenantId, days);
+        res.status(200).json({
+          purged,
+          retention_days: days,
+          tenant_id: req.tenantId,
+        });
       } catch (err) {
         next(err);
       }

@@ -1138,6 +1138,15 @@ const PERMISSION_SETS = Object.freeze({
     permissions: Object.freeze(['security.audit.export']),
   },
 
+  AuditRetentionManager: {
+    id: 'AuditRetentionManager',
+    label: 'Audit Retention Manager',
+    description:
+      'Set the per-tenant audit-log retention window and trigger manual purges. Read of the current config shares security.audit.read. Narrow grant — only Owner, Admin.',
+    isSystem: true,
+    permissions: Object.freeze(['security.audit.retention.update']),
+  },
+
   DealCreator: {
     id: 'DealCreator',
     label: 'Deal Creator',

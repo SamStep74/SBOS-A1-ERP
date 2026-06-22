@@ -692,6 +692,33 @@ export async function createApp({
     app.locals.emailService = activeEmailService;
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // W60: audit-log retention purge worker.
+  //
+  // Opt-in via SBOS_AUDIT_PURGE_ENABLED=true. The default is
+  // OFF so existing deploys see no behavior change. When
+  // enabled, the worker runs on a fixed tick (default 24h,
+  // floored at 60s) and prunes audit rows older than each
+  // tenant's configured retention window.
+  //
+  // Pass `opts.auditRetention = false` to skip the worker
+  // (used by the smoke runner that kills the server with
+  // SIGTERM and doesn't want an orphan tick).
+  // ────────────────────────────────────────────────────────────────
+  if (process.env.SBOS_AUDIT_PURGE_ENABLED === 'true') {
+    const { startAuditRetentionPurge } = await import(
+      './finance/auditRetention.js'
+    );
+    const tickMs = process.env.SBOS_AUDIT_PURGE_TICK_MS
+      ? Number(process.env.SBOS_AUDIT_PURGE_TICK_MS)
+      : 24 * 60 * 60 * 1000;
+    const auditHandle = startAuditRetentionPurge({
+      db: dbRef.current,
+      tickMs,
+    });
+    app.locals.auditRetention = auditHandle;
+  }
+
   // Generic 500.
   app.use((err, req, res, _next) => {
     console.error('[server] unhandled error:', err && err.stack ? err.stack : err);

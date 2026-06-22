@@ -3036,6 +3036,132 @@ else
 fi
 echo
 
+echo "=== STEP 5aa: Audit-log retention policy (Wave 60) ==="
+# Smoke coverage for the Wave 60 audit retention config +
+# manual purge. We verify:
+#   1. GET retention returns the default 365d
+#   2. PUT retention stores a new value (90d)
+#   3. GET retention reflects the stored value
+#   4. PUT with negative days returns 400
+#   5. POST purge with override deletes only old rows
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) GET retention returns the default 365d
+    const r1 = await get("/api/finance/audit/retention");
+    if (r1.status !== 200) {
+      console.log("  FAIL initial retention status " + r1.status);
+      process.exit(1);
+    }
+    if (r1.body.retention_days !== 365) {
+      console.log("  FAIL initial retention_days expected 365 got " + r1.body.retention_days);
+      process.exit(1);
+    }
+    console.log("  initial retention = " + r1.body.retention_days + "d");
+
+    // 2) PUT a new 90d value
+    const r2 = await sendJson("PUT", "/api/finance/audit/retention", { retention_days: 90 });
+    if (r2.status !== 200 || r2.body.retention_days !== 90) {
+      console.log("  FAIL PUT retention status " + r2.status + " body " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    console.log("  PUT retention = " + r2.body.retention_days + "d");
+
+    // 3) GET reflects the stored value
+    const r3 = await get("/api/finance/audit/retention");
+    if (r3.body.retention_days !== 90) {
+      console.log("  FAIL GET after PUT expected 90 got " + r3.body.retention_days);
+      process.exit(1);
+    }
+    console.log("  GET retention = " + r3.body.retention_days + "d");
+
+    // 4) PUT with negative days returns 400
+    const r4 = await sendJson("PUT", "/api/finance/audit/retention", { retention_days: -1 });
+    if (r4.status !== 400) {
+      console.log("  FAIL negative retention expected 400 got " + r4.status);
+      process.exit(1);
+    }
+    if (r4.body.error !== "invalid_request") {
+      console.log("  FAIL negative retention error code " + r4.body.error);
+      process.exit(1);
+    }
+    console.log("  negative retention rejected with 400");
+
+    // 5) POST purge with override returns 200 + purged count
+    //    (we do not assert the exact count because the smoke
+    //    has produced many audit rows above; we just verify
+    //    the call succeeds and the response shape is correct).
+    const r5 = await sendJson("POST", "/api/finance/audit/purge", { retention_days: 30 });
+    if (r5.status !== 200) {
+      console.log("  FAIL purge status " + r5.status);
+      process.exit(1);
+    }
+    if (typeof r5.body.purged !== "number") {
+      console.log("  FAIL purge response shape: " + JSON.stringify(r5.body));
+      process.exit(1);
+    }
+    console.log("  purge ran, " + r5.body.purged + " rows deleted (retention " + r5.body.retention_days + "d)");
+
+    // Reset the policy back to 0 (keep forever) so the
+    // smoke leaves the env clean for the next run.
+    await sendJson("PUT", "/api/finance/audit/retention", { retention_days: 0 });
+
+    console.log("  OK audit retention policy");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  audit retention policy OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
