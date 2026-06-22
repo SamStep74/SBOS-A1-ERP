@@ -404,3 +404,85 @@ export function getRetentionDashboard(db) {
     })),
   };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// W64: dashboard CSV export.
+//
+// streamRetentionDashboardCsv — async generator that yields the
+// dashboard rows as CSV. Mirrors the W40 streamAuditCsv pattern:
+// memory-bounded by chunk size, header yielded first, the caller
+// (Express route) can pipe each chunk to res as it's produced.
+// ────────────────────────────────────────────────────────────────────────
+
+const DASHBOARD_CSV_HEADERS = Object.freeze([
+  'tenant_id',
+  'retention_days',
+  'has_explicit_config',
+  'updated_at',
+  'updated_by',
+  'last_purge_at',
+  'last_purge_count',
+  'last_purge_days',
+  'audit_row_count',
+]);
+
+function dashboardCsvEscape(value) {
+  // Identical to the W40 csvEscape in audit.js — same RFC 4180
+  // semantics. Duplicated here so the dashboard export is
+  // self-contained and doesn't reach into the audit module.
+  if (value == null) return '';
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function dashboardCsvLine(values) {
+  return values.map(dashboardCsvEscape).join(',') + '\n';
+}
+
+// Stream the dashboard as CSV. The generator yields
+// one chunk at a time (a string ready to write to res).
+// No buffering of the full output in memory.
+//
+// @param {object} db   raw node:sqlite handle
+// @param {object} [opts]   reserved for future filters
+// @param {number} [chunkSize=500]  rows per yield
+export async function* streamRetentionDashboardCsv(db, _opts = {}, chunkSize = 500) {
+  const size = Math.min(Math.max(Number(chunkSize) || 500, 1), 5000);
+  // Pull every tenant's stats via the existing pure function
+  // (single round-trip; no per-tenant queries). The dashboard
+  // is small in practice (one row per tenant, not per audit
+  // row) — the chunkSize only matters for the very largest
+  // multi-tenant deploys.
+  const dashboard = getRetentionDashboard(db);
+  // Yield the header first so the client always sees a valid
+  // CSV (compliance tools expect a header line on every
+  // export, even an empty one).
+  yield dashboardCsvLine(DASHBOARD_CSV_HEADERS);
+  // Iterate the items. items.length is small (one per
+  // tenant), so the chunkSize mostly affects how often we
+  // yield to the caller.
+  let buf = [];
+  for (const item of dashboard.items) {
+    buf.push(dashboardCsvLine([
+      item.tenant_id,
+      item.retention_days,
+      item.has_explicit_config ? 1 : 0,
+      item.updated_at,
+      item.updated_by,
+      item.last_purge_at,
+      item.last_purge_count,
+      item.last_purge_days,
+      item.audit_row_count,
+    ]));
+    if (buf.length >= size) {
+      yield buf.join('');
+      buf = [];
+    }
+  }
+  if (buf.length > 0) {
+    yield buf.join('');
+  }
+}

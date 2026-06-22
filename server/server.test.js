@@ -2095,6 +2095,44 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.ok(r.body.last_purge_at);
   });
 
+  // ─── Wave 64: dashboard CSV export ───
+
+  test('64a. GET /api/finance/audit/retention/dashboard/export returns text/csv with the documented header', async () => {
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/retention/dashboard/export`;
+    const res = await globalThis.fetch(url);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /^text\/csv/);
+    assert.match(
+      res.headers.get('content-disposition') || '',
+      /^attachment; filename="retention-dashboard-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    const text = await res.text();
+    const lines = text.trim().split('\n');
+    // Header is always first.
+    assert.match(
+      lines[0],
+      /^tenant_id,retention_days,has_explicit_config,updated_at,updated_by,last_purge_at,last_purge_count,last_purge_days,audit_row_count$/,
+    );
+    // The 63a/63b/63c tests seeded at least tenant 0 with
+    // audit rows, so we expect at least one data row.
+    assert.ok(lines.length >= 2, 'expected header + at least 1 data row');
+  });
+
+  test('64b. CSV export tenant_id 0 row has retention_days=90 (from the 63b config)', async () => {
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/api/finance/audit/retention/dashboard/export`;
+    const res = await globalThis.fetch(url);
+    const text = await res.text();
+    const lines = text.trim().split('\n');
+    // Find the row for tenant 0.
+    const t0Line = lines.find((l) => l.startsWith('0,'));
+    assert.ok(t0Line, 'CSV must contain a tenant 0 row');
+    const cols = t0Line.split(',');
+    // retention_days is column 1 (0-indexed).
+    assert.equal(Number(cols[1]), 90);
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

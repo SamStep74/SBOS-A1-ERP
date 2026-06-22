@@ -26,6 +26,7 @@
 //   PUT    /api/finance/audit/retention                  (security.audit.retention.update) — W60 set retention config
 //   POST   /api/finance/audit/purge                      (security.audit.retention.update) — W60 manual purge
 //   GET    /api/finance/audit/retention/dashboard        (security.audit.read)          — W63 dashboard
+//   GET    /api/finance/audit/retention/dashboard/export (security.audit.read)          — W64 CSV export
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -157,6 +158,7 @@ import {
   purgeOldAuditEvents,
   recordPurgeRun,
   getRetentionDashboard,
+  streamRetentionDashboardCsv,
 } from './auditRetention.js';
 import {
   createCatalogItem,
@@ -1599,6 +1601,53 @@ export function registerFinanceRoutes(app, opts = {}) {
         // For multi-tenant deploys the CFO perm is the gate.
         const dashboard = getRetentionDashboard(rawDb);
         res.status(200).json(dashboard);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/dashboard/export — CSV
+  // export of the W63 dashboard. Same use case as the
+  // /api/finance/audit/export endpoint (compliance teams
+  // prefer spreadsheet-friendly CSV over JSON for the
+  // periodic retention snapshot).
+  //
+  // Streams the dashboard as text/csv with the documented
+  // 9-column header (tenant_id, retention_days,
+  // has_explicit_config, updated_at, updated_by,
+  // last_purge_at, last_purge_count, last_purge_days,
+  // audit_row_count).
+  //
+  // Perm gate: `security.audit.read` (same as the
+  // dashboard GET).
+  app.get(
+    '/api/finance/audit/retention/dashboard/export',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const today = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="retention-dashboard-${today}.csv"`,
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        // Stream chunks via the async generator. We do not
+        // await drain between writes — the dashboard is
+        // small (one row per tenant), so the kernel buffer
+        // is plenty.
+        for await (const chunk of streamRetentionDashboardCsv(rawDb)) {
+          res.write(chunk);
+        }
+        res.end();
       } catch (err) {
         next(err);
       }

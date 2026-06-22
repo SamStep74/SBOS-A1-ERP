@@ -20,6 +20,7 @@ import {
   purgeOldAuditEvents,
   recordPurgeRun,
   getRetentionDashboard,
+  streamRetentionDashboardCsv,
   DEFAULT_RETENTION_DAYS,
 } from './auditRetention.js';
 
@@ -192,4 +193,76 @@ test('getRetentionDashboard: returns an empty list when no tenants have audit ro
   const db = makeRetentionDb();
   const dashboard = getRetentionDashboard(db);
   assert.deepEqual(dashboard.items, []);
+});
+
+// ─── W64: dashboard CSV export ───
+
+async function collect(generator) {
+  const out = [];
+  for await (const chunk of generator) out.push(chunk);
+  return out.join('');
+}
+
+test('streamRetentionDashboardCsv: emits the header line first', async () => {
+  const db = makeRetentionDb();
+  const text = await collect(streamRetentionDashboardCsv(db));
+  const lines = text.trim().split('\n');
+  // Header is the first line.
+  assert.match(lines[0], /^tenant_id,retention_days,has_explicit_config,/);
+  // No tenants → no data rows beyond the header.
+  assert.equal(lines.length, 1);
+});
+
+test('streamRetentionDashboardCsv: emits a row per tenant with the documented shape', async () => {
+  const db = makeRetentionDb();
+  setAuditRetention(db, 0, 90, 1);
+  setAuditRetention(db, 7, 180, 2);
+  seedAudit(db, { tenantId: 5, ageDays: 1 });
+  const text = await collect(streamRetentionDashboardCsv(db));
+  const lines = text.trim().split('\n');
+  // 1 header + 3 data rows.
+  assert.equal(lines.length, 4);
+  // Verify the documented columns are present.
+  for (const col of [
+    'tenant_id',
+    'retention_days',
+    'has_explicit_config',
+    'updated_at',
+    'updated_by',
+    'last_purge_at',
+    'last_purge_count',
+    'last_purge_days',
+    'audit_row_count',
+  ]) {
+    assert.ok(lines[0].includes(col), `header missing ${col}`);
+  }
+  // Sorted by tenant_id ASC.
+  assert.match(lines[1], /^0,/);
+  assert.match(lines[2], /^5,/);
+  assert.match(lines[3], /^7,/);
+});
+
+test('streamRetentionDashboardCsv: includes the last-purge columns populated', async () => {
+  const db = makeRetentionDb();
+  setAuditRetention(db, 0, 90, 1);
+  recordPurgeRun(db, 0, 17, 90);
+  const text = await collect(streamRetentionDashboardCsv(db));
+  const lines = text.trim().split('\n');
+  // Header + 1 data row.
+  assert.equal(lines.length, 2);
+  // The data row has last_purge_count=17 and last_purge_days=90.
+  const cols = lines[1].split(',');
+  const purgeCount = Number(cols[6]);
+  const purgeDays = Number(cols[7]);
+  assert.equal(purgeCount, 17);
+  assert.equal(purgeDays, 90);
+});
+
+test('streamRetentionDashboardCsv: produces a header-only output when no tenants', async () => {
+  // Defensive: the CSV must remain valid (header + no rows)
+  // when the dashboard is empty. Compliance tools expect a
+  // header on every export.
+  const db = makeRetentionDb();
+  const text = await collect(streamRetentionDashboardCsv(db));
+  assert.equal(text.trim().split('\n').length, 1);
 });
