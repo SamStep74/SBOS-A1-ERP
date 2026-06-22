@@ -1388,6 +1388,93 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal((await r.json()).error, 'invalid_request');
   });
 
+  // ─── Wave 57: login rate limiting ───
+
+  test('57a. POST /api/auth/login rate-limits after the per-IP threshold', async () => {
+    // Reset the rate limiter so prior tests don't pollute.
+    const { resetLoginRateLimit } = await import('./rate-limit.js');
+    resetLoginRateLimit();
+    const port = server.address().port;
+    // The per-IP limit is 20 per 5 minutes. 21 attempts should
+    // trip the limit. We use varying usernames so the per-user
+    // limit doesn't trigger first.
+    let lastStatus = null;
+    let lastBody = null;
+    for (let i = 0; i < 21; i++) {
+      const r = await globalThis.fetch(
+        `http://127.0.0.1:${port}/api/auth/login`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username: `W57-u${i}`, password: 'wrong' }),
+        },
+      );
+      lastStatus = r.status;
+      if (r.status === 429) {
+        lastBody = await r.json();
+        break;
+      }
+    }
+    assert.equal(lastStatus, 429, 'expected 429 after 20 attempts');
+    assert.equal(lastBody.error, 'rate_limited');
+    assert.ok(lastBody.retry_after > 0);
+    // The 429 carries standard rate-limit headers.
+    assert.ok(
+      lastBody.retry_after <= 300,
+      `retry_after should be in seconds, got ${lastBody.retry_after}`,
+    );
+  });
+
+  test('57b. POST /api/auth/login 429 response has Retry-After + X-RateLimit-Scope headers', async () => {
+    const { resetLoginRateLimit } = await import('./rate-limit.js');
+    resetLoginRateLimit();
+    const port = server.address().port;
+    // Burn the per-IP budget.
+    for (let i = 0; i < 20; i++) {
+      await globalThis.fetch(
+        `http://127.0.0.1:${port}/api/auth/login`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username: `W57b-u${i}`, password: 'wrong' }),
+        },
+      );
+    }
+    // The 21st attempt is 429.
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/auth/login`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'W57b-final', password: 'wrong' }),
+      },
+    );
+    assert.equal(r.status, 429);
+    assert.ok(r.headers.get('retry-after'), 'Retry-After header must be set');
+    assert.ok(
+      r.headers.get('x-ratelimit-scope') === 'ip',
+      'X-RateLimit-Scope must be ip when per-IP limit triggers',
+    );
+  });
+
+  test('57c. POST /api/auth/login resets via resetLoginRateLimit', async () => {
+    // After reset, the budget is fresh.
+    const { resetLoginRateLimit } = await import('./rate-limit.js');
+    resetLoginRateLimit();
+    const port = server.address().port;
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/auth/login`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'W57c', password: 'wrong' }),
+      },
+    );
+    // First attempt after reset — not rate-limited. It will
+    // return 401 (wrong password) which is the right outcome.
+    assert.equal(r.status, 401);
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

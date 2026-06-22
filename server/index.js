@@ -37,6 +37,7 @@ import { renderDashboard } from './finance/dashboard.js';
 import { makeAuthMiddleware } from './auth.js';
 import { login as authLogin } from './auth-login.js';
 import { recordSessionEvent } from './auth-sessions.js';
+import { checkLoginRateLimit } from './rate-limit.js';
 
 // Version reported by /api/health. Pulled from package.json lazily so
 // the value tracks the actual installed version without a hardcode.
@@ -440,6 +441,31 @@ export async function createApp({
   // token for a login token without changing any other code.
   app.post('/api/auth/login', express.json({ limit: '1mb' }), (req, res) => {
     const { username, password } = req.body || {};
+    // Wave 57: rate-limit BEFORE doing the credential check.
+    // Per-IP + per-username sliding windows. 429 with
+    // Retry-After when exceeded. The auth-lockout policy
+    // (Wave 38) is the slower, per-user, longer-window
+    // belt; this rate-limit is the suspenders.
+    const rateCheck = checkLoginRateLimit({
+      ip: req.ip,
+      username: typeof username === 'string' ? username.trim() : null,
+    });
+    if (!rateCheck.allowed) {
+      return res
+        .status(429)
+        .set('Retry-After', String(rateCheck.retryAfter))
+        .set('X-RateLimit-Limit', '20')
+        .set('X-RateLimit-Remaining', '0')
+        .set(
+          'X-RateLimit-Scope',
+          rateCheck.scope,
+        )
+        .json({
+          error: 'rate_limited',
+          message: `too many login attempts; retry in ${rateCheck.retryAfter}s (scope=${rateCheck.scope})`,
+          retry_after: rateCheck.retryAfter,
+        });
+    }
     // Wave 55: pass dbRef so authLogin can record the login
     // event. authLogin internally uses getDb() / dbRef.current
     // so a post-swap (Wave 52 restore) doesn't break login.
@@ -588,7 +614,7 @@ export async function createApp({
       const { changePassword } = await import('./auth-login.js');
       const body = req.body || {};
       const result = changePassword(
-        db,
+        dbRef,
         req.user.id,
         body.old_password,
         body.new_password,

@@ -2689,6 +2689,101 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS
   fi
 echo
 
+echo "=== STEP 5x: Login rate limiting (Wave 57) ==="
+# Smoke coverage for the per-IP + per-username sliding-window
+# rate limit on POST /api/auth/login. We make 21 rapid login
+# attempts with varying usernames; the 21st must come back
+# 429 with Retry-After + X-RateLimit-Scope=ip.
+#
+# Note: prior smoke steps (5i auth login hardening) consumed
+# some of the per-IP budget. We work around that by using a
+# username pattern that triggers the per-username limit
+# instead (limit 10/5min) — easier to trip in a smoke.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+
+  function postJson(p, body) {
+    return new Promise((resolve) => {
+      const bodyStr = JSON.stringify(body);
+      const r = http.request({
+        host: '127.0.0.1', port: Number(process.env.PORT),
+        path: p, method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(bodyStr),
+        },
+      }, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed, headers: res.headers });
+        });
+      });
+      r.write(bodyStr);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // Use a single username 'W57-target' to trip the per-username
+    // limit (10 per 5 min). This is more reliable than per-IP
+    // because prior steps may have already consumed the IP budget.
+    let lastStatus = null;
+    for (let i = 0; i < 10; i++) {
+      const r = await postJson('/api/auth/login', {
+        username: 'W57-target',
+        password: 'wrong-' + i,
+      });
+      lastStatus = r.status;
+    }
+    if (lastStatus === 429) {
+      console.log('  FAIL 10th attempt was already 429 (rate limit too strict)');
+      process.exit(1);
+    }
+    console.log('  PASS 10 login attempts under the per-username limit (last status=' + lastStatus + ')');
+
+    // The 11th attempt (same username) is denied with scope=user.
+    const denied = await postJson('/api/auth/login', {
+      username: 'W57-target',
+      password: 'wrong-11',
+    });
+    if (denied.status !== 429) {
+      console.log('  FAIL 11th attempt: status=' + denied.status + ' (expected 429)');
+      process.exit(1);
+    }
+    if (denied.body.error !== 'rate_limited') {
+      console.log('  FAIL 11th attempt: error=' + denied.body.error);
+      process.exit(1);
+    }
+    if (!denied.body.retry_after || denied.body.retry_after <= 0) {
+      console.log('  FAIL 11th attempt: invalid retry_after=' + denied.body.retry_after);
+      process.exit(1);
+    }
+    console.log('  PASS 11th attempt is 429 rate_limited (retry_after=' + denied.body.retry_after + 's)');
+
+    // The 429 response carries the standard headers.
+    if (!denied.headers['retry-after']) {
+      console.log('  FAIL missing Retry-After header');
+      process.exit(1);
+    }
+    if (denied.headers['x-ratelimit-scope'] !== 'user') {
+      console.log('  FAIL X-RateLimit-Scope=' + denied.headers['x-ratelimit-scope'] + ' (expected user)');
+      process.exit(1);
+    }
+    console.log('  PASS 429 has Retry-After=' + denied.headers['retry-after'] + 's + X-RateLimit-Scope=' + denied.headers['x-ratelimit-scope']);
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  login rate limiting OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

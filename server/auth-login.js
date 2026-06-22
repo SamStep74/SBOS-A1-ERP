@@ -82,6 +82,19 @@ const MIN_PASSWORD_LENGTH = 8;
  * @returns {{ok: true} | {error: string}}
  */
 export function changePassword(db, userId, oldPassword, newPassword) {
+  // Wave 57: accept either a captured handle (legacy) or a
+  // { current: handle } ref (live-swap-safe). Same duck-type
+  // pattern as login() — see there.
+  const isRef = db && typeof db.prepare !== 'function';
+  const getDb = isRef
+    ? () => {
+        const cur = db.current;
+        if (!cur) {
+          throw new Error('changePassword: db is not open (mid-swap)');
+        }
+        return cur;
+      }
+    : () => db;
   if (!Number.isInteger(userId) || userId <= 0) {
     return { error: 'userId must be a positive integer' };
   }
@@ -94,7 +107,7 @@ export function changePassword(db, userId, oldPassword, newPassword) {
   if (oldPassword === newPassword) {
     return { error: 'newPassword must be different from oldPassword' };
   }
-  const row = db
+  const row = getDb()
     .prepare(
       `SELECT id, password_hash, password_salt, locked_until
          FROM users WHERE id = ?`,
@@ -114,7 +127,7 @@ export function changePassword(db, userId, oldPassword, newPassword) {
     return { error: 'old password is incorrect' };
   }
   const { hash, salt } = hashPassword(newPassword);
-  db.prepare(
+  getDb().prepare(
     `UPDATE users
         SET password_hash = ?,
             password_salt = ?,
@@ -153,6 +166,20 @@ const DEFAULT_LOCKOUT_SECONDS = 15 * 60;
  * @returns {{token?: string, user?: object, expiresAt?: string, error?: string, status?: number}}
  */
 export function login(db, username, password, opts = {}) {
+  // Wave 57: accept either a captured `DatabaseSync` handle
+  // (legacy) or a `{ current: handle }` ref (live-swap-safe).
+  // Duck-type: if the arg has a `prepare` method, treat it
+  // as a handle; otherwise dereference `.current`.
+  const isRef = db && typeof db.prepare !== 'function';
+  const getDb = isRef
+    ? () => {
+        const cur = db.current;
+        if (!cur) {
+          throw new Error('login: db is not open (mid-swap or not initialized)');
+        }
+        return cur;
+      }
+    : () => db;
   const maxFailed = opts.maxFailed || DEFAULT_MAX_FAILED;
   const lockoutSeconds = opts.lockoutSeconds || DEFAULT_LOCKOUT_SECONDS;
   const ttlSeconds = opts.ttlSeconds || 30 * 24 * 60 * 60;
@@ -164,7 +191,7 @@ export function login(db, username, password, opts = {}) {
     return { error: 'username and password are required', status: 400 };
   }
 
-  const row = db
+  const row = getDb()
     .prepare(
       `SELECT id, username, email, role, tenant_id, org_id, mfa_required, mfa_verified,
               password_hash, password_salt, failed_logins, locked_until
@@ -204,7 +231,7 @@ export function login(db, username, password, opts = {}) {
     if (newCount >= maxFailed) {
       lockedUntil = new Date(Date.now() + lockoutSeconds * 1000).toISOString();
     }
-    db.prepare(
+    getDb().prepare(
       `UPDATE users
           SET failed_logins = ?, locked_until = ?
         WHERE id = ?`,
@@ -214,7 +241,7 @@ export function login(db, username, password, opts = {}) {
 
   // Reset the failure counter on a successful login.
   if (row.failed_logins > 0 || row.locked_until) {
-    db.prepare(
+    getDb().prepare(
       `UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`,
     ).run(row.id);
   }
@@ -223,7 +250,7 @@ export function login(db, username, password, opts = {}) {
   // existing middleware picks it up unchanged.
   const token = randomBytes(24).toString('base64url');
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-  db.prepare(
+  getDb().prepare(
     `INSERT INTO sbos_rbac_sessions
        (id, user_id, tenant_id, role_id, permission_set_ids_json,
         effective_permissions_json, created_at, last_seen_at, expires_at, ip, user_agent)
