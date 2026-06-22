@@ -156,6 +156,10 @@ function makeFastifyFacade(expressApp, { db }) {
           // can iterate the stream. express.json() skips non-JSON
           // content types so the stream is still readable here.
           raw: req,
+          // Expose the express app so routes can read
+          // app.locals (e.g. the live db handle via
+          // req.app.locals.db — updated by swapDb on restore).
+          app: req.app,
         };
         // Build a Fastify-shaped `reply`.
         let sent = false;
@@ -219,6 +223,10 @@ function makeFastifyFacade(expressApp, { db }) {
         headers: req.headers,
         ip: req.ip,
         raw: req,
+        // Expose the express app so routes can read
+        // app.locals (e.g. the live db handle via
+        // req.app.locals.db — updated by swapDb on restore).
+        app: req.app,
       };
       let sent = false;
       let statusCode = 200;

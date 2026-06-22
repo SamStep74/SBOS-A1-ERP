@@ -4019,6 +4019,131 @@ else
 fi
 echo
 
+echo "=== STEP 5ak: Per-tenant rate limits (Wave 70) ==="
+# Smoke coverage for the W70 per-tenant rate limit
+# config. We verify:
+#   1. GET rate-limit returns the default config when none exists
+#   2. PUT rate-limit upserts the config
+#   3. GET reflects the stored values + the effective limits
+#   4. PUT with non-positive values returns 400
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) GET default config
+    const r1 = await get("/api/rbac/tenants/0/rate-limit");
+    if (r1.status !== 200) {
+      console.log("  FAIL initial GET status " + r1.status);
+      process.exit(1);
+    }
+    if (r1.body.is_default !== true) {
+      console.log("  FAIL is_default expected true, got " + r1.body.is_default);
+      process.exit(1);
+    }
+    console.log("  initial: is_default=true, effective.max_per_ip=" + r1.body.effective.max_per_ip);
+
+    // 2) PUT upserts
+    const r2 = await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: 50,
+      login_max_per_username: 25,
+    });
+    if (r2.status !== 200) {
+      console.log("  FAIL PUT status " + r2.status + " body " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    if (r2.body.login_max_per_ip !== 50 || r2.body.login_max_per_username !== 25) {
+      console.log("  FAIL PUT stored wrong values: " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    console.log("  PUT stored: ip=" + r2.body.login_max_per_ip + " username=" + r2.body.login_max_per_username);
+
+    // 3) GET reflects
+    const r3 = await get("/api/rbac/tenants/0/rate-limit");
+    if (r3.body.is_default !== false) {
+      console.log("  FAIL GET is_default expected false, got " + r3.body.is_default);
+      process.exit(1);
+    }
+    if (r3.body.effective.max_per_ip !== 50 || r3.body.effective.max_per_username !== 25) {
+      console.log("  FAIL effective limits wrong: " + JSON.stringify(r3.body.effective));
+      process.exit(1);
+    }
+    console.log("  GET reflects: effective.ip=" + r3.body.effective.max_per_ip);
+
+    // 4) PUT non-positive returns 400
+    const r4 = await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: 0,
+    });
+    if (r4.status !== 400) {
+      console.log("  FAIL non-positive PUT expected 400 got " + r4.status);
+      process.exit(1);
+    }
+    if (r4.body.error !== "invalid_request") {
+      console.log("  FAIL non-positive error code " + r4.body.error);
+      process.exit(1);
+    }
+    console.log("  non-positive value rejected with 400");
+
+    // Reset back to defaults so the smoke leaves the env clean.
+    await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: null,
+      login_max_per_username: null,
+    });
+
+    console.log("  OK per-tenant rate limits");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  per-tenant rate limits OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

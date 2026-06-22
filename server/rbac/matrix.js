@@ -1147,6 +1147,15 @@ const PERMISSION_SETS = Object.freeze({
     permissions: Object.freeze(['security.audit.retention.update']),
   },
 
+  RateLimitManager: {
+    id: 'RateLimitManager',
+    label: 'Rate Limit Manager',
+    description:
+      'Override the global login rate limit for a specific tenant. Read of the effective limits is open to any caller with security.audit.read. Narrow grant — only Owner, Admin.',
+    isSystem: true,
+    permissions: Object.freeze(['security.rate_limit.update']),
+  },
+
   DealCreator: {
     id: 'DealCreator',
     label: 'Deal Creator',

@@ -392,6 +392,13 @@ const PERMISSIONS = Object.freeze({
     description:
       'Set or run the per-tenant audit-log retention policy. Read of the config shares security.audit.read.',
   },
+  'security.rate_limit.update': {
+    category: 'security',
+    sensitivity: 'high',
+    label: 'Manage per-tenant rate limits',
+    description:
+      'Override the global login rate limit for a specific tenant (login_max_per_ip, login_max_per_username). Read of the effective limits is open to any caller with security.audit.read.',
+  },
   'security.access.review': {
     category: 'security',
     sensitivity: 'high',

@@ -24,6 +24,8 @@
 //   GET    /api/rbac/users                            (security.user.read) — list users (with ?locked filter)
 //   GET    /api/rbac/users/approaching-lockout       (security.user.read) — Wave 59 at-risk users
 //   POST   /api/rbac/users/bulk-unlock               (security.user.update) — Wave 59 bulk unlock
+//   GET    /api/rbac/tenants/:tenantId/rate-limit    (security.audit.read)          — W70 per-tenant rate limit read
+//   PUT    /api/rbac/tenants/:tenantId/rate-limit    (security.rate_limit.update)   — W70 per-tenant rate limit upsert
 //   GET    /api/rbac/profiles                          (security.profile.read)
 //   POST   /api/rbac/profiles                          (security.profile.create)
 //   GET    /api/rbac/profiles/:id                      (security.profile.read)
@@ -58,6 +60,11 @@ import {
   bulkUnlockAll,
   recordSessionEvent,
 } from '../auth-sessions.js';
+import {
+  getTenantRateLimit,
+  setTenantRateLimit,
+  getEffectiveLoginLimits,
+} from '../finance/tenantRateLimit.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
 import {
   ROLE_MATRIX,
@@ -734,6 +741,98 @@ function registerRbacRoutes(app, opts = {}) {
         unlocked_count: unlocked,
         tenant_id: tenantId,
       });
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────────
+  // Wave 70: per-tenant rate limit config.
+  //
+  // GET    /api/rbac/tenants/:tenantId/rate-limit
+  //   Read the per-tenant config. Returns the raw config
+  //   (with NULL fields) + the effective limits (after
+  //   fallback to the global defaults). Perm:
+  //   security.audit.read — open to anyone with read
+  //   access; the config is small and read-only.
+  //
+  // PUT    /api/rbac/tenants/:tenantId/rate-limit
+  //   Upsert the per-tenant config. Body: { login_max_per_ip,
+  //   login_max_per_username } — each is a positive integer
+  //   or null (null = use the default). Perm:
+  //   security.rate_limit.update (new perm, bound to Admin
+  //   + Owner via the new RateLimitManager perm set).
+  //
+  // The live checkLoginRateLimit (W57) is NOT yet wired to
+  // this config — it's a future wave. This wave ships
+  // the operator-facing knob only. The effective limits
+  // are returned for testing / preview.
+  // ─────────────────────────────────────────────────────────────────
+  app.get(
+    '/api/rbac/tenants/:tenantId/rate-limit',
+    { preHandler: requirePermFastify('security.audit.read') },
+    async (request) => {
+      const tenantId = Number(request.params.tenantId);
+      if (!Number.isFinite(tenantId)) {
+        return { error: 'invalid_request', message: 'tenantId must be a number' };
+      }
+      // Use req.app.locals.db (the live, mutable handle) so
+      // a W52-style live-swap is respected. The captured
+      // `app.db` would point at a closed handle.
+      const db = request.app && request.app.locals && request.app.locals.db;
+      if (!db) {
+        return { error: 'internal_error', message: 'db unavailable' };
+      }
+      const config = getTenantRateLimit(db, tenantId);
+      const effective = getEffectiveLoginLimits(db, tenantId);
+      return {
+        tenant_id: tenantId,
+        config: config || {
+          tenant_id: tenantId,
+          login_max_per_ip: null,
+          login_max_per_username: null,
+          updated_at: null,
+          updated_by: null,
+        },
+        effective,
+        is_default: config == null,
+      };
+    },
+  );
+
+  app.put(
+    '/api/rbac/tenants/:tenantId/rate-limit',
+    { preHandler: requirePermFastify('security.rate_limit.update') },
+    async (request, reply) => {
+      const tenantId = Number(request.params.tenantId);
+      if (!Number.isFinite(tenantId)) {
+        return reply
+          .code(400)
+          .send({ error: 'invalid_request', message: 'tenantId must be a number' });
+      }
+      const body = request.body || {};
+      const db = request.app && request.app.locals && request.app.locals.db;
+      if (!db) {
+        return reply
+          .code(500)
+          .send({ error: 'internal_error', message: 'db unavailable' });
+      }
+      try {
+        const updatedBy = request.user && request.user.id ? Number(request.user.id) : null;
+        const cfg = setTenantRateLimit(
+          db,
+          tenantId,
+          body.login_max_per_ip,
+          body.login_max_per_username,
+          updatedBy,
+        );
+        return cfg;
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return reply
+            .code(400)
+            .send({ error: 'invalid_request', message: err.message });
+        }
+        throw err;
+      }
     },
   );
 

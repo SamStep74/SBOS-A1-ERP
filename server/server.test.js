@@ -170,6 +170,16 @@ function makeFinanceDb() {
       last_purge_at TEXT,
       last_purge_count INTEGER
     );
+    -- Migration 0036 (W70 tenant rate limit) — mirror the
+    -- production prefix-stripped shape: rbac.tenant_rate_limit
+    -- on pg, tenant_rate_limit on sqlite.
+    CREATE TABLE tenant_rate_limit (
+      tenant_id INTEGER PRIMARY KEY,
+      login_max_per_ip INTEGER,
+      login_max_per_username INTEGER,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by INTEGER
+    );
     /* Migration 0007 (inventory): ported schema mirror. The actual
        table name on sqlite is 'catalog_items' (no finance.
        prefix) because the migration runner strips it. Same for
@@ -2300,6 +2310,43 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.error, 'invalid_request');
+  });
+
+  // ─── Wave 70: per-tenant rate limits ───
+
+  test('70a. GET /api/rbac/tenants/:tenantId/rate-limit returns the default config when none exists', async () => {
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = 0`).run();
+    const r = await get(server, '/api/rbac/tenants/0/rate-limit');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.tenant_id, 0);
+    assert.equal(r.body.is_default, true);
+    // The effective limits fall back to the global defaults.
+    assert.equal(typeof r.body.effective.max_per_ip, 'number');
+    assert.equal(typeof r.body.effective.max_per_username, 'number');
+  });
+
+  test('70b. PUT /api/rbac/tenants/:tenantId/rate-limit upserts the config', async () => {
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = 0`).run();
+    const r1 = await putJson(server, '/api/rbac/tenants/0/rate-limit', {
+      login_max_per_ip: 50,
+      login_max_per_username: 25,
+    });
+    assert.equal(r1.status, 200);
+    assert.equal(r1.body.login_max_per_ip, 50);
+    assert.equal(r1.body.login_max_per_username, 25);
+    // Re-read.
+    const r2 = await get(server, '/api/rbac/tenants/0/rate-limit');
+    assert.equal(r2.body.is_default, false);
+    assert.equal(r2.body.effective.max_per_ip, 50);
+    assert.equal(r2.body.effective.max_per_username, 25);
+  });
+
+  test('70c. PUT with non-positive values returns 400', async () => {
+    const r = await putJson(server, '/api/rbac/tenants/0/rate-limit', {
+      login_max_per_ip: 0,
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'invalid_request');
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {
