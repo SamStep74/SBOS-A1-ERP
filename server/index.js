@@ -36,6 +36,7 @@ import { registerFinanceRoutes } from './finance/routes.js';
 import { renderDashboard } from './finance/dashboard.js';
 import { makeAuthMiddleware } from './auth.js';
 import { login as authLogin } from './auth-login.js';
+import { recordSessionEvent } from './auth-sessions.js';
 
 // Version reported by /api/health. Pulled from package.json lazily so
 // the value tracks the actual installed version without a hardcode.
@@ -439,7 +440,13 @@ export async function createApp({
   // token for a login token without changing any other code.
   app.post('/api/auth/login', express.json({ limit: '1mb' }), (req, res) => {
     const { username, password } = req.body || {};
-    const result = authLogin(db, username, password);
+    // Wave 55: pass dbRef so authLogin can record the login
+    // event. authLogin internally uses getDb() / dbRef.current
+    // so a post-swap (Wave 52 restore) doesn't break login.
+    const result = authLogin(dbRef, username, password, {
+      ip: req.ip,
+      userAgent: req.headers ? req.headers['user-agent'] : null,
+    });
     if (result.error) {
       const code = result.status === 423 ? 423 : result.status === 400 ? 400 : 401;
       return res.status(code).json({ error: code === 423 ? 'locked' : 'unauthorized', message: result.error });
@@ -458,7 +465,21 @@ export async function createApp({
   app.post('/api/auth/logout', makeAuthMiddlewareForApp({ dbRef }), (req, res) => {
     if (req.session && req.session.id) {
       try {
-        db.prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(req.session.id);
+        dbRef.current
+          .prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`)
+          .run(req.session.id);
+        // Wave 55: record the logout event in the activity log.
+        // recordSessionEvent is best-effort; the import is
+        // synchronous so the lint no-undef check doesn't fire.
+        recordSessionEvent(dbRef.current, {
+          sessionId: req.session.id,
+          userId: req.user ? req.user.id : 0,
+          tenantId: req.user ? req.user.tenant_id || 0 : 0,
+          eventType: 'logout',
+          ip: req.ip,
+          userAgent: req.headers ? req.headers['user-agent'] : null,
+          payload: { source: 'self' },
+        });
       } catch (_e) {
         // best-effort
       }
@@ -489,7 +510,7 @@ export async function createApp({
   app.get('/api/auth/sessions', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { listMySessions } = await import('./auth-sessions.js');
-      const sessions = listMySessions(db, req.user.id);
+      const sessions = listMySessions(dbRef.current, req.user.id);
       // Mark which one is the current session (the one issuing this request).
       const items = sessions.map((s) => ({
         ...s,
@@ -506,11 +527,21 @@ export async function createApp({
   // at the SQL boundary).
   app.post('/api/auth/sessions/:id/revoke', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
-      const { revokeMySession } = await import('./auth-sessions.js');
-      const ok = revokeMySession(db, req.user.id, req.params.id);
+      const { revokeMySession, recordSessionEvent } = await import('./auth-sessions.js');
+      const ok = revokeMySession(dbRef.current, req.user.id, req.params.id);
       if (!ok) {
         return res.status(404).json({ error: 'not_found', message: 'session not found or not yours' });
       }
+      // Wave 55: record the self-revoke event in the activity log.
+      recordSessionEvent(dbRef.current, {
+        sessionId: req.params.id,
+        userId: req.user.id,
+        tenantId: req.user.tenant_id || 0,
+        eventType: 'revoked',
+        ip: req.ip,
+        userAgent: req.headers ? req.headers['user-agent'] : null,
+        payload: { source: 'self' },
+      });
       res.status(200).json({ ok: true, revoked: req.params.id });
     } catch (err) {
       res.status(500).json({ error: 'internal_error', message: err && err.message });
@@ -524,8 +555,26 @@ export async function createApp({
   app.post('/api/auth/sessions/revoke-all', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
     try {
       const { revokeAllMySessions } = await import('./auth-sessions.js');
-      const count = revokeAllMySessions(db, req.user.id);
+      const count = revokeAllMySessions(dbRef.current, req.user.id);
       res.status(200).json({ ok: true, revoked_count: count });
+    } catch (err) {
+      res.status(500).json({ error: 'internal_error', message: err && err.message });
+    }
+  });
+
+  // GET /api/auth/sessions/events — list the current user's
+  // recent session events (login, logout, revoked, ...) across
+  // ALL their sessions. The Wave 55 "my activity" view: "you
+  // logged in 5 times today, from 2 IPs".
+  //
+  // Perm: any authenticated user (self-service).
+  app.get('/api/auth/sessions/events', makeAuthMiddlewareForApp({ dbRef }), async (req, res) => {
+    try {
+      const { listUserSessionEvents } = await import('./auth-sessions.js');
+      const items = listUserSessionEvents(dbRef.current, req.user.id, {
+        limit: req.query.limit,
+      });
+      res.status(200).json({ items });
     } catch (err) {
       res.status(500).json({ error: 'internal_error', message: err && err.message });
     }

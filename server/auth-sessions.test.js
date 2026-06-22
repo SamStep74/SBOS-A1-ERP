@@ -13,6 +13,9 @@ import {
   revokeMySession,
   revokeAllMySessions,
   pruneExpiredSessions,
+  recordSessionEvent,
+  listSessionEvents,
+  listUserSessionEvents,
 } from './auth-sessions.js';
 
 function makeDb() {
@@ -38,6 +41,17 @@ function makeDb() {
       user_agent      TEXT,
       mfa_verified_at TEXT,
       revoked_at      TEXT
+    );
+    CREATE TABLE sbos_session_events (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id      TEXT NOT NULL,
+      user_id         INTEGER NOT NULL,
+      tenant_id       INTEGER NOT NULL DEFAULT 0,
+      event_type      TEXT NOT NULL,
+      ip              TEXT,
+      user_agent      TEXT,
+      payload_json    TEXT NOT NULL DEFAULT '{}',
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
   // Seed two users (so we can verify cross-user isolation).
@@ -200,4 +214,102 @@ test('pruneExpiredSessions: is idempotent — second call is a no-op', () => {
   // Second pass: nothing left to expire.
   const second = pruneExpiredSessions(db, { deleteRevokedAfterDays: 0 });
   assert.equal(second.expired_revoked, 0);
+});
+
+// ─── Wave 55: session activity log ───
+
+test('recordSessionEvent: writes a row to sbos_session_events', () => {
+  const db = makeDb();
+  const id = recordSessionEvent(db, {
+    sessionId: 'sess-1',
+    userId: 1,
+    tenantId: 0,
+    eventType: 'login',
+    ip: '10.0.0.1',
+    userAgent: 'jest',
+    payload: { method: 'password' },
+  });
+  assert.ok(id && id > 0, 'recordSessionEvent must return the new row id');
+  const row = db
+    .prepare('SELECT * FROM sbos_session_events WHERE id = ?')
+    .get(id);
+  assert.equal(row.session_id, 'sess-1');
+  assert.equal(row.event_type, 'login');
+  assert.equal(row.ip, '10.0.0.1');
+  assert.equal(row.user_agent, 'jest');
+  // The payload round-trips as JSON.
+  const payload = JSON.parse(row.payload_json);
+  assert.deepEqual(payload, { method: 'password' });
+});
+
+test('recordSessionEvent: missing required fields throws', () => {
+  const db = makeDb();
+  assert.throws(
+    () => recordSessionEvent(db, { sessionId: 's' }),
+    /requires sessionId, userId, eventType/,
+  );
+  assert.throws(
+    () => recordSessionEvent(db, { userId: 1, eventType: 'login' }),
+    /requires sessionId, userId, eventType/,
+  );
+  assert.throws(
+    () => recordSessionEvent(db, { sessionId: 's', userId: 1 }),
+    /requires sessionId, userId, eventType/,
+  );
+});
+
+test('listSessionEvents: returns events for a session, most-recent first', () => {
+  const db = makeDb();
+  recordSessionEvent(db, {
+    sessionId: 'sess-A',
+    userId: 1,
+    eventType: 'login',
+    ip: '10.0.0.1',
+  });
+  recordSessionEvent(db, {
+    sessionId: 'sess-A',
+    userId: 1,
+    eventType: 'revoked',
+    payload: { source: 'admin' },
+  });
+  recordSessionEvent(db, {
+    sessionId: 'sess-B', // different session — should NOT appear
+    userId: 1,
+    eventType: 'login',
+  });
+  const events = listSessionEvents(db, 'sess-A');
+  assert.equal(events.length, 2);
+  // Most-recent first: the 'revoked' was inserted second.
+  assert.equal(events[0].event_type, 'revoked');
+  assert.equal(events[1].event_type, 'login');
+  assert.equal(events[0].session_id, 'sess-A');
+  // Payload parses back.
+  assert.deepEqual(events[0].payload, { source: 'admin' });
+  // No 'sess-B' events leaked in.
+  for (const e of events) {
+    assert.equal(e.session_id, 'sess-A');
+  }
+});
+
+test('listSessionEvents: empty result for an unknown session', () => {
+  const db = makeDb();
+  recordSessionEvent(db, { sessionId: 'sess-A', userId: 1, eventType: 'login' });
+  const events = listSessionEvents(db, 'sess-DOES-NOT-EXIST');
+  assert.equal(events.length, 0);
+});
+
+test('listUserSessionEvents: aggregates events across all the user\'s sessions', () => {
+  const db = makeDb();
+  // 2 sessions for user 1
+  recordSessionEvent(db, { sessionId: 'sess-A', userId: 1, eventType: 'login', ip: '1.1.1.1' });
+  recordSessionEvent(db, { sessionId: 'sess-B', userId: 1, eventType: 'login', ip: '2.2.2.2' });
+  // 1 session for user 2 — should NOT appear
+  recordSessionEvent(db, { sessionId: 'sess-C', userId: 2, eventType: 'login' });
+  const events = listUserSessionEvents(db, 1);
+  assert.equal(events.length, 2);
+  for (const e of events) {
+    assert.equal(e.user_id, 1);
+  }
+  const ips = events.map((e) => e.ip).sort();
+  assert.deepEqual(ips, ['1.1.1.1', '2.2.2.2']);
 });

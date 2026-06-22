@@ -208,3 +208,142 @@ export function pruneExpiredSessions(db, opts = {}) {
   }
   return { expired_revoked: expireResult.changes, deleted };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Session event log (Wave 55).
+// ────────────────────────────────────────────────────────────────────────
+//
+// Lifecycle events for each session: login, logout, revoked, etc.
+// The session table holds the CURRENT state; the events table
+// holds the HISTORY. The pair is needed because a session can be
+// created, used, and revoked many times across its lifetime, and
+// the operator needs a chronological record of what happened.
+//
+// Event types:
+//   - login:     POST /api/auth/login succeeded, new session row
+//   - logout:    POST /api/auth/logout, user-initiated
+//   - revoked:   /api/auth/sessions/:id/revoke (self) OR
+//                /api/rbac/sessions/:id/revoke (admin) —
+//                payload.revoked_by tells you which
+//   - expired:   only used if we add a janitor that emits events
+//                (currently pruneExpiredSessions is a no-op for
+//                the events log to avoid noise)
+
+/**
+ * Record a session lifecycle event. Best-effort: a failure to
+ * record an event must NOT fail the calling operation (login
+ * still succeeds even if the activity log is broken). Returns
+ * the inserted event id, or null on failure.
+ */
+export function recordSessionEvent(db, opts) {
+  if (!db || typeof db.prepare !== 'function') {
+    throw new TypeError('recordSessionEvent requires a node:sqlite handle');
+  }
+  if (!opts || !opts.sessionId || !opts.userId || !opts.eventType) {
+    throw new TypeError('recordSessionEvent requires sessionId, userId, eventType');
+  }
+  const payloadJson = opts.payload ? JSON.stringify(opts.payload) : '{}';
+  try {
+    const res = db
+      .prepare(
+        `INSERT INTO sbos_session_events
+           (session_id, user_id, tenant_id, event_type, ip, user_agent, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         RETURNING id`,
+      )
+      .get(
+        String(opts.sessionId),
+        Number(opts.userId),
+        Number(opts.tenantId || 0),
+        String(opts.eventType),
+        opts.ip || null,
+        opts.userAgent || null,
+        payloadJson,
+      );
+    return res && res.id != null ? Number(res.id) : null;
+  } catch (_err) {
+    // best-effort: log to stderr but don't fail the caller
+    console.error('[auth-sessions] recordSessionEvent failed:', _err && _err.message);
+    return null;
+  }
+}
+
+/**
+ * List the lifecycle events for a single session, most-recent
+ * first. The endpoint behind this (GET /api/rbac/sessions/:id/events)
+ * admin-gates access; users can list their own events via
+ * GET /api/auth/sessions/events (which filters by their own
+ * user_id).
+ */
+export function listSessionEvents(db, sessionId, opts = {}) {
+  if (!db || typeof db.prepare !== 'function') {
+    throw new TypeError('listSessionEvents requires a node:sqlite handle');
+  }
+  if (!sessionId) {
+    throw new TypeError('listSessionEvents requires a sessionId');
+  }
+  const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
+  const res = db
+    .prepare(
+      `SELECT id, session_id, user_id, tenant_id, event_type,
+              ip, user_agent, payload_json, created_at
+         FROM sbos_session_events
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT ?`,
+    )
+    .all(String(sessionId), limit);
+  return (res || []).map((r) => ({
+    id: Number(r.id),
+    session_id: r.session_id,
+    user_id: Number(r.user_id),
+    tenant_id: Number(r.tenant_id),
+    event_type: r.event_type,
+    ip: r.ip,
+    user_agent: r.user_agent,
+    payload: safeParse(r.payload_json),
+    created_at: r.created_at,
+  }));
+}
+
+/**
+ * List the most-recent events for a user across all their
+ * sessions. Used by the "my activity" endpoint so the user can
+ * see "you logged in from 2 devices today".
+ */
+export function listUserSessionEvents(db, userId, opts = {}) {
+  if (!db || typeof db.prepare !== 'function') {
+    throw new TypeError('listUserSessionEvents requires a node:sqlite handle');
+  }
+  const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
+  const res = db
+    .prepare(
+      `SELECT id, session_id, user_id, tenant_id, event_type,
+              ip, user_agent, payload_json, created_at
+         FROM sbos_session_events
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT ?`,
+    )
+    .all(Number(userId), limit);
+  return (res || []).map((r) => ({
+    id: Number(r.id),
+    session_id: r.session_id,
+    user_id: Number(r.user_id),
+    tenant_id: Number(r.tenant_id),
+    event_type: r.event_type,
+    ip: r.ip,
+    user_agent: r.user_agent,
+    payload: safeParse(r.payload_json),
+    created_at: r.created_at,
+  }));
+}
+
+function safeParse(s) {
+  if (!s) return {};
+  try {
+    return JSON.parse(s);
+  } catch (_e) {
+    return {};
+  }
+}

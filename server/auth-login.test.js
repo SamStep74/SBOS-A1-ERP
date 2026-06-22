@@ -44,7 +44,9 @@ function makeAuthDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
       expires_at TEXT NOT NULL,
-      revoked_at TEXT
+      revoked_at TEXT,
+      ip TEXT,
+      user_agent TEXT
     );
   `);
   return db;

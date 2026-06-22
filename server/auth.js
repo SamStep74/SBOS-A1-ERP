@@ -23,6 +23,7 @@
 // the operator can `curl -H "Authorization: Bearer <token>" ...`.
 
 import { randomBytes } from 'node:crypto';
+import { recordSessionEvent } from './auth-sessions.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // Token format. A session token is a 32-char URL-safe base64 string
@@ -73,6 +74,22 @@ export function seedSessionForAdmin(db, { ttlSeconds = 60 * 60 * 24 * 30 } = {})
     '[]', // same for effective perms
     expiresAt,
   );
+  // Wave 55: record the boot-time admin session in the
+  // activity log so the operator can see "yes, an admin
+  // session was minted at boot time, source=seed".
+  try {
+    recordSessionEvent(db, {
+      sessionId: token,
+      userId: 1,
+      tenantId: 0,
+      eventType: 'login',
+      ip: null,
+      userAgent: null,
+      payload: { method: 'boot-seed' },
+    });
+  } catch (_e) {
+    // best-effort; don't fail boot
+  }
   return token;
 }
 

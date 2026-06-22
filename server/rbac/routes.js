@@ -33,6 +33,7 @@
 //   PUT    /api/rbac/record-rules/:resource           (security.permission_set.update)
 //   GET    /api/rbac/sessions                         (security.session.list)
 //   DELETE /api/rbac/sessions/:id                     (security.session.revoke)
+//   GET    /api/rbac/sessions/:id/events               (security.session.list) — Wave 55 activity log
 //   GET    /api/rbac/audit                            (security.audit.read)
 //   GET    /api/rbac/approvals                        (security.approval.read)
 //   POST   /api/rbac/approvals                        (security.approval.request)
@@ -892,7 +893,73 @@ function registerRbacRoutes(app, opts = {}) {
       getDb().prepare(`UPDATE sbos_rbac_sessions SET revoked_at = datetime('now') WHERE id = ?`).run(
         request.params.id,
       );
+      // Wave 55: record the admin-revoke event. payload.source
+      // tells the operator this was an admin action, not self.
+      try {
+        const { recordSessionEvent } = await import('../auth-sessions.js');
+        recordSessionEvent(getDb(), {
+          sessionId: request.params.id,
+          userId: request.user ? request.user.id : 0,
+          tenantId: request.user ? request.user.tenant_id || 0 : 0,
+          eventType: 'revoked',
+          ip: request.ip,
+          userAgent: request.headers ? request.headers['user-agent'] : null,
+          payload: {
+            source: 'admin',
+            revoked_by: request.user ? request.user.id : null,
+          },
+        });
+      } catch (_e) {
+        // best-effort
+      }
       return reply.code(204).send();
+    },
+  );
+
+  // GET /api/rbac/sessions/:id/events — list the lifecycle
+  // events for a single session. Wave 55 addition: the
+  // activity log that complements the current-state view
+  // in GET /api/rbac/sessions. Each event includes the
+  // event_type (login, logout, revoked, ...), ip, user_agent,
+  // payload (e.g. { source: 'admin' } for revokes), and
+  // created_at. Most-recent first.
+  //
+  // Perm: security.session.list (existing) — same as the
+  // session list endpoint. The tenant boundary is enforced
+  // implicitly: the session belongs to a tenant, the event
+  // rows are written with that tenant_id, the caller is
+  // filtered to their tenant.
+  app.get(
+    '/api/rbac/sessions/:id/events',
+    { preHandler: requirePermFastify('security.session.list') },
+    async (request, reply) => {
+      const sessionId = String(request.params.id || '');
+      if (!sessionId) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+      // Verify the session belongs to the caller's tenant.
+      // The event rows have tenant_id but we also need to
+      // confirm the session itself is in-tenant before
+      // returning its events.
+      const sessionRow = getDb()
+        .prepare(
+          'SELECT user_id, tenant_id FROM sbos_rbac_sessions WHERE id = ?',
+        )
+        .get(sessionId);
+      if (!sessionRow) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+      if (
+        request.user &&
+        Number(sessionRow.tenant_id) !== Number(request.user.tenant_id || 0)
+      ) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+      const { listSessionEvents } = await import('../auth-sessions.js');
+      const items = listSessionEvents(getDb(), sessionId, {
+        limit: request.query.limit,
+      });
+      return { items };
     },
   );
 

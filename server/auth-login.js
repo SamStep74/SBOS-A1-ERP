@@ -21,6 +21,7 @@
 //     The real auth gate is on every other endpoint.
 
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto';
+import { recordSessionEvent } from './auth-sessions.js';
 
 // ────────────────────────────────────────────────────────────────────────
 // scrypt wrapper. Verifies a plaintext password against the stored
@@ -225,9 +226,37 @@ export function login(db, username, password, opts = {}) {
   db.prepare(
     `INSERT INTO sbos_rbac_sessions
        (id, user_id, tenant_id, role_id, permission_set_ids_json,
-        effective_permissions_json, created_at, last_seen_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)`,
-  ).run(token, row.id, row.tenant_id, row.role, '[]', '[]', expiresAt);
+        effective_permissions_json, created_at, last_seen_at, expires_at, ip, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?)`,
+  ).run(
+    token,
+    row.id,
+    row.tenant_id,
+    row.role,
+    '[]',
+    '[]',
+    expiresAt,
+    opts.ip || null,
+    opts.userAgent || null,
+  );
+
+  // Wave 55: record the login event in the activity log. The
+  // event row is informational; a failure here must NOT fail
+  // the login (the user has authenticated successfully and
+  // shouldn't be punished for a log-write error).
+  try {
+    recordSessionEvent(db, {
+      sessionId: token,
+      userId: row.id,
+      tenantId: row.tenant_id,
+      eventType: 'login',
+      ip: opts.ip || null,
+      userAgent: opts.userAgent || null,
+      payload: { method: 'password' },
+    });
+  } catch (_e) {
+    // best-effort; don't fail login
+  }
 
   return {
     token,

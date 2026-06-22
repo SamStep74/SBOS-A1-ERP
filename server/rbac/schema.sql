@@ -189,6 +189,28 @@ CREATE INDEX IF NOT EXISTS idx_sbos_rbac_sess_user ON sbos_rbac_sessions(user_id
 CREATE INDEX IF NOT EXISTS idx_sbos_rbac_sess_tenant ON sbos_rbac_sessions(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_sbos_rbac_sess_active ON sbos_rbac_sessions(revoked_at, expires_at);
 
+-- Wave 55: per-session activity log. Lifecycle events
+-- (login, logout, revoked) — see server/rbac/migrations/0003_session_events.sql
+-- for the canonical schema. The schema.sql mirror keeps the
+-- migration runner idempotent on a fresh install.
+CREATE TABLE IF NOT EXISTS sbos_session_events (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id      TEXT NOT NULL,
+  user_id         INTEGER NOT NULL,
+  tenant_id       INTEGER NOT NULL DEFAULT 0,
+  event_type      TEXT NOT NULL,
+  ip              TEXT,
+  user_agent      TEXT,
+  payload_json    TEXT NOT NULL DEFAULT '{}',
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sbos_session_events_session
+  ON sbos_session_events (session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sbos_session_events_user
+  ON sbos_session_events (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sbos_session_events_recent
+  ON sbos_session_events (created_at DESC);
+
 -- ───────────── Approval / Dual-control ─────────────
 
 -- Some "critical" actions require a second approver. This table holds pending

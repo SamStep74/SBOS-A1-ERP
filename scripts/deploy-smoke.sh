@@ -2436,6 +2436,107 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5v: Session activity log (Wave 55) ==="
+# Smoke coverage for the new activity log endpoints. The
+# boot-mints an admin session (Wave 55), which records a
+# 'login' event. The smoke verifies:
+#   1. GET /api/auth/sessions/events returns at least 1 event
+#      (the boot-time login)
+#   2. GET /api/rbac/sessions/<admin-token>/events returns
+#      the events for the boot session
+#   3. The event includes the expected fields
+#      (event_type, session_id, user_id, created_at)
+#   4. GET /api/rbac/sessions/UNKNOWN/events returns 404
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
+  const http = require('node:http');
+
+  function req(opts) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = '';
+        res.on('data', d => buf += d);
+        res.on('end', () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  (async () => {
+    // 1. GET /api/auth/sessions/events — the calling user
+    // (admin in stub mode) has at least 1 event.
+    const myEvents = await get('/api/auth/sessions/events');
+    if (myEvents.status !== 200 || !Array.isArray(myEvents.body.items)) {
+      console.log('  FAIL my events: status=' + myEvents.status);
+      process.exit(1);
+    }
+    if (myEvents.body.items.length < 1) {
+      console.log('  FAIL no events in my-activity (expected the boot-time login)');
+      process.exit(1);
+    }
+    // Verify the shape of the first event.
+    const e = myEvents.body.items[0];
+    if (!e.event_type || !e.session_id || !e.user_id || !e.created_at) {
+      console.log('  FAIL event missing required fields: ' + JSON.stringify(e));
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/auth/sessions/events returns ' + myEvents.body.items.length + ' event(s) (type=' + e.event_type + ')');
+
+    // 2. GET /api/rbac/sessions/:id/events for the boot session.
+    // The boot-minted session has its event recorded. We need
+    // to know the session id — it's the admin token. We don't
+    // have it here (only the bearer), so we look it up via
+    // the events list (which has session_id).
+    const sessionId = e.session_id;
+    const events = await get('/api/rbac/sessions/' + encodeURIComponent(sessionId) + '/events');
+    if (events.status !== 200 || !Array.isArray(events.body.items)) {
+      console.log('  FAIL session events: status=' + events.status + ' body=' + JSON.stringify(events.body).slice(0, 100));
+      process.exit(1);
+    }
+    if (events.body.items.length < 1) {
+      console.log('  FAIL session events empty for ' + sessionId);
+      process.exit(1);
+    }
+    const e2 = events.body.items[0];
+    if (e2.event_type !== 'login') {
+      console.log('  FAIL first event type: ' + e2.event_type);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET /api/rbac/sessions/:id/events returns the boot-time login (id=' + sessionId.slice(0, 12) + '...)');
+
+    // 3. GET unknown session → 404.
+    const missing = await get('/api/rbac/sessions/no-such-session/events');
+    if (missing.status !== 404) {
+      console.log('  FAIL unknown session: status=' + missing.status);
+      process.exit(1);
+    }
+    if (missing.body.error !== 'session_not_found') {
+      console.log('  FAIL unknown session error code: ' + missing.body.error);
+      process.exit(1);
+    }
+    console.log('  PASS 404 GET /api/rbac/sessions/UNKNOWN/events returns session_not_found');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  session activity log OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
