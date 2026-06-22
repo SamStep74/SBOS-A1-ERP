@@ -2821,6 +2821,22 @@ if [ $SMOKE_RC != 0 ]; then
 fi
 
 
+echo "=== STEP 7m: Scheduler worker boot (W97-1) ==="
+# Tests that the scheduler worker starts on app boot. The
+# worker logs "[scheduler] worker started" on init. The
+# check verifies the log line is present in the server log
+# from the most recent server boot (STEP 7l).
+if grep -q "\[scheduler\] worker started" "$LOG7L"; then
+  echo "  OK scheduler worker boot log present"
+else
+  echo "  FAIL: scheduler worker did not log startup line"
+  SMOKE_RC=1
+fi
+if [ $SMOKE_RC != 0 ]; then
+  exit 1
+fi
+
+
 
 echo
 echo "=== STEP 8: Summary ==="

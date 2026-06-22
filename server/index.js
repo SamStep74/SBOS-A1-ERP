@@ -293,7 +293,12 @@ function makeAuthMiddlewareForApp({ db }) {
 // createApp — exported factory.
 // ────────────────────────────────────────────────────────────────────────
 
-export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
+export async function createApp({
+  db,
+  pgAdapter,
+  locale = 'en',
+  scheduler = null,
+} = {}) {
   if (!db) {
     throw new TypeError('createApp requires a db (opts.db)');
   }
@@ -493,6 +498,33 @@ export async function createApp({ db, pgAdapter, locale = 'en' } = {}) {
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', path: req.path });
   });
+
+  // ────────────────────────────────────────────────────────────────
+  // Phase 3 reporting wave 4 (W97-1) — scheduler worker.
+  //
+  // The worker fires report runs on a cron schedule. It
+  // dispatches the right function based on the schedule's
+  // report_type, records the execution (status='completed'
+  // or 'failed'), and updates next_run_at for the next fire.
+  //
+  // Pass `opts.scheduler` to override the default
+  // { tickMs: 60_000 } config. Pass `opts.scheduler = false`
+  // to skip starting the worker (useful for tests that
+  // don't want the interval running).
+  // ────────────────────────────────────────────────────────────────
+  if (scheduler !== false) {
+    const { startScheduler } = await import('./finance/scheduleRunner.js');
+    const schedulerConfig = typeof scheduler === 'object' && scheduler !== null
+      ? scheduler
+      : {};
+    const schedulerHandle = startScheduler({
+      db,
+      pgAdapter,
+      tickMs: 60_000,
+      ...schedulerConfig,
+    });
+    app.locals.scheduler = schedulerHandle;
+  }
 
   // Generic 500.
   app.use((err, req, res, _next) => {
