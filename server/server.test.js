@@ -151,7 +151,10 @@ function makeFinanceDb() {
       tenant_id INTEGER PRIMARY KEY,
       retention_days INTEGER NOT NULL DEFAULT 365,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_by INTEGER
+      updated_by INTEGER,
+      last_purge_at TEXT,
+      last_purge_count INTEGER,
+      last_purge_days INTEGER
     );
     /* Migration 0007 (inventory): ported schema mirror. The actual
        table name on sqlite is 'catalog_items' (no finance.
@@ -2001,6 +2004,95 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
       },
     );
     assert.equal(r.status, 400, 'pptx-claimed-as-docx must be rejected');
+  });
+
+  // ─── Wave 63: audit retention dashboard ───
+
+  test('63a. GET /api/finance/audit/retention/dashboard returns the per-tenant items list', async () => {
+    // Clean any prior retention config from earlier tests.
+    full.db.prepare(`DELETE FROM audit_retention WHERE tenant_id = 0`).run();
+    // Seed an explicit config + audit rows so the dashboard
+    // has something to surface.
+    full.db
+      .prepare(
+        `INSERT OR REPLACE INTO audit_retention
+         (tenant_id, retention_days, updated_at, updated_by)
+         VALUES (0, 90, datetime('now'), 1)`,
+      )
+      .run();
+    full.db.prepare(`DELETE FROM audit WHERE tenant_id = 0`).run();
+    full.db
+      .prepare(
+        `INSERT INTO audit (tenant_id, user_id, action, resource, method, path, status_code, created_at)
+         VALUES (0, 1, 'invoice.create', 'invoice:1', 'POST', '/api/finance/invoices', 200, datetime('now'))`,
+      )
+      .run();
+    const r = await get(server, '/api/finance/audit/retention/dashboard');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+    // Find our tenant 0 entry.
+    const t0 = r.body.items.find((i) => i.tenant_id === 0);
+    assert.ok(t0, 'tenant 0 must appear in the dashboard');
+    assert.equal(t0.retention_days, 90);
+    assert.equal(t0.has_explicit_config, true);
+    assert.ok(typeof t0.audit_row_count === 'number');
+  });
+
+  test('63b. POST /api/finance/audit/purge stamps last_purge_count on the config row', async () => {
+    // After a purge, the audit_retention row should have
+    // last_purge_at + last_purge_count set. The dashboard
+    // then picks up the new stats.
+    full.db.prepare(`DELETE FROM audit_retention WHERE tenant_id = 0`).run();
+    full.db
+      .prepare(
+        `INSERT INTO audit_retention (tenant_id, retention_days, updated_at, updated_by)
+         VALUES (0, 30, datetime('now'), 1)`,
+      )
+      .run();
+    full.db.prepare(`DELETE FROM audit WHERE tenant_id = 0`).run();
+    // Seed: one old row (will be purged), one fresh row.
+    const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    const ins = full.db.prepare(
+      `INSERT INTO audit (tenant_id, user_id, action, resource, method, path, status_code, created_at)
+       VALUES (0, 1, 'invoice.create', ?, 'POST', '/api/finance/invoices', 200, ?)`,
+    );
+    ins.run('invoice:old', old);
+    ins.run('invoice:fresh', fresh);
+
+    const purge = await postJson(server, '/api/finance/audit/purge', {});
+    assert.equal(purge.status, 200);
+    assert.equal(purge.body.purged, 1);
+
+    // Now check the dashboard shows the recorded purge.
+    const dash = await get(server, '/api/finance/audit/retention/dashboard');
+    assert.equal(dash.status, 200);
+    const t0 = dash.body.items.find((i) => i.tenant_id === 0);
+    assert.ok(t0);
+    assert.equal(t0.last_purge_count, 1);
+    assert.ok(t0.last_purge_at, 'last_purge_at must be set after a purge');
+  });
+
+  test('63c. GET /api/finance/audit/retention (existing route) now includes last-purge fields', async () => {
+    // The W63 extension also surfaced last_purge_at /
+    // last_purge_count on the GET retention response (not
+    // just the dashboard). This is the convenience surface
+    // for the calling tenant — the dashboard view is the
+    // roll-up across tenants.
+    full.db.prepare(`DELETE FROM audit_retention WHERE tenant_id = 0`).run();
+    full.db
+      .prepare(
+        `INSERT INTO audit_retention
+         (tenant_id, retention_days, updated_at, updated_by, last_purge_at, last_purge_count, last_purge_days)
+         VALUES (0, 90, datetime('now'), 1, datetime('now'), 42, 90)`,
+      )
+      .run();
+    const r = await get(server, '/api/finance/audit/retention');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.retention_days, 90);
+    assert.equal(r.body.last_purge_count, 42);
+    assert.equal(r.body.last_purge_days, 90);
+    assert.ok(r.body.last_purge_at);
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {

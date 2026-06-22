@@ -25,6 +25,7 @@
 //   GET    /api/finance/audit/retention                  (security.audit.read)        — W60 read retention config
 //   PUT    /api/finance/audit/retention                  (security.audit.retention.update) — W60 set retention config
 //   POST   /api/finance/audit/purge                      (security.audit.retention.update) — W60 manual purge
+//   GET    /api/finance/audit/retention/dashboard        (security.audit.read)          — W63 dashboard
 //   GET    /api/finance/vat/return?yearMonth=YYYY-MM
 //   GET    /api/finance/einvoice/export/:invoiceId
 //   GET    /api/finance/catalog/items
@@ -154,6 +155,8 @@ import {
   getAuditRetention,
   setAuditRetention,
   purgeOldAuditEvents,
+  recordPurgeRun,
+  getRetentionDashboard,
 } from './auditRetention.js';
 import {
   createCatalogItem,
@@ -1535,11 +1538,67 @@ export function registerFinanceRoutes(app, opts = {}) {
           days = cfg.retention_days;
         }
         const purged = purgeOldAuditEvents(rawDb, req.tenantId, days);
+        // Record the purge run on the audit_retention row so
+        // the W63 dashboard can show "last purge deleted N
+        // rows on YYYY-MM-DD". Silent no-op if the tenant
+        // is on the default 365d policy (no config row).
+        try {
+          recordPurgeRun(rawDb, req.tenantId, purged, days);
+        } catch (_e) {
+          // best-effort — purge already happened; do not
+          // surface a write failure as a route error
+        }
         res.status(200).json({
           purged,
           retention_days: days,
           tenant_id: req.tenantId,
         });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/dashboard — CFO-facing
+  // view of every tenant's audit retention state. Pure
+  // read; no destructive ops.
+  //
+  // Returns a list of tenants (every tenant that has an
+  // explicit retention config OR any audit rows). For each
+  // tenant we surface:
+  //   - retention_days (explicit or DEFAULT_RETENTION_DAYS)
+  //   - has_explicit_config (true if the operator set a
+  //     non-default config; false if the tenant is on the
+  //     default 365d policy)
+  //   - last_purge_at + last_purge_count + last_purge_days
+  //     (timestamp + count + window of the LAST purge run,
+  //     null if no purge has run yet)
+  //   - audit_row_count (current rows in the audit table
+  //     for this tenant — operators can spot the bloat
+  //     before it becomes a regulatory problem)
+  //
+  // Perm gate: `security.audit.read` (same as the read
+  // audit endpoint). Read-only.
+  app.get(
+    '/api/finance/audit/retention/dashboard',
+    requireTenant,
+    requirePerm('security.audit.read'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        // The dashboard is intentionally NOT tenant-scoped —
+        // it shows every tenant's state. Operators with
+        // security.audit.read on the calling tenant can see
+        // the full picture (the route's perm is already
+        // tenant-scoped via the requireTenant middleware).
+        // For multi-tenant deploys the CFO perm is the gate.
+        const dashboard = getRetentionDashboard(rawDb);
+        res.status(200).json(dashboard);
       } catch (err) {
         next(err);
       }

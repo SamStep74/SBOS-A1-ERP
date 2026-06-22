@@ -47,8 +47,12 @@ export function getAuditRetention(db, tenantId) {
   if (!Number.isFinite(tid)) {
     throw new TypeError('tenantId must be a finite number');
   }
+  // W63: also read the last-purge history columns so the
+  // /audit/retention GET response carries the dashboard data
+  // (avoids a separate query per tenant).
   const sql = stripFinancePrefix(
-    `SELECT tenant_id, retention_days, updated_at, updated_by
+    `SELECT tenant_id, retention_days, updated_at, updated_by,
+            last_purge_at, last_purge_count, last_purge_days
        FROM finance.audit_retention
        WHERE tenant_id = ?`,
   );
@@ -59,6 +63,11 @@ export function getAuditRetention(db, tenantId) {
       retention_days: Number(row.retention_days),
       updated_at: row.updated_at || null,
       updated_by: row.updated_by == null ? null : Number(row.updated_by),
+      last_purge_at: row.last_purge_at || null,
+      last_purge_count:
+        row.last_purge_count == null ? null : Number(row.last_purge_count),
+      last_purge_days:
+        row.last_purge_days == null ? null : Number(row.last_purge_days),
     };
   }
   // No config row → return the default. We DO NOT write a row
@@ -71,6 +80,9 @@ export function getAuditRetention(db, tenantId) {
     retention_days: DEFAULT_RETENTION_DAYS,
     updated_at: null,
     updated_by: null,
+    last_purge_at: null,
+    last_purge_count: null,
+    last_purge_days: null,
   };
 }
 
@@ -214,6 +226,15 @@ export function startAuditRetentionPurge({
       if (!cfg.retention_days) continue; // 0 = forever, skip
       const n = purgeOldAuditEvents(db, tid, cfg.retention_days);
       totalPurged += n;
+      // Record the run for the W63 dashboard. Silent
+      // no-op if the tenant is on the default 365d policy
+      // (no config row to update).
+      try {
+        recordPurgeRun(db, tid, n, cfg.retention_days);
+      } catch (_e) {
+        // best-effort: do not let a write failure on the
+        // dashboard column crash the auto-purge tick
+      }
     }
     return totalPurged;
   };
@@ -252,5 +273,134 @@ export function startAuditRetentionPurge({
     },
     tickMs: tick,
     tickNow: tickOnce,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// W63: dashboard support — record purge history + roll up per-tenant
+// stats.
+//
+// The retention policy (W60) gave admins the knobs; the dashboard
+// (this wave) gives them the visibility. The dashboard reads:
+//   - audit_retention row (config + last_purge_at + last_purge_count)
+//     for tenants with an explicit config
+//   - the audit table directly (UNION over distinct tenant_ids)
+//     for tenants on the default 365d policy that have audit rows
+//   - the audit table again (per-tenant COUNT(*)) for the current
+//     audit row count
+//
+// The dashboard does NOT execute any purge — it's a read-side
+// view. The CFO sees "tenant X is on 365d default with 12k rows"
+// and "tenant Y set 90d, last purged 200 rows on Tuesday".
+// ────────────────────────────────────────────────────────────────────────
+
+// recordPurgeRun — stamp the last_purge_at + last_purge_count
+// columns on the audit_retention row for a tenant. Caller
+// invokes this after purgeOldAuditEvents returns.
+//
+// Silent no-op when no config row exists for the tenant.
+// Rationale: tenants on the default 365d policy have no row
+// in audit_retention (the config is implicit). Recording
+// purge history for them would force us to write a row
+// (sparse table → dense table), which would surprise
+// operators who query audit_retention expecting "only
+// tenants who deviated from the default".
+//
+// daysKept is the retention window in effect AT THE TIME
+// of the purge (so the dashboard can show "last purge
+// ran with 90d window"). Optional — null is fine for
+// callers that don't track it.
+export function recordPurgeRun(db, tenantId, purgedCount, daysKept = null) {
+  const tid = Number(tenantId);
+  if (!Number.isFinite(tid)) {
+    throw new TypeError('tenantId must be a finite number');
+  }
+  const count = Number(purgedCount);
+  if (!Number.isFinite(count) || count < 0) {
+    throw new RangeError('purgedCount must be a non-negative finite number');
+  }
+  // Check if a config row exists. UPDATE is cheaper than
+  // INSERT-then-catch-error (and gives a clear "row not
+  // found" path). For tenants on the default policy, the
+  // row does not exist and we silently no-op.
+  const sql = stripFinancePrefix(
+    `UPDATE finance.audit_retention
+        SET last_purge_at = datetime('now'),
+            last_purge_count = ?,
+            last_purge_days = ?
+      WHERE tenant_id = ?`,
+  );
+  const res = db.prepare(sql).run(count, daysKept, tid);
+  return Number(res.changes || 0); // 0 if no row, 1 if updated
+}
+
+// getRetentionDashboard — return per-tenant stats for every
+// tenant that has an explicit retention config OR has any
+// audit rows. The shape is designed for the CFO-facing
+// dashboard (read-only, no perm to update).
+//
+// Output item shape:
+//   {
+//     tenant_id:        <int>,
+//     retention_days:   <int>,           // explicit or DEFAULT_RETENTION_DAYS
+//     has_explicit_config: <bool>,       // true iff audit_retention row exists
+//     updated_at:       <iso|null>,      // when the config was last set
+//     updated_by:       <int|null>,      // who set the config
+//     last_purge_at:    <iso|null>,      // when the last purge ran
+//     last_purge_count: <int|null>,      // rows deleted in the last purge
+//     audit_row_count:  <int>,           // current rows in the audit table
+//   }
+//
+// Sorted by tenant_id ASC for stable display.
+export function getRetentionDashboard(db) {
+  // Two queries: explicit-config tenants (joined with row
+  // count) and default-config tenants (audit rows only).
+  // The UNION dedupes when a tenant appears in both (an
+  // explicit config takes precedence — the LEFT JOIN covers
+  // this).
+  const sql = stripFinancePrefix(
+    `SELECT
+        ar.tenant_id              AS tenant_id,
+        ar.retention_days         AS retention_days,
+        1                         AS has_explicit_config,
+        ar.updated_at             AS updated_at,
+        ar.updated_by             AS updated_by,
+        ar.last_purge_at          AS last_purge_at,
+        ar.last_purge_count       AS last_purge_count,
+        ar.last_purge_days        AS last_purge_days,
+        (SELECT COUNT(*) FROM finance.audit a
+          WHERE a.tenant_id = ar.tenant_id) AS audit_row_count
+     FROM finance.audit_retention ar
+     UNION
+     SELECT
+        a.tenant_id               AS tenant_id,
+        ${DEFAULT_RETENTION_DAYS} AS retention_days,
+        0                         AS has_explicit_config,
+        NULL                      AS updated_at,
+        NULL                      AS updated_by,
+        NULL                      AS last_purge_at,
+        NULL                      AS last_purge_count,
+        NULL                      AS last_purge_days,
+        COUNT(*)                  AS audit_row_count
+     FROM finance.audit a
+     WHERE a.tenant_id NOT IN (SELECT tenant_id FROM finance.audit_retention)
+     GROUP BY a.tenant_id
+     ORDER BY tenant_id ASC`,
+  );
+  const rows = db.prepare(sql).all();
+  return {
+    items: rows.map((r) => ({
+      tenant_id: Number(r.tenant_id),
+      retention_days: Number(r.retention_days),
+      has_explicit_config: Number(r.has_explicit_config) === 1,
+      updated_at: r.updated_at || null,
+      updated_by: r.updated_by == null ? null : Number(r.updated_by),
+      last_purge_at: r.last_purge_at || null,
+      last_purge_count:
+        r.last_purge_count == null ? null : Number(r.last_purge_count),
+      last_purge_days:
+        r.last_purge_days == null ? null : Number(r.last_purge_days),
+      audit_row_count: Number(r.audit_row_count),
+    })),
   };
 }

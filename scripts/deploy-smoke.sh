@@ -3446,6 +3446,126 @@ else
 fi
 echo
 
+echo "=== STEP 5ad: Audit retention dashboard (Wave 63) ==="
+# Smoke coverage for the W63 dashboard. We verify:
+#   1. GET dashboard returns 200 with items array
+#   2. POST purge stamps last_purge_count on the row
+#   3. After purge, dashboard shows the recorded run
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) GET dashboard returns 200 with items array
+    const r1 = await get("/api/finance/audit/retention/dashboard");
+    if (r1.status !== 200) {
+      console.log("  FAIL dashboard status " + r1.status);
+      process.exit(1);
+    }
+    if (!Array.isArray(r1.body.items)) {
+      console.log("  FAIL dashboard items not an array");
+      process.exit(1);
+    }
+    console.log("  dashboard returned " + r1.body.items.length + " tenants");
+
+    // 2) POST purge stamps the row
+    const r2 = await sendJson("POST", "/api/finance/audit/purge", { retention_days: 365 });
+    if (r2.status !== 200) {
+      console.log("  FAIL purge status " + r2.status);
+      process.exit(1);
+    }
+    if (typeof r2.body.purged !== "number") {
+      console.log("  FAIL purge response shape");
+      process.exit(1);
+    }
+    console.log("  purge ran, " + r2.body.purged + " rows deleted");
+
+    // 3) After purge, dashboard shows the recorded run for tenant 0
+    const r3 = await get("/api/finance/audit/retention/dashboard");
+    const t0 = r3.body.items.find((i) => i.tenant_id === 0);
+    if (!t0) {
+      console.log("  FAIL tenant 0 not in dashboard");
+      process.exit(1);
+    }
+    // last_purge_at should be set if any purge has ever run for
+    // this tenant. We do not assert the count (depends on
+    // how many rows were old enough to purge).
+    if (r2.body.purged > 0 && !t0.last_purge_at) {
+      console.log("  FAIL purge ran but last_purge_at is null");
+      process.exit(1);
+    }
+    if (r2.body.purged > 0 && t0.last_purge_count !== r2.body.purged) {
+      console.log("  FAIL last_purge_count " + t0.last_purge_count + " != purged " + r2.body.purged);
+      process.exit(1);
+    }
+    console.log("  dashboard records last_purge_at=" + t0.last_purge_at + " count=" + t0.last_purge_count);
+
+    // 4) GET /api/finance/audit/retention also exposes last_purge_count
+    const r4 = await get("/api/finance/audit/retention");
+    if (r4.status !== 200) {
+      console.log("  FAIL retention get status " + r4.status);
+      process.exit(1);
+    }
+    if (r4.body.last_purge_at == null) {
+      console.log("  FAIL retention GET missing last_purge_at");
+      process.exit(1);
+    }
+    console.log("  retention GET includes last_purge_at=" + r4.body.last_purge_at);
+
+    console.log("  OK audit retention dashboard");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  audit retention dashboard OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

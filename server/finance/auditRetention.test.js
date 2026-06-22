@@ -18,6 +18,8 @@ import {
   getAuditRetention,
   setAuditRetention,
   purgeOldAuditEvents,
+  recordPurgeRun,
+  getRetentionDashboard,
   DEFAULT_RETENTION_DAYS,
 } from './auditRetention.js';
 
@@ -36,7 +38,10 @@ function makeRetentionDb() {
       tenant_id INTEGER PRIMARY KEY,
       retention_days INTEGER NOT NULL DEFAULT 365,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_by INTEGER
+      updated_by INTEGER,
+      last_purge_at TEXT,
+      last_purge_count INTEGER,
+      last_purge_days INTEGER
     );
   `);
   return db;
@@ -124,4 +129,67 @@ test('purgeOldAuditEvents: returns 0 when no rows match', () => {
   seedAudit(db, { tenantId: 0, ageDays: 1 });
   const purged = purgeOldAuditEvents(db, 0, 30);
   assert.equal(purged, 0);
+});
+
+// ─── W63: purge-run tracking + retention dashboard ───
+
+test('recordPurgeRun: stamps last_purge_at + last_purge_count on the row', () => {
+  const db = makeRetentionDb();
+  setAuditRetention(db, 0, 90, 1);
+  recordPurgeRun(db, 0, 42);
+  const cfg = getAuditRetention(db, 0);
+  assert.equal(cfg.last_purge_count, 42);
+  assert.ok(cfg.last_purge_at, 'last_purge_at must be set');
+});
+
+test('recordPurgeRun: silently no-ops when no config row exists', () => {
+  // A tenant on the default config has no row to update.
+  // recordPurgeRun should NOT crash or create a row
+  // (otherwise the operator's auto-cleaned default tenants
+  // would leave stray rows in the audit_retention table).
+  const db = makeRetentionDb();
+  recordPurgeRun(db, 0, 42);
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM audit_retention WHERE tenant_id = 0`).get();
+  assert.equal(row.n, 0, 'recordPurgeRun must not create a row');
+});
+
+test('getRetentionDashboard: returns per-tenant stats for all tenants', () => {
+  const db = makeRetentionDb();
+  // Seed three tenants: one with config + purge history,
+  // one with config but no purge, one with audit rows
+  // only (default config).
+  setAuditRetention(db, 0, 90, 1);
+  setAuditRetention(db, 7, 180, 2);
+  // No config for tenant 5 — uses the 365d default.
+  seedAudit(db, { tenantId: 0, ageDays: 1 });
+  seedAudit(db, { tenantId: 0, ageDays: 200 });   // would be purged at 90d
+  seedAudit(db, { tenantId: 7, ageDays: 5 });
+  seedAudit(db, { tenantId: 5, ageDays: 100 });
+  const dashboard = getRetentionDashboard(db);
+  assert.ok(Array.isArray(dashboard.items));
+  assert.ok(dashboard.items.length >= 3);
+  // Each item has the documented shape.
+  for (const item of dashboard.items) {
+    assert.ok(typeof item.tenant_id === 'number');
+    assert.ok(typeof item.retention_days === 'number');
+    assert.ok(typeof item.audit_row_count === 'number');
+  }
+  // The default-tenant (no config) shows retention_days=365
+  // and has_explicit_config=false.
+  const t5 = dashboard.items.find((i) => i.tenant_id === 5);
+  assert.ok(t5);
+  assert.equal(t5.retention_days, 365);
+  assert.equal(t5.has_explicit_config, false);
+  // Tenant 0 has explicit config + audit rows.
+  const t0 = dashboard.items.find((i) => i.tenant_id === 0);
+  assert.ok(t0);
+  assert.equal(t0.retention_days, 90);
+  assert.equal(t0.has_explicit_config, true);
+  assert.equal(t0.audit_row_count, 2);
+});
+
+test('getRetentionDashboard: returns an empty list when no tenants have audit rows', () => {
+  const db = makeRetentionDb();
+  const dashboard = getRetentionDashboard(db);
+  assert.deepEqual(dashboard.items, []);
 });
