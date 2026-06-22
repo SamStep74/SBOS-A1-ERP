@@ -13,6 +13,10 @@
 //   POST   /api/finance/invoices/:id/payments
 //   POST   /api/finance/invoices/:id/void
 //   POST   /api/finance/invoices/:id/reconcile
+//   POST   /api/finance/invoices/:id/attachments            (finance.invoice.attach) — Wave 56
+//   GET    /api/finance/invoices/:id/attachments            (finance.invoice.attach.read)
+//   GET    /api/finance/invoices/:id/attachments/:attId     (download, finance.invoice.attach.read)
+//   DELETE /api/finance/invoices/:id/attachments/:attId     (finance.invoice.attach)
 //   GET    /api/finance/customers
 //   POST   /api/finance/customers
 //   PATCH  /api/finance/customers/:id
@@ -115,6 +119,14 @@ import {
   updateInvoice,
   voidInvoice,
 } from './invoice.js';
+import {
+  addAttachment,
+  listAttachments,
+  getAttachment,
+  deleteAttachment,
+  readAttachmentBytes,
+  AttachmentError,
+} from './attachments.js';
 import { recordPayment, reconcileInvoice } from './payment.js';
 import { createCustomer, updateCustomer, listCustomers as listCustomersPure, getCustomer } from './customer.js';
 import { getCustomer360 } from './customer360.js';
@@ -621,6 +633,150 @@ export function registerFinanceRoutes(app, opts = {}) {
       const out = await reconcileInvoice(pgAdapter, id, tenantId);
       res.status(200).json(out);
     }),
+  );
+
+  // ─── Wave 56: invoice document attachments ───
+  //
+  // Operators attach supporting documents to invoices: the
+  // signed PDF, the vendor's quote, a photo of the goods
+  // received, etc. The DB stores the metadata; the file
+  // bytes live on disk under $SBOS_ATTACHMENTS_DIR.
+
+  // POST /api/finance/invoices/:id/attachments — upload a
+  // file as raw bytes. The metadata is supplied via headers
+  // (no multipart parsing — keep the route small):
+  //   x-filename    original filename (required, no path sep)
+  //   x-mime-type   mime type (optional, default octet-stream)
+  //   x-description free text (optional, max 500 chars)
+  app.post(
+    '/api/finance/invoices/:id/attachments',
+    requireTenant,
+    requirePerm('finance.invoice.attach'),
+    async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      // Read the raw body. express.json() doesn't handle
+      // application/octet-stream so we read from req directly.
+      const chunks = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      const buffer = Buffer.concat(chunks);
+      const filename = String(req.headers['x-filename'] || '').trim();
+      const mimeType = req.headers['x-mime-type']
+        ? String(req.headers['x-mime-type'])
+        : null;
+      const description = req.headers['x-description']
+        ? String(req.headers['x-description'])
+        : null;
+      try {
+        const row = await addAttachment(pgAdapter, {
+          tenantId,
+          invoiceId: id,
+          buffer,
+          filename,
+          mimeType,
+          description,
+          uploadedBy: req.user ? req.user.id : null,
+        });
+        res.status(201).json(row);
+      } catch (err) {
+        if (err instanceof AttachmentError) {
+          return res
+            .status(err.statusCode || 400)
+            .json({ error: 'invalid_request', message: err.message });
+        }
+        res.status(500).json({ error: 'internal_error', message: err && err.message });
+      }
+    },
+  );
+
+  // GET /api/finance/invoices/:id/attachments — list the
+  // metadata for all attachments on this invoice.
+  app.get(
+    '/api/finance/invoices/:id/attachments',
+    requireTenant,
+    requirePerm('finance.invoice.attach.read'),
+    async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      if (id === null) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const items = await listAttachments(pgAdapter, tenantId, id, {
+        limit: req.query.limit,
+      });
+      res.status(200).json({ items });
+    },
+  );
+
+  // GET /api/finance/invoices/:id/attachments/:attachmentId
+  // — download the raw file bytes. The Content-Disposition
+  // header carries the original filename so the browser
+  // saves it as that name.
+  app.get(
+    '/api/finance/invoices/:id/attachments/:attachmentId',
+    requireTenant,
+    requirePerm('finance.invoice.attach.read'),
+    async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      const attId = Number(req.params.attachmentId);
+      if (id === null || !Number.isInteger(attId) || attId <= 0) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      const row = await getAttachment(pgAdapter, tenantId, attId);
+      if (!row || Number(row.invoice_id) !== Number(id)) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      try {
+        const buf = await readAttachmentBytes(row);
+        res
+          .status(200)
+          .set('Content-Type', row.mime_type || 'application/octet-stream')
+          .set('Content-Length', String(buf.length))
+          .set('Content-Disposition', `attachment; filename="${row.filename}"`)
+          .send(buf);
+      } catch (err) {
+        if (err instanceof AttachmentError) {
+          return res
+            .status(err.statusCode || 500)
+            .json({ error: 'attachment_unavailable', message: err.message });
+        }
+        res.status(500).json({ error: 'internal_error', message: err && err.message });
+      }
+    },
+  );
+
+  // DELETE /api/finance/invoices/:id/attachments/:attachmentId
+  // — remove the attachment (metadata + file).
+  app.delete(
+    '/api/finance/invoices/:id/attachments/:attachmentId',
+    requireTenant,
+    requirePerm('finance.invoice.attach'),
+    async (req, res) => {
+      const id = parseInvoiceId(req.params.id);
+      const attId = Number(req.params.attachmentId);
+      if (id === null || !Number.isInteger(attId) || attId <= 0) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const tenantId = req.tenantId;
+      // Verify the attachment belongs to this invoice (tenant
+      // check is in getAttachment; the invoice_id check is
+      // here so a wrong invoice id returns 404 not 500).
+      const existing = await getAttachment(pgAdapter, tenantId, attId);
+      if (!existing || Number(existing.invoice_id) !== Number(id)) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      const ok = await deleteAttachment(pgAdapter, tenantId, attId);
+      if (!ok) {
+        return res.status(404).json({ error: 'not_found' });
+      }
+      res.status(204).send();
+    },
   );
 
   // List customers — tenant-scoped.

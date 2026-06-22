@@ -716,6 +716,18 @@ const PERMISSIONS = Object.freeze({
     label: 'Void invoice',
     description: 'Void an issued invoice.',
   },
+  'finance.invoice.attach': {
+    category: 'finance',
+    sensitivity: 'medium',
+    label: 'Attach document to invoice',
+    description: 'Upload, list, or delete supporting documents on an invoice (PDF, photo, etc.).',
+  },
+  'finance.invoice.attach.read': {
+    category: 'finance',
+    sensitivity: 'low',
+    label: 'View invoice attachments',
+    description: 'List or download supporting documents on an invoice.',
+  },
   'finance.bill.read': {
     category: 'finance',
     sensitivity: 'low',

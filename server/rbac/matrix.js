@@ -213,6 +213,8 @@ const PERMISSION_SETS = Object.freeze({
       'finance.invoice.update',
       'finance.invoice.issue',
       'finance.invoice.void',
+      'finance.invoice.attach',
+      'finance.invoice.attach.read',
       'finance.bill.read',
       'finance.bill.update',
       'finance.payment.read',

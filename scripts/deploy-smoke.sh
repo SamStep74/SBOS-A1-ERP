@@ -29,10 +29,11 @@ LOG2=$TESTDIR/server-restart.log
 PIDFILE=$TESTDIR/server.pid
 DB=$TESTDIR/.sbos.db
 SMOKE_BACKUP_DIR=$TESTDIR/backups
+SMOKE_ATTACHMENTS_DIR=$TESTDIR/attachments
 
 # Reset test state
-mavis-trash "$DB" "$LOG" "$LOG2" "$SMOKE_BACKUP_DIR" 2>/dev/null
-mkdir -p "$TESTDIR" "$SMOKE_BACKUP_DIR"
+mavis-trash "$DB" "$LOG" "$LOG2" "$SMOKE_BACKUP_DIR" "$SMOKE_ATTACHMENTS_DIR" 2>/dev/null
+mkdir -p "$TESTDIR" "$SMOKE_BACKUP_DIR" "$SMOKE_ATTACHMENTS_DIR"
 cd "$TESTDIR"
 
 echo "=== STEP 1: Fresh state ==="
@@ -40,7 +41,7 @@ echo "=== STEP 1: Fresh state ==="
 echo
 
 echo "=== STEP 2: Boot server ==="
-PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG" 2>&1 &
+PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR SBOS_ATTACHMENTS_DIR=$SMOKE_ATTACHMENTS_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$PIDFILE"
 echo "PID=$SERVER_PID PORT=$PORT DB=$DB"
@@ -2537,6 +2538,157 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e "
   fi
 echo
 
+echo "=== STEP 5w: Invoice document attachments (Wave 56) ==="
+# Smoke coverage for the new attachment endpoints. We need a
+# real invoice id to attach to. Earlier steps in the smoke
+# (e.g. 7f vendor bill, 7e invoice) create invoices. We
+# look one up.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS_DIR" node -e "
+  const http = require('node:http');
+
+  function req(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(opts, (res) => {
+        let buf = Buffer.alloc(0);
+        res.on('data', d => buf = Buffer.concat([buf, d]));
+        res.on('end', () => {
+          let parsed = buf;
+          const ct = res.headers['content-type'] || '';
+          if (ct.includes('application/json')) {
+            try { parsed = JSON.parse(buf); } catch {}
+          }
+          resolve({ status: res.statusCode, body: parsed, raw: buf, headers: res.headers });
+        });
+      });
+      if (body) r.write(body);
+      r.end();
+    });
+  }
+
+  function get(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'GET',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  function postRaw(p, body, headers = {}) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'POST',
+      headers: Object.assign({
+        'authorization': 'Bearer ' + process.env.ADMIN_TOKEN,
+        'content-type': 'application/octet-stream',
+        'content-length': body ? body.length : 0,
+      }, headers),
+    }, body);
+  }
+
+  function del(p) {
+    return req({
+      host: '127.0.0.1', port: Number(process.env.PORT),
+      path: p, method: 'DELETE',
+      headers: { 'authorization': 'Bearer ' + process.env.ADMIN_TOKEN },
+    });
+  }
+
+  (async () => {
+    // Find an invoice id. The smoke earlier created some
+    // (vendor bills, etc.) — use the first one.
+    const list = await get('/api/finance/invoices?limit=1');
+    if (list.status !== 200 || !list.body.items || list.body.items.length === 0) {
+      console.log('  FAIL no invoices available (status=' + list.status + ')');
+      process.exit(1);
+    }
+    const invoiceId = list.body.items[0].id;
+    console.log('  using invoice id=' + invoiceId + ' for attachment tests');
+
+    // 1. POST upload (raw body + x-* headers).
+    const fileBody = Buffer.from('smoke wave 56 attachment content ' + Date.now());
+    const up = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      fileBody,
+      {
+        'x-filename': 'smoke_wave56.txt',
+        'x-mime-type': 'text/plain',
+        'x-description': 'smoke test',
+      },
+    );
+    if (up.status !== 201) {
+      console.log('  FAIL upload: status=' + up.status + ' body=' + JSON.stringify(up.body).slice(0, 200));
+      process.exit(1);
+    }
+    if (!up.body.id || up.body.filename !== 'smoke_wave56.txt') {
+      console.log('  FAIL upload response shape: ' + JSON.stringify(up.body));
+      process.exit(1);
+    }
+    console.log('  PASS 201 POST upload (attachment id=' + up.body.id + ', size_bytes=' + up.body.size_bytes + ')');
+
+    // 2. GET list includes the new row.
+    const lst = await get('/api/finance/invoices/' + invoiceId + '/attachments');
+    if (lst.status !== 200) {
+      console.log('  FAIL list: status=' + lst.status);
+      process.exit(1);
+    }
+    const found = lst.body.items.find((a) => a.filename === 'smoke_wave56.txt');
+    if (!found) {
+      console.log('  FAIL list: new attachment not present (n=' + lst.body.items.length + ')');
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET list includes the new row (sha256=' + found.sha256.slice(0, 12) + '...)');
+
+    // 3. GET by id returns the raw bytes.
+    const dl = await get('/api/finance/invoices/' + invoiceId + '/attachments/' + up.body.id);
+    if (dl.status !== 200) {
+      console.log('  FAIL download: status=' + dl.status);
+      process.exit(1);
+    }
+    if (!Buffer.isBuffer(dl.body) || !dl.body.equals(fileBody)) {
+      console.log('  FAIL download: bytes mismatch (got ' + (dl.body ? dl.body.length : '?') + ' bytes)');
+      process.exit(1);
+    }
+    const cd = dl.headers['content-disposition'] || '';
+    if (!cd.includes('smoke_wave56.txt')) {
+      console.log('  FAIL download: Content-Disposition missing filename: ' + cd);
+      process.exit(1);
+    }
+    console.log('  PASS 200 GET by id returns the raw bytes + correct Content-Disposition');
+
+    // 4. POST with no x-filename returns 400.
+    const noName = await postRaw(
+      '/api/finance/invoices/' + invoiceId + '/attachments',
+      Buffer.from('x'),
+    );
+    if (noName.status !== 400) {
+      console.log('  FAIL no-filename: status=' + noName.status);
+      process.exit(1);
+    }
+    console.log('  PASS 400 POST without x-filename returns invalid_request');
+
+    // 5. DELETE removes the attachment.
+    const rm = await del('/api/finance/invoices/' + invoiceId + '/attachments/' + up.body.id);
+    if (rm.status !== 204) {
+      console.log('  FAIL delete: status=' + rm.status);
+      process.exit(1);
+    }
+    const after = await get('/api/finance/invoices/' + invoiceId + '/attachments');
+    if (after.body.items.some((a) => a.id === up.body.id)) {
+      console.log('  FAIL delete: attachment still in list');
+      process.exit(1);
+    }
+    console.log('  PASS 204 DELETE removes the attachment');
+
+    process.exit(0);
+  })();
+  " 2>&1
+  if [ $? = 0 ]; then
+    echo "  invoice document attachments OK"
+  else
+    SMOKE_RC=1
+  fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
@@ -2557,7 +2709,7 @@ tail -8 "$LOG"
 echo
 
 echo "=== STEP 6: Restart (idempotency) ==="
-PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG2" 2>&1 &
+PORT=$PORT SBOS_DB=$DB SBOS_BACKUP_DIR=$SMOKE_BACKUP_DIR SBOS_ATTACHMENTS_DIR=$SMOKE_ATTACHMENTS_DIR node "$REPO_ROOT/bin/sbos-server.mjs" > "$LOG2" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$PIDFILE"
 sleep 2

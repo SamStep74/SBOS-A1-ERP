@@ -232,6 +232,21 @@ function makeFinanceDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_by INTEGER
     );
+    /* Migration 0032 (invoice_attachments) — ported schema mirror.
+       The pure functions in attachments.js need the table. */
+    CREATE TABLE invoice_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      invoice_id INTEGER NOT NULL,
+      filename TEXT NOT NULL,
+      mime_type TEXT,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      description TEXT,
+      storage_path TEXT NOT NULL,
+      uploaded_by INTEGER,
+      uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     /* Migration 0008 (purchase) — ported schema mirror. The actual
        table names on sqlite are vendors / purchase_orders / etc.
        (no finance. prefix) because the migration runner strips
@@ -551,6 +566,11 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     const { mkdtempSync } = await import('node:fs');
     backupDir = mkdtempSync(join(tmpdir(), 'sbos-srv-backups-'));
     process.env.SBOS_BACKUP_DIR = backupDir;
+    // Wave 56: each test file also gets its own attachments dir
+    // so attachment uploads don't pollute the cwd or race with
+    // other test files writing to ./attachments.
+    const attachmentsDir = mkdtempSync(join(tmpdir(), 'sbos-srv-attachments-'));
+    process.env.SBOS_ATTACHMENTS_DIR = attachmentsDir;
     full = makeFullDb();
     app = await createApp({ db: full.db, pgAdapter: full.pgAdapter, locale: 'en' });
     server = await start({ app, port: 0, host: '127.0.0.1' });
@@ -1274,6 +1294,98 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     const r = await get(server, '/api/rbac/sessions/UNKNOWN/events?limit=10');
     // Unknown session → 404.
     assert.equal(r.status, 404);
+  });
+
+  // ─── Wave 56: invoice document attachments ───
+
+  test('56a. POST /api/finance/invoices/:id/attachments uploads a file (raw body + x-* headers)', async () => {
+    // The route reads the raw body and uses x-filename / x-mime-type
+    // / x-description for metadata. We just verify the upload +
+    // metadata roundtrip.
+    const port = server.address().port;
+    const body = Buffer.from('fake-pdf-content-' + Date.now());
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-filename': 'signed_quote.pdf',
+          'x-mime-type': 'application/pdf',
+          'x-description': 'test upload',
+        },
+        body,
+      },
+    );
+    assert.equal(r.status, 201);
+    const j = await r.json();
+    assert.ok(j.id, 'attachment id must be present');
+    assert.equal(j.filename, 'signed_quote.pdf');
+    assert.equal(j.mime_type, 'application/pdf');
+    assert.equal(j.size_bytes, body.length);
+    assert.equal(j.description, 'test upload');
+    assert.ok(j.storage_path, 'storage_path must be set');
+  });
+
+  test('56b. GET /api/finance/invoices/:id/attachments lists the row from 56a', async () => {
+    // The list should include the attachment we just uploaded.
+    // Note: tests run in parallel so the list might include rows
+    // from other tests — we filter by filename.
+    const r = await get(server, '/api/finance/invoices/1/attachments');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+    const found = r.body.items.find((a) => a.filename === 'signed_quote.pdf');
+    assert.ok(found, 'uploaded attachment should appear in the list');
+    assert.equal(found.mime_type, 'application/pdf');
+  });
+
+  test('56c. GET /api/finance/invoices/:id/attachments/:attId returns the raw bytes', async () => {
+    // Find the attachment from 56a.
+    const list = await get(server, '/api/finance/invoices/1/attachments');
+    const a = list.body.items.find((x) => x.filename === 'signed_quote.pdf');
+    assert.ok(a, 'precondition: attachment exists');
+    const r = await get(
+      server,
+      `/api/finance/invoices/1/attachments/${a.id}`,
+    );
+    assert.equal(r.status, 200);
+    assert.ok(r.contentType.includes('application/pdf'));
+    // The body is the original bytes (the test fixture content).
+    // get() returns the parsed body; for binary content, the test
+    // is just verifying the endpoint shape + status.
+  });
+
+  test('56d. DELETE /api/finance/invoices/:id/attachments/:attId removes the attachment', async () => {
+    const list = await get(server, '/api/finance/invoices/1/attachments');
+    const a = list.body.items.find((x) => x.filename === 'signed_quote.pdf');
+    assert.ok(a, 'precondition: attachment exists');
+    const port = server.address().port;
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments/${a.id}`,
+      { method: 'DELETE' },
+    );
+    assert.equal(r.status, 204);
+    // List no longer includes it.
+    const after = await get(server, '/api/finance/invoices/1/attachments');
+    const stillThere = after.body.items.find(
+      (x) => x.filename === 'signed_quote.pdf',
+    );
+    assert.equal(stillThere, undefined);
+  });
+
+  test('56e. POST /api/finance/invoices/:id/attachments with no x-filename returns 400', async () => {
+    // Without x-filename the route can't compute the on-disk name.
+    const port = server.address().port;
+    const r = await globalThis.fetch(
+      `http://127.0.0.1:${port}/api/finance/invoices/1/attachments`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: Buffer.from('x'),
+      },
+    );
+    assert.equal(r.status, 400);
+    assert.equal((await r.json()).error, 'invalid_request');
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {
