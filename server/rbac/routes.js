@@ -22,6 +22,8 @@
 //   POST   /api/rbac/users/:userId/unlock             (security.user.update) — clear lockout
 //   POST   /api/rbac/users/:userId/lock               (security.user.update) — force-lock with reason
 //   GET    /api/rbac/users                            (security.user.read) — list users (with ?locked filter)
+//   GET    /api/rbac/users/approaching-lockout       (security.user.read) — Wave 59 at-risk users
+//   POST   /api/rbac/users/bulk-unlock               (security.user.update) — Wave 59 bulk unlock
 //   GET    /api/rbac/profiles                          (security.profile.read)
 //   POST   /api/rbac/profiles                          (security.profile.create)
 //   GET    /api/rbac/profiles/:id                      (security.profile.read)
@@ -51,6 +53,11 @@
 //     live-swap use case, pass opts.dbRef instead)
 import { PERMISSIONS, PERMISSIONS_VERSION, getDefinition, byCategory } from './permissions.js';
 import { ROLES, validateCustomRole, listRoleIds } from './roles.js';
+import {
+  listApproachingLockout,
+  bulkUnlockAll,
+  recordSessionEvent,
+} from '../auth-sessions.js';
 import { PERMISSION_SETS, PERMISSION_SETS_VERSION } from './matrix.js';
 import {
   ROLE_MATRIX,
@@ -657,6 +664,76 @@ function registerRbacRoutes(app, opts = {}) {
         limit,
         offset,
       };
+    },
+  );
+
+  // GET /api/rbac/users/approaching-lockout — list users with
+  // elevated failed_logins (>= threshold, default 3) OR a
+  // locked_until in the future. The pre-emptive counterpart
+  // to ?locked=true: "who's about to get locked?" vs.
+  // "who's currently locked?". Catches credential-stuffing
+  // early (many users slowly accumulating failed_logins
+  // from a coordinated attack).
+  //
+  // Perm: security.user.read (existing).
+  app.get(
+    '/api/rbac/users/approaching-lockout',
+    { preHandler: requirePermFastify('security.user.read') },
+    async (request) => {
+      const items = listApproachingLockout(getDb(), {
+        threshold: request.query.threshold,
+        limit: request.query.limit,
+      });
+      return { items };
+    },
+  );
+
+  // POST /api/rbac/users/bulk-unlock — reset failed_logins +
+  // locked_until for every user in the tenant (or across all
+  // tenants if no tenantId is given). Destructive mass
+  // action — used after a mass-lockout event (e.g. a
+  // bot-net that triggered the Wave 38 lockout on dozens
+  // of accounts). High-sensitivity perm: security.user.update.
+  //
+  // Body: { tenant_id?: <int> } — optional, restricts to one
+  // tenant. Default: all tenants.
+  // Returns: { unlocked_count: <int> }
+  app.post(
+    '/api/rbac/users/bulk-unlock',
+    { preHandler: requirePermFastify('security.user.update') },
+    async (request, reply) => {
+      const body = request.body || {};
+      const tenantId =
+        body.tenant_id != null && body.tenant_id !== ''
+          ? Number(body.tenant_id)
+          : null;
+      const unlocked = bulkUnlockAll(getDb(), { tenantId });
+      // Record a session event for the operator. The session
+      // is a mass-action; we want it in the audit-style
+      // activity log so the bulk unlock is traceable.
+      try {
+        recordSessionEvent(getDb(), {
+          sessionId: request.session ? request.session.id : 'admin-action',
+          userId: request.user ? request.user.id : 0,
+          tenantId: request.user ? request.user.tenant_id || 0 : 0,
+          eventType: 'revoked',
+          ip: request.ip,
+          userAgent: request.headers ? request.headers['user-agent'] : null,
+          payload: {
+            source: 'admin-bulk-unlock',
+            revoked_by: request.user ? request.user.id : null,
+            unlocked_count: unlocked,
+            target_tenant_id: tenantId,
+          },
+        });
+      } catch (_e) {
+        // best-effort
+      }
+      return reply.code(200).send({
+        ok: true,
+        unlocked_count: unlocked,
+        tenant_id: tenantId,
+      });
     },
   );
 

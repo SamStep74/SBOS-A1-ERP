@@ -2915,6 +2915,127 @@ PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" SBOS_ATTACHMENTS_DIR="$SMOKE_ATTACHMENTS
   fi
 echo
 
+echo "=== STEP 5z: Lockout observability + bulk admin unlock (Wave 59) ==="
+# Smoke coverage for the Wave 59 at-risk user list + bulk
+# unlock action. We verify:
+#   1. GET /api/rbac/users/approaching-lockout returns 200 with
+#      a list (initially empty or containing bob from prior
+#      5i/5p/5t steps)
+#   2. POST /api/rbac/users/bulk-unlock with tenant_id=0
+#      returns 200 with ok=true and unlocked_count >= 0
+#   3. After bulk-unlock, the at-risk list is empty
+#   4. The user count of the full user list is preserved
+#      (we did not delete anyone; we only reset their counters)
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  function postJson(p, body) {
+    const data = JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "POST",
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) at-risk list returns 200 with items array
+    const atRisk = await get("/api/rbac/users/approaching-lockout");
+    if (atRisk.status !== 200) {
+      console.log("  FAIL approaching-lockout status " + atRisk.status);
+      process.exit(1);
+    }
+    if (!Array.isArray(atRisk.body.items)) {
+      console.log("  FAIL at-risk items not an array");
+      process.exit(1);
+    }
+    console.log("  approaching-lockout returned " + atRisk.body.items.length + " items");
+
+    // 2) full user list count is preserved across the unlock
+    const before = await get("/api/rbac/users");
+    if (before.status !== 200) {
+      console.log("  FAIL users list status " + before.status);
+      process.exit(1);
+    }
+    const beforeCount = before.body.total;
+
+    // 3) bulk-unlock with tenant_id=0 returns 200
+    const unlocked = await postJson("/api/rbac/users/bulk-unlock", { tenant_id: 0 });
+    if (unlocked.status !== 200) {
+      console.log("  FAIL bulk-unlock status " + unlocked.status);
+      process.exit(1);
+    }
+    if (unlocked.body.ok !== true) {
+      console.log("  FAIL bulk-unlock did not return ok=true");
+      process.exit(1);
+    }
+    console.log("  bulk-unlock cleared " + unlocked.body.unlocked_count + " users");
+
+    // 4) after bulk-unlock, the at-risk list is empty
+    const atRiskAfter = await get("/api/rbac/users/approaching-lockout");
+    if (atRiskAfter.status !== 200) {
+      console.log("  FAIL post-unlock at-risk status " + atRiskAfter.status);
+      process.exit(1);
+    }
+    if (atRiskAfter.body.items.length !== 0) {
+      console.log("  FAIL post-unlock at-risk not empty: " + atRiskAfter.body.items.length);
+      process.exit(1);
+    }
+
+    // 5) user count is preserved
+    const after = await get("/api/rbac/users");
+    if (after.body.total !== beforeCount) {
+      console.log("  FAIL user count drifted: " + beforeCount + " -> " + after.body.total);
+      process.exit(1);
+    }
+    console.log("  user count preserved at " + after.body.total);
+
+    console.log("  OK lockout observability + bulk unlock");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  lockout observability + bulk unlock OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

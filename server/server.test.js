@@ -1581,6 +1581,109 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     assert.equal(r.status, 201, 'octet-stream is always accepted');
   });
 
+  // ─── Wave 59: lockout observability (at-risk list) + bulk-unlock ───
+
+  test('59a. GET /api/rbac/users/approaching-lockout returns users with elevated failed_logins or future lock', async () => {
+    // Reset to a clean baseline.
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL`,
+    ).run();
+    // Set bob (id=2) to 4 fails (at risk; default threshold 3).
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 4, locked_until = NULL WHERE id = 2`,
+    ).run();
+    const r = await get(server, '/api/rbac/users/approaching-lockout');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.body.items));
+    assert.ok(
+      r.body.items.some((u) => u.id === 2),
+      'bob should be in the at-risk list (4 fails >= threshold 3)',
+    );
+  });
+
+  test('59b. GET /api/rbac/users/approaching-lockout also includes currently-locked users', async () => {
+    // Reset everyone, then set carol to a future lock with 0 fails.
+    // She should appear in the at-risk list because the lock is
+    // current — the at-risk query ORs the two conditions.
+    full.db.prepare(
+      `UPDATE users SET failed_logins = 0, locked_until = NULL`,
+    ).run();
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    full.db
+      .prepare(
+        `INSERT OR REPLACE INTO users (id, username, role, tenant_id, failed_logins, locked_until)
+         VALUES (3, 'carol', 'Operator', 0, 0, ?)`,
+      )
+      .run(future);
+    try {
+      const r = await get(server, '/api/rbac/users/approaching-lockout');
+      assert.equal(r.status, 200);
+      assert.ok(
+        r.body.items.some((u) => u.id === 3 && u.is_currently_locked === true),
+        'carol should appear with is_currently_locked=true',
+      );
+    } finally {
+      // Cleanup the throwaway user.
+      full.db.prepare(`DELETE FROM users WHERE id = 3`).run();
+    }
+  });
+
+  test('59c. POST /api/rbac/users/bulk-unlock resets all failed_logins + locked_until', async () => {
+    // Set up: bob has 5 fails + future lock, admin has 0. After
+    // bulk-unlock, both should be at 0/null.
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    full.db
+      .prepare(
+        `UPDATE users SET failed_logins = 5, locked_until = ? WHERE id = 2`,
+      )
+      .run(future);
+    full.db
+      .prepare(
+        `UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = 1`,
+      )
+      .run();
+
+    const r = await postJson(server, '/api/rbac/users/bulk-unlock', {});
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.ok(
+      r.body.unlocked_count >= 1,
+      'at least bob should be unlocked',
+    );
+
+    // Verify both users are clean.
+    const bob = full.db
+      .prepare('SELECT failed_logins, locked_until FROM users WHERE id = 2')
+      .get();
+    assert.equal(bob.failed_logins, 0);
+    assert.equal(bob.locked_until, null);
+  });
+
+  test('59d. POST /api/rbac/users/bulk-unlock with tenant_id only unlocks that tenant', async () => {
+    // Add a user in tenant 7, lock them, then bulk-unlock with
+    // tenant_id=0. The tenant 7 user should remain locked.
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    full.db
+      .prepare(
+        `INSERT OR REPLACE INTO users (id, username, role, tenant_id, failed_logins, locked_until)
+         VALUES (3, 't7-locked', 'Operator', 7, 5, ?)`,
+      )
+      .run(future);
+    try {
+      const r = await postJson(server, '/api/rbac/users/bulk-unlock', {
+        tenant_id: 0,
+      });
+      assert.equal(r.status, 200);
+      // tenant 7 user should be untouched.
+      const t7 = full.db
+        .prepare('SELECT failed_logins FROM users WHERE id = 3')
+        .get();
+      assert.equal(t7.failed_logins, 5, 'tenant 7 user should remain locked');
+    } finally {
+      full.db.prepare(`DELETE FROM users WHERE id = 3`).run();
+    }
+  });
+
   test('6. GET /api/nonexistent returns 404', async () => {
     const { status, body } = await get(server, '/api/nonexistent');
     assert.equal(status, 404);

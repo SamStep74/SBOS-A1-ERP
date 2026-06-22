@@ -347,3 +347,140 @@ function safeParse(s) {
     return {};
   }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Lockout observability + bulk admin actions (Wave 59).
+// ────────────────────────────────────────────────────────────────────────
+//
+// Operators need two views beyond the existing
+// `GET /api/rbac/users?locked=true` (currently-locked only):
+//
+//   1. "Who's approaching lockout?" — users with elevated
+//      failed_logins but not yet locked. Catches credential-
+//      stuffing early (many users slowly accumulating
+//      failed_logins from a coordinated attack).
+//   2. "Unlock everyone" — bulk reset of failed_logins +
+//      locked_until across all users. Used after a
+//      mass-lockout event (e.g. a bot-net that triggered
+//      the Wave 38 lockout on dozens of accounts).
+//
+// The threshold (default 3) is just below the Wave 38 lockout
+// floor of 5 — "3+ failed attempts without being locked yet".
+// Operators can use this to spot at-risk users BEFORE they're
+// locked out.
+
+const DEFAULT_APPROACHING_THRESHOLD = 3;
+
+/**
+ * List users whose failed_logins >= threshold (default 3) OR
+ * whose locked_until is still in the future. Sorted by
+ * failed_logins DESC (most at-risk first) so the operator
+ * sees the worst cases at the top.
+ *
+ * @param db          node:sqlite handle (or a { current: handle } ref)
+ * @param opts.threshold     minimum failed_logins (default 3)
+ * @param opts.includeLocked  include currently-locked users
+ *                            (default true — they're "approaching"
+ *                            the same threshold)
+ * @param opts.limit         max rows (default 200)
+ */
+export function listApproachingLockout(db, opts = {}) {
+  // Wave 57 follow-up: duck-type handle vs ref.
+  const isRef = db && typeof db.prepare !== 'function';
+  const getDb = isRef
+    ? () => {
+        const cur = db.current;
+        if (!cur) {
+          throw new Error('listApproachingLockout: db is not open');
+        }
+        return cur;
+      }
+    : () => db;
+  const threshold = Number(opts.threshold) || DEFAULT_APPROACHING_THRESHOLD;
+  const limit = Math.min(Math.max(Number(opts.limit) || 200, 1), 1000);
+  // We want users that EITHER have failed_logins >= threshold
+  // OR are currently locked. The CAST around strftime handles
+  // the same-day expiry edge case (see Wave 42 comment in
+  // listMySessions).
+  const sql = `
+    SELECT id, username, email, role, tenant_id, org_id,
+           failed_logins, locked_until
+      FROM users
+     WHERE failed_logins >= ?
+        OR (locked_until IS NOT NULL
+            AND CAST(strftime('%s', locked_until) AS INTEGER)
+              > CAST(strftime('%s', 'now') AS INTEGER))
+     ORDER BY failed_logins DESC, id ASC
+     LIMIT ?
+  `;
+  return getDb()
+    .prepare(sql)
+    .all(threshold, limit)
+    .map((r) => ({
+      id: Number(r.id),
+      username: r.username,
+      email: r.email,
+      role: r.role,
+      tenant_id: Number(r.tenant_id),
+      org_id: r.org_id == null ? null : Number(r.org_id),
+      failed_logins: Number(r.failed_logins || 0),
+      locked_until: r.locked_until,
+      is_currently_locked:
+        r.locked_until != null &&
+        Date.parse(r.locked_until) > Date.now(),
+    }));
+}
+
+/**
+ * Bulk-unlock all currently-locked users. Resets failed_logins
+ * to 0 and locked_until to NULL for every user with either
+ * a non-null locked_until OR a high failed_logins count.
+ *
+ * Returns the count of users unlocked. This is a destructive
+ * mass action — the route layer requires the
+ * security.user.update perm (high sensitivity) AND emits an
+ * audit log entry.
+ *
+ * @param db          node:sqlite handle (or a { current: handle } ref)
+ * @param opts.tenantId  optional — if provided, only unlock users
+ *                       in this tenant. Default: all tenants.
+ * @param opts.now        optional — the timestamp to write for
+ *                        audit fields (default: a sentinel value
+ *                        the route overrides; the param exists so
+ *                        tests can pin a deterministic value)
+ */
+export function bulkUnlockAll(db, opts = {}) {
+  const isRef = db && typeof db.prepare !== 'function';
+  const getDb = isRef
+    ? () => {
+        const cur = db.current;
+        if (!cur) {
+          throw new Error('bulkUnlockAll: db is not open');
+        }
+        return cur;
+      }
+    : () => db;
+  const tenantId = opts.tenantId != null ? Number(opts.tenantId) : null;
+  let res;
+  if (tenantId != null) {
+    res = getDb()
+      .prepare(
+        `UPDATE users
+            SET failed_logins = 0, locked_until = NULL
+          WHERE tenant_id = ?
+            AND (locked_until IS NOT NULL
+                 OR failed_logins > 0)`,
+      )
+      .run(tenantId);
+  } else {
+    res = getDb()
+      .prepare(
+        `UPDATE users
+            SET failed_logins = 0, locked_until = NULL
+          WHERE locked_until IS NOT NULL
+             OR failed_logins > 0`,
+      )
+      .run();
+  }
+  return Number(res.changes || 0);
+}

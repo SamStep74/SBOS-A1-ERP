@@ -16,6 +16,8 @@ import {
   recordSessionEvent,
   listSessionEvents,
   listUserSessionEvents,
+  listApproachingLockout,
+  bulkUnlockAll,
 } from './auth-sessions.js';
 
 function makeDb() {
@@ -24,8 +26,12 @@ function makeDb() {
     CREATE TABLE users (
       id INTEGER PRIMARY KEY,
       username TEXT NOT NULL,
+      email TEXT,
       role TEXT,
-      tenant_id INTEGER NOT NULL DEFAULT 0
+      tenant_id INTEGER NOT NULL DEFAULT 0,
+      org_id INTEGER,
+      failed_logins INTEGER NOT NULL DEFAULT 0,
+      locked_until TEXT
     );
     CREATE TABLE sbos_rbac_sessions (
       id              TEXT PRIMARY KEY,
@@ -312,4 +318,100 @@ test('listUserSessionEvents: aggregates events across all the user\'s sessions',
   }
   const ips = events.map((e) => e.ip).sort();
   assert.deepEqual(ips, ['1.1.1.1', '2.2.2.2']);
+});
+
+// ─── Wave 59: lockout observability + bulk unlock ───
+
+function seedUser(db, { id, username, role = 'Admin', tenant_id = 0, failed_logins = 0, locked_until = null }) {
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  db.prepare(
+    `INSERT INTO users (id, username, role, tenant_id, failed_logins, locked_until)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, username, role, tenant_id, failed_logins, locked_until);
+}
+
+test('listApproachingLockout: returns users with failed_logins >= threshold', () => {
+  const db = makeDb();
+  // 0 fails — not at risk
+  seedUser(db, { id: 1, username: 'safe', failed_logins: 0 });
+  // 1 fail — not at risk (default threshold 3)
+  seedUser(db, { id: 2, username: 'low', failed_logins: 1 });
+  // 3 fails — at risk
+  seedUser(db, { id: 3, username: 'risky', failed_logins: 3 });
+  // 5 fails — definitely at risk
+  seedUser(db, { id: 4, username: 'very-risky', failed_logins: 5 });
+  const items = listApproachingLockout(db);
+  assert.equal(items.length, 2);
+  // Sorted by failed_logins DESC.
+  assert.equal(items[0].username, 'very-risky');
+  assert.equal(items[1].username, 'risky');
+});
+
+test('listApproachingLockout: also includes currently-locked users', () => {
+  const db = makeDb();
+  const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  seedUser(db, { id: 1, username: 'safe', failed_logins: 0 });
+  seedUser(db, { id: 2, username: 'locked', failed_logins: 0, locked_until: future });
+  const items = listApproachingLockout(db);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].username, 'locked');
+  assert.equal(items[0].is_currently_locked, true);
+});
+
+test('listApproachingLockout: respects the threshold override', () => {
+  const db = makeDb();
+  seedUser(db, { id: 1, username: 'risky', failed_logins: 2 });
+  // Default threshold is 3 — 2 fails is not at risk.
+  assert.equal(listApproachingLockout(db).length, 0);
+  // Lower threshold to 2 — now at risk.
+  assert.equal(listApproachingLockout(db, { threshold: 2 }).length, 1);
+});
+
+test('listApproachingLockout: does not include expired-locked users', () => {
+  const db = makeDb();
+  const past = new Date(Date.now() - 60 * 1000).toISOString();
+  seedUser(db, { id: 1, username: 'expired', failed_logins: 0, locked_until: past });
+  // The user is "locked" per the DB but the lock has expired.
+  // Should NOT appear in the at-risk list (the lock is
+  // effectively gone).
+  assert.equal(listApproachingLockout(db).length, 0);
+});
+
+test('bulkUnlockAll: resets failed_logins + locked_until across all tenants', () => {
+  const db = makeDb();
+  const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  seedUser(db, { id: 1, username: 'a', failed_logins: 5, locked_until: future });
+  seedUser(db, { id: 2, username: 'b', failed_logins: 0, locked_until: future });
+  seedUser(db, { id: 3, username: 'c', failed_logins: 0, locked_until: null });
+  // Users with no failed_logins and no locked_until should
+  // not be touched. The UPDATE only fires when one of the
+  // conditions is met.
+  const count = bulkUnlockAll(db);
+  assert.ok(count >= 2, `expected >= 2 unlocked, got ${count}`);
+  // Verify the state.
+  const a = db.prepare('SELECT failed_logins, locked_until FROM users WHERE id = 1').get();
+  const b = db.prepare('SELECT failed_logins, locked_until FROM users WHERE id = 2').get();
+  assert.equal(a.failed_logins, 0);
+  assert.equal(a.locked_until, null);
+  assert.equal(b.failed_logins, 0);
+  assert.equal(b.locked_until, null);
+});
+
+test('bulkUnlockAll: tenant filter restricts the scope', () => {
+  const db = makeDb();
+  const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  seedUser(db, { id: 1, username: 'a', tenant_id: 0, failed_logins: 5, locked_until: future });
+  seedUser(db, { id: 2, username: 'b', tenant_id: 7, failed_logins: 5, locked_until: future });
+  const count = bulkUnlockAll(db, { tenantId: 0 });
+  assert.equal(count, 1);
+  const a = db.prepare('SELECT failed_logins FROM users WHERE id = 1').get();
+  const b = db.prepare('SELECT failed_logins FROM users WHERE id = 2').get();
+  assert.equal(a.failed_logins, 0, 'tenant 0 should be unlocked');
+  assert.equal(b.failed_logins, 5, 'tenant 7 should be untouched');
+});
+
+test('bulkUnlockAll: returns 0 when no users are locked', () => {
+  const db = makeDb();
+  seedUser(db, { id: 1, username: 'safe', failed_logins: 0 });
+  assert.equal(bulkUnlockAll(db), 0);
 });
