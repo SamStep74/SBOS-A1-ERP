@@ -434,6 +434,38 @@ const SIGNATURES = [
       buf[3] === 0x00,
   },
   {
+    // W80: JXL (JPEG XL) — naked codestream. Magic:
+    // FF 0A at offset 0. The codestream format is the
+    // bare bitstream (no container). Checked BEFORE the
+    // plain-text fallback (which would accept FF 0A as
+    // printable) so the JXL detection wins.
+    mime: 'image/jxl',
+    label: 'JXL',
+    check: (buf) =>
+      buf.length >= 2 && buf[0] === 0xff && buf[1] === 0x0a,
+  },
+  {
+    // W80: JXL (JPEG XL) — ISOBMFF container. ftyp + 'jxl '
+    // brand (jxl + 1 space, NOT null-padded). Placed
+    // AFTER MP4/MOV/HEIC/AVIF so a generic MP4 file is
+    // detected as MP4, not JXL.
+    mime: 'image/jxl',
+    label: 'JXL-container',
+    check: (buf) => {
+      if (buf.length < 12) return false;
+      return (
+        buf[4] === 0x66 && // f
+        buf[5] === 0x74 && // t
+        buf[6] === 0x79 && // y
+        buf[7] === 0x70 && // p
+        buf[8] === 0x6a && // j
+        buf[9] === 0x78 && // x
+        buf[10] === 0x6c && // l
+        buf[11] === 0x20 // space
+      );
+    },
+  },
+  {
     // W61: AVI — Audio Video Interleave. RIFF container with
     // AVI brand at offset 8. The ftyp-based MP4/MOV branches
     // check BEFORE the RIFF branches so an MP4 file (which

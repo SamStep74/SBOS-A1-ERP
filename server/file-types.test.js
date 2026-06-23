@@ -612,3 +612,37 @@ test('listKnownTypes: includes HEIC/HEIF/AVIF', () => {
     assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Wave 80: JXL (JPEG XL) detection
+//   - Naked JXL (codestream): starts with FF 0A
+//   - Container JXL (ISOBMFF): ftyp + 'jxl ' brand
+//   - Both are detected. Container JXL falls through
+//     to the ftyp family; we add a dedicated JXL
+//     branch so it's labelled correctly.
+// ──────────────────────────────────────────────────────────────────────
+
+const JXL_NAKED = Buffer.from([0xff, 0x0a, 0x00, 0x00, 0x00]);
+const JXL_CONTAINER = Buffer.from([
+  0x00, 0x00, 0x00, 0x0c, 0x66, 0x74, 0x79, 0x70,
+  0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00,
+]);
+
+test('detectMimeType: JXL (naked codestream FF 0A)', () => {
+  assert.equal(detectMimeType(JXL_NAKED), 'image/jxl');
+});
+
+test('detectMimeType: JXL (ISOBMFF container jxl  brand)', () => {
+  assert.equal(detectMimeType(JXL_CONTAINER), 'image/jxl');
+});
+
+test('verifyMimeType: JXL claimed as PNG is REJECTED', () => {
+  const r = verifyMimeType(JXL_NAKED, 'image/png');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'image/jxl');
+});
+
+test('listKnownTypes: includes image/jxl', () => {
+  const known = listKnownTypes().map((t) => t.mime);
+  assert.ok(known.includes('image/jxl'), `expected image/jxl in listKnownTypes`);
+});
