@@ -4944,6 +4944,79 @@ else
 fi
 echo
 
+echo "=== STEP 5aw: pg port — optional dep + factory load (Wave 116 slice 2) ==="
+# Verify the pg-port scaffolding is intact: package.json
+# declares pg as an optionalDependency, the factory
+# module loads, and the env detection returns the right
+# backend. We do NOT require a live pg server — the
+# real-pg integration test (server/db/pgIntegration.
+# test.js) handles that, gated on SBOS_PG_URL.
+cd "$REPO_ROOT" && node -e '
+  const fs = require("fs");
+  const path = require("path");
+  const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  if (!pkg.optionalDependencies || !pkg.optionalDependencies.pg) {
+    console.log("  FAIL pg not in optionalDependencies");
+    process.exit(1);
+  }
+  if (!/^\^?\d+\.\d+\.\d+/.test(pkg.optionalDependencies.pg)) {
+    console.log("  FAIL pg version not pinned: " + pkg.optionalDependencies.pg);
+    process.exit(1);
+  }
+  // Verify docs/PG_PORT.md exists and has the install steps.
+  const docPath = path.join("docs", "PG_PORT.md");
+  if (!fs.existsSync(docPath)) {
+    console.log("  FAIL docs/PG_PORT.md missing");
+    process.exit(1);
+  }
+  const doc = fs.readFileSync(docPath, "utf8");
+  for (const needle of ["npm install pg", "SBOS_PG_URL", "SBOS_DB_BACKEND=postgres", "docker-compose.pg.yml"]) {
+    if (!doc.includes(needle)) {
+      console.log("  FAIL doc missing: " + needle);
+      process.exit(1);
+    }
+  }
+  // Verify the factory module loads + has the expected shape.
+  import("./server/db/pgAdapter.js").then(async ({ createPgAdapter, detectBackendFromEnv }) => {
+    if (detectBackendFromEnv({ SBOS_DB_BACKEND: "postgres" }) !== "postgres") {
+      console.log("  FAIL detectBackendFromEnv postgres");
+      process.exit(1);
+    }
+    if (detectBackendFromEnv({}) !== "sqlite") {
+      console.log("  FAIL detectBackendFromEnv default");
+      process.exit(1);
+    }
+    // The factory should accept a fake client (smoke uses
+    // the pre-built client path; live pg requires pg +
+    // SBOS_PG_URL which is opt-in).
+    const fakeClient = {
+      async connect() {},
+      async query() { return { rows: [{ n: 1 }] }; },
+      async end() {},
+    };
+    const adapter = await createPgAdapter({ client: fakeClient });
+    if (adapter.backend !== "postgres") {
+      console.log("  FAIL adapter.backend not postgres");
+      process.exit(1);
+    }
+    if (typeof adapter.close !== "function") {
+      console.log("  FAIL adapter.close missing");
+      process.exit(1);
+    }
+    await adapter.close();
+    await adapter.close();  // idempotent
+    console.log("  pg=" + pkg.optionalDependencies.pg);
+    console.log("  OK W116 pg-port optional dep + factory load");
+    process.exit(0);
+  }).catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W116 pg-port scaffolding OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

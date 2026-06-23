@@ -41,5 +41,8 @@
   },
   "dependencies": {
     "express": "^5.2.1"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.0"
   }
 }

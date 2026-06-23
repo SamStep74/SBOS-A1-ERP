@@ -80,6 +80,10 @@ export async function createPgAdapter(opts = {}) {
     client = new pg.Client({ connectionString: opts.connectionString });
     await client.connect();
   }
+  // Idempotent close: pg's Client.end() throws on the
+  // second call, so we track state and silently no-op
+  // on subsequent calls.
+  let closed = false;
   return {
     backend: 'postgres',
     client,
@@ -88,7 +92,14 @@ export async function createPgAdapter(opts = {}) {
       return { rows: result.rows || [] };
     },
     async close() {
-      await client.end();
+      if (closed) return;
+      closed = true;
+      try {
+        await client.end();
+      } catch (_err) {
+        // Defensive: the connection may already be closed
+        // by a previous error. Swallow.
+      }
     },
   };
 }
