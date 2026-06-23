@@ -31,7 +31,8 @@ function makeDb() {
       tenant_id INTEGER NOT NULL DEFAULT 0,
       org_id INTEGER,
       failed_logins INTEGER NOT NULL DEFAULT 0,
-      locked_until TEXT
+      locked_until TEXT,
+      last_failed_at TEXT
     );
     CREATE TABLE sbos_rbac_sessions (
       id              TEXT PRIMARY KEY,

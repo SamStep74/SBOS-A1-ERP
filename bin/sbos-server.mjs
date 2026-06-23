@@ -71,9 +71,23 @@ async function applySchemas(sqliteDb) {
       password_hash TEXT,
       password_salt TEXT,
       failed_logins INTEGER NOT NULL DEFAULT 0,
-      locked_until TEXT
+      locked_until TEXT,
+      -- W73: tracks when the last failed login occurred so
+      -- the lockout-purge worker can reset stale counters.
+      -- NULL means "never failed" or "unknown" — the purge
+      -- skips NULL rows.
+      last_failed_at TEXT
     );
   `);
+  // W73: idempotent column-add for existing deployments.
+  // The CREATE TABLE above covers fresh boots; this ALTER
+  // is a no-op on fresh boots and adds the column to any
+  // pre-W73 deployment.
+  try {
+    sqliteDb.exec(`ALTER TABLE users ADD COLUMN last_failed_at TEXT`);
+  } catch (_e) {
+    // Column already exists — fresh boot covered it.
+  }
   // Seed the stub admin user when missing. Set a random initial
   // password so the operator must read it from the token file (or
   // the auth-token-file-derived log) and use POST /api/auth/login

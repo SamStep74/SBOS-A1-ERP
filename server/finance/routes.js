@@ -1736,6 +1736,110 @@ export function registerFinanceRoutes(app, opts = {}) {
     },
   );
 
+  // POST /api/finance/audit/retention/diff/email — W74
+  // dispatch a retention diff to one or more recipients.
+  // Pairs with the W68 diff route (which returns the same
+  // diff JSON) and the W65 digest email route (which
+  // uses the same email service + perm gate).
+  //
+  // Body:
+  //   from:       ISO timestamp (inclusive baseline)
+  //   to:         ISO timestamp (exclusive end)
+  //   to_email:   recipient email (or comma-separated list)
+  //   subject:    optional override; default is generated
+  //               by buildRetentionDiffSubject
+  //
+  // Returns: {ok, sent, recipients, diff, body, subject}
+  app.post(
+    '/api/finance/audit/retention/diff/email',
+    requireTenant,
+    requirePerm('security.audit.export'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const body = req.body || {};
+        const from = String(body.from || '').trim();
+        const to = String(body.to || '').trim();
+        const toEmail = String(body.to_email || '').trim();
+        if (!from || !to) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            message: 'from and to (ISO timestamps) are required',
+          });
+        }
+        if (!toEmail) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            message: 'to_email (recipient) is required',
+          });
+        }
+        const { diffRetentionSnapshots } = await import('./retentionHistory.js');
+        const { buildRetentionDiffBody, buildRetentionDiffSubject } = await import(
+          './retentionDiffEmail.js'
+        );
+        const diff = diffRetentionSnapshots(rawDb, { from, to });
+        const text = buildRetentionDiffBody({ from, to, diff });
+        const subject =
+          String(body.subject || '').trim() ||
+          buildRetentionDiffSubject({ from, to, diff });
+        const emailService =
+          req.app && req.app.locals && req.app.locals.emailService;
+        if (emailService && typeof emailService.send === 'function') {
+          await emailService.send({ to: toEmail, subject, body: text });
+        }
+        res.status(200).json({
+          ok: true,
+          sent: Boolean(emailService),
+          recipients: toEmail,
+          diff,
+          subject,
+          body: text,
+        });
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            message: err.message,
+          });
+        }
+        next(err);
+      }
+    },
+  );
+
+  // GET /api/finance/audit/retention/summary — W75 rollup
+  // widget. Returns the totals (tenant counts, override vs
+  // default, total audit rows) + the per-tenant list
+  // (sorted by tenant_id ASC). Pairs with the W63
+  // per-tenant dashboard — the dashboard answers "what
+  // does each tenant look like" and this summary answers
+  // "how many of my tenants have customised retention".
+  app.get(
+    '/api/finance/audit/retention/summary',
+    requireTenant,
+    requirePerm('security.audit.retention.update'),
+    async (req, res, next) => {
+      try {
+        const rawDb = req.app && req.app.locals && req.app.locals.db;
+        if (!rawDb) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'audit db unavailable' });
+        }
+        const { buildRetentionSummary } = await import('./retentionSummary.js');
+        const summary = buildRetentionSummary(rawDb);
+        res.status(200).json(summary);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // GET /api/finance/audit/retention/history — per-tenant
   // history of retention snapshots. The CFO can answer
   // "what did the retention state look like last Tuesday?"

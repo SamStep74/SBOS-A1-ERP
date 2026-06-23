@@ -759,6 +759,29 @@ export async function createApp({
     app.locals.retentionHistory = historyHandle;
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // W73: lockout auto-purge worker.
+  //
+  // Resets stale `users.failed_logins` + `users.locked_until`
+  // for users whose last_failed_at is older than 24h. The
+  // boot path runs the purge once at startup so a restart
+  // cleans obvious stale rows immediately.
+  //
+  // Opt-in via SBOS_LOCKOUT_PURGE_ENABLED=true. Default
+  // tick 24h (floored at 60s).
+  // ────────────────────────────────────────────────────────────────
+  if (process.env.SBOS_LOCKOUT_PURGE_ENABLED === 'true') {
+    const { startLockoutPurge } = await import('./lockout-purge.js');
+    const purgeTickMs = process.env.SBOS_LOCKOUT_PURGE_TICK_MS
+      ? Number(process.env.SBOS_LOCKOUT_PURGE_TICK_MS)
+      : 24 * 60 * 60 * 1000;
+    const purgeHandle = startLockoutPurge({
+      db: dbRef.current,
+      tickMs: purgeTickMs,
+    });
+    app.locals.lockoutPurge = purgeHandle;
+  }
+
   // Generic 500.
   app.use((err, req, res, _next) => {
     console.error('[server] unhandled error:', err && err.stack ? err.stack : err);

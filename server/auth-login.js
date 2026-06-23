@@ -231,11 +231,16 @@ export function login(db, username, password, opts = {}) {
     if (newCount >= maxFailed) {
       lockedUntil = new Date(Date.now() + lockoutSeconds * 1000).toISOString();
     }
+    // W73: also stamp last_failed_at so the periodic purge
+    // can decide whether the counter is "stale" (>24h old).
+    // UTC 'YYYY-MM-DD HH:MM:SS' format, matching the
+    // threshold format in clearStaleFailedLogins.
+    const lastFailedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
     getDb().prepare(
       `UPDATE users
-          SET failed_logins = ?, locked_until = ?
+          SET failed_logins = ?, locked_until = ?, last_failed_at = ?
         WHERE id = ?`,
-    ).run(newCount, lockedUntil, row.id);
+    ).run(newCount, lockedUntil, lastFailedAt, row.id);
     return { error: 'invalid username or password', status: 401 };
   }
 

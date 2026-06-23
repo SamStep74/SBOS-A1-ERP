@@ -479,7 +479,10 @@ function makeFullDb() {
       password_hash TEXT,
       password_salt TEXT,
       failed_logins INTEGER NOT NULL DEFAULT 0,
-      locked_until TEXT
+      locked_until TEXT,
+      -- W73: tracks last failed login for the lockout
+      -- purge worker. NULL means "never failed".
+      last_failed_at TEXT
     );
   `);
   sqliteDb
