@@ -782,6 +782,35 @@ export async function createApp({
     app.locals.lockoutPurge = purgeHandle;
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // W114-1: scheduled merge auto-apply worker.
+  //
+  // Auto-applies high-confidence merge candidates from
+  // W94-1's suggestMergeCandidates. HVVH matches (same
+  // TIN) auto-apply by default; name matches require a
+  // lower threshold via SBOS_AUTO_MERGE_THRESHOLD.
+  //
+  // Opt-in via SBOS_AUTO_MERGE_ENABLED=true. Default
+  // tick 24h, floored at 60s.
+  // ────────────────────────────────────────────────────────────────
+  if (process.env.SBOS_AUTO_MERGE_ENABLED === 'true') {
+    const { startAutoMergeWorker } = await import('./finance/autoMerge.js');
+    const mergeTickMs = process.env.SBOS_AUTO_MERGE_TICK_MS
+      ? Number(process.env.SBOS_AUTO_MERGE_TICK_MS)
+      : 24 * 60 * 60 * 1000;
+    const mergeThreshold = process.env.SBOS_AUTO_MERGE_THRESHOLD
+      ? Number(process.env.SBOS_AUTO_MERGE_THRESHOLD)
+      : 0.95;
+    // dataQuality functions speak pg SQL — use the
+    // pgAdapter, not the raw sqlite handle.
+    const mergeHandle = startAutoMergeWorker({
+      db: pgAdapter,
+      tickMs: mergeTickMs,
+      threshold: mergeThreshold,
+    });
+    app.locals.autoMerge = mergeHandle;
+  }
+
   // Generic 500.
   app.use((err, req, res, _next) => {
     console.error('[server] unhandled error:', err && err.stack ? err.stack : err);

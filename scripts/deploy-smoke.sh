@@ -4770,6 +4770,77 @@ else
 fi
 echo
 
+echo "=== STEP 5at: Auto-merge dry-run (Wave 114-1) ==="
+# Smoke coverage for the W114-1 manual auto-merge
+# trigger. The smoke has no duplicate customers so
+# the dryRun should return considered=0, applied=[],
+# skipped=[], errors=[], threshold=0.95, dryRun=true.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    const r = await sendJson("POST", "/api/finance/ai/auto-merge", { dryRun: true });
+    if (r.status !== 200) {
+      console.log("  FAIL auto-merge expected 200, got " + r.status);
+      process.exit(1);
+    }
+    if (r.body.ok !== true) {
+      console.log("  FAIL auto-merge ok not true: " + JSON.stringify(r.body));
+      process.exit(1);
+    }
+    if (typeof r.body.considered !== "number") {
+      console.log("  FAIL auto-merge considered not a number");
+      process.exit(1);
+    }
+    if (!Array.isArray(r.body.applied)) {
+      console.log("  FAIL auto-merge applied not an array");
+      process.exit(1);
+    }
+    if (r.body.dryRun !== true) {
+      console.log("  FAIL auto-merge dryRun not true");
+      process.exit(1);
+    }
+    if (r.body.threshold !== 0.95) {
+      console.log("  FAIL auto-merge threshold not 0.95");
+      process.exit(1);
+    }
+    console.log("  considered=" + r.body.considered + " applied=" + r.body.applied.length);
+    console.log("  OK W114-1 auto-merge dry-run");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W114-1 auto-merge dry-run OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

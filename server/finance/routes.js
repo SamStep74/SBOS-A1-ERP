@@ -4070,6 +4070,51 @@ export function registerFinanceRoutes(app, opts = {}) {
   //   List merge log rows for the tenant. Ordered by created_at
   //   DESC (most recent first). Optional filter by primary_id or
   //   secondary_id. Default limit 50, max 500.
+
+  // POST /api/finance/ai/auto-merge — W114-1
+  //   Manual trigger for the auto-apply pass. Pairs with
+  //   the SBOS_AUTO_MERGE_ENABLED opt-in worker: when
+  //   the worker is OFF, the operator can run a one-off
+  //   pass via this route. When the worker is ON, this
+  //   is the "I just cleaned the data, apply the new
+  //   candidates now" affordance.
+  //
+  //   Body (all optional):
+  //     threshold: 0..1 (default 0.95)
+  //     dryRun: boolean (default false)
+  //
+  //   Returns the same shape as the worker's lastResult.
+  app.post(
+    '/api/finance/ai/auto-merge',
+    requireTenant,
+    requirePerm('finance.customer.merge'),
+    async (req, res, next) => {
+      try {
+        const { runAutoMerge } = await import('./autoMerge.js');
+        // dataQuality functions speak pg SQL — use the
+        // pgAdapter (the same pattern as the apply-merge
+        // and merge-log routes above).
+        const pgAdapter = req.app && req.app.locals && req.app.locals.pgAdapter;
+        if (!pgAdapter) {
+          return res
+            .status(500)
+            .json({ error: 'internal_error', message: 'pgAdapter unavailable' });
+        }
+        const body = req.body || {};
+        const opts = { tenantId: req.tenantId };
+        if (typeof body.threshold === 'number') {
+          opts.threshold = body.threshold;
+        }
+        if (body.dryRun === true) {
+          opts.dryRun = true;
+        }
+        const result = await runAutoMerge(pgAdapter, opts);
+        res.status(200).json({ ok: true, ...result });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
   app.get('/api/finance/ai/merge-log', requireTenant, requirePerm('finance.customer.merge'), async (req, res, next) => {
     try {
       const tenantId = req.tenantId;
