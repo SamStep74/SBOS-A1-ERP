@@ -1,0 +1,33 @@
+# SBOS pg-backend docker-compose.
+#
+# Local development setup for the W113-2 pg port. To use:
+#   docker compose -f docker-compose.pg.yml up -d
+#   SBOS_DB_BACKEND=postgres SBOS_PG_URL=postgres://sbos:sbos@localhost:5432/sbos \\
+#     node bin/sbos-server.mjs
+#
+# The pg backend uses the same schema prefix (finance.) as
+# the sqlite backend — the migration runner keeps the
+# prefix on pg and strips it on sqlite.
+
+services:
+  pg:
+    image: postgres:16-alpine
+    container_name: sbos-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sbos
+      POSTGRES_PASSWORD: sbos
+      POSTGRES_DB: sbos
+    ports:
+      - "5432:5432"
+    volumes:
+      - sbos-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sbos -d sbos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  sbos-pg-data:
+    driver: local

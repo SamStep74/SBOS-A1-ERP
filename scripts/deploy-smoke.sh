@@ -4841,6 +4841,52 @@ else
 fi
 echo
 
+echo "=== STEP 5au: pg-port adapter scaffold (Wave 113-2 slice 1) ==="
+# Smoke coverage for the W113-2 pg-port adapter. We
+# verify the module loads + the factory returns the
+# expected shape when given a fake client. We do NOT
+# require a live pg server (operators opt in via
+# docker compose + npm install pg).
+cd "$REPO_ROOT" && node -e '
+  import("./server/db/pgAdapter.js").then(async ({ createPgAdapter, detectBackendFromEnv }) => {
+    if (detectBackendFromEnv({}) !== "sqlite") {
+      console.log("  FAIL default backend not sqlite");
+      process.exit(1);
+    }
+    if (detectBackendFromEnv({ SBOS_DB_BACKEND: "postgres" }) !== "postgres") {
+      console.log("  FAIL postgres backend not detected");
+      process.exit(1);
+    }
+    const fakeClient = {
+      async connect() {},
+      async query() { return { rows: [] }; },
+      async end() {},
+    };
+    const adapter = await createPgAdapter({ client: fakeClient });
+    if (adapter.backend !== "postgres") {
+      console.log("  FAIL adapter backend not postgres: " + adapter.backend);
+      process.exit(1);
+    }
+    if (typeof adapter.query !== "function") {
+      console.log("  FAIL adapter.query not a function");
+      process.exit(1);
+    }
+    if (typeof adapter.close !== "function") {
+      console.log("  FAIL adapter.close not a function");
+      process.exit(1);
+    }
+    await adapter.close();
+    console.log("  OK W113-2 pg adapter scaffold");
+    process.exit(0);
+  }).catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W113-2 pg adapter scaffold OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
