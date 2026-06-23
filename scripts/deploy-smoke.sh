@@ -4144,6 +4144,164 @@ else
 fi
 echo
 
+echo "=== STEP 5al: Per-tenant rate limit wired into the login limiter (Wave 71) ==="
+# Smoke coverage for the W71 wire-up: the per-tenant
+# config (W70) actually constrains the login rate
+# limiter. We:
+#   1. Set tenant 0 per-username=1
+#   2. First failed login → 401 (allowed, wrong password)
+#   3. Second failed login → 429 (rate limited)
+#   4. X-RateLimit-Limit header reflects the per-tenant value
+#   5. PUT to relax back to 5 → next attempt is 401 (cache invalidated)
+#   6. Reset to defaults
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed, headers: res.headers });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  function login(username) {
+    return new Promise((resolve) => {
+      const data = JSON.stringify({ username, password: "wrong-on-purpose" });
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: "/api/auth/login", method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed, headers: res.headers });
+        });
+      });
+      r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // Use a unique username so prior failed-login counts
+    // from W57/W59/W70 steps do not pollute the assertion.
+    const username = "smoke-w71-" + Date.now();
+
+    // 1) Tight override: per-username=1
+    const r1 = await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: 100,
+      login_max_per_username: 1,
+    });
+    if (r1.status !== 200) {
+      console.log("  FAIL PUT status " + r1.status + " body " + JSON.stringify(r1.body));
+      process.exit(1);
+    }
+
+    // 2) First failed login — wrong password → 401 (allowed)
+    const l1 = await login(username);
+    if (l1.status !== 401) {
+      console.log("  FAIL first login expected 401, got " + l1.status);
+      process.exit(1);
+    }
+
+    // 3) Second failed login — same username → 429
+    const l2 = await login(username);
+    if (l2.status !== 429) {
+      console.log("  FAIL second login expected 429 (per-username=1), got " + l2.status + " body " + JSON.stringify(l2.body));
+      process.exit(1);
+    }
+    if (l2.body.error !== "rate_limited") {
+      console.log("  FAIL second login error=" + l2.body.error);
+      process.exit(1);
+    }
+
+    // 4) Header reflects the per-tenant override
+    if (l2.headers["x-ratelimit-limit"] !== "1") {
+      console.log("  FAIL X-RateLimit-Limit expected 1, got " + l2.headers["x-ratelimit-limit"]);
+      process.exit(1);
+    }
+    if (l2.headers["x-ratelimit-scope"] !== "user") {
+      console.log("  FAIL X-RateLimit-Scope expected user, got " + l2.headers["x-ratelimit-scope"]);
+      process.exit(1);
+    }
+
+    // 5) Relax to per-username=5 (cache should be invalidated
+    // so the next 4 attempts are allowed, the 5th is denied).
+    const r2 = await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: 100,
+      login_max_per_username: 5,
+    });
+    if (r2.status !== 200) {
+      console.log("  FAIL second PUT status " + r2.status);
+      process.exit(1);
+    }
+    // After the PUT, the per-username limit is 5. The PUT
+    // invalidated the cache, so a fresh limiter pair is
+    // created with max=5. The next 5 attempts should all be
+    // 401 (allowed, wrong password), the 6th should hit 429.
+    for (let i = 0; i < 5; i++) {
+      const lr = await login(username);
+      if (lr.status !== 401) {
+        console.log("  FAIL relaxed attempt " + (i+1) + " expected 401, got " + lr.status);
+        process.exit(1);
+      }
+    }
+    // The 6th attempt under the relaxed limit is denied.
+    const l6 = await login(username);
+    if (l6.status !== 429) {
+      console.log("  FAIL relaxed 6th attempt expected 429 (per-username=5), got " + l6.status);
+      process.exit(1);
+    }
+    if (l6.headers["x-ratelimit-limit"] !== "5") {
+      console.log("  FAIL relaxed 429 X-RateLimit-Limit expected 5, got " + l6.headers["x-ratelimit-limit"]);
+      process.exit(1);
+    }
+
+    // 6) Reset to defaults so the smoke leaves the env clean.
+    const r3 = await sendJson("PUT", "/api/rbac/tenants/0/rate-limit", {
+      login_max_per_ip: null,
+      login_max_per_username: null,
+    });
+    if (r3.status !== 200) {
+      console.log("  FAIL reset PUT status " + r3.status);
+      process.exit(1);
+    }
+
+    console.log("  OK per-tenant rate limit wired into the login limiter");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  per-tenant login rate limit OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

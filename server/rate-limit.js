@@ -1,4 +1,4 @@
-// SBOS-A1-ERP rate limiter (Wave 57).
+// SBOS-A1-ERP rate limiter (Wave 57 + Wave 71).
 //
 // In-memory sliding-window rate limiter. Used to protect
 // public-facing endpoints from credential stuffing + brute
@@ -20,6 +20,12 @@
 //   if (!r.allowed) {
 //     return res.status(429).set('Retry-After', r.retryAfter).json(...);
 //   }
+
+import {
+  TenantRateLimitCache,
+  makeLoginLimiterPair,
+} from './rate-limit-tenant.js';
+import { getEffectiveLoginLimits } from './finance/tenantRateLimit.js';
 
 const DEFAULT_OPTS = {
   windowMs: 60_000, // 1 minute
@@ -184,37 +190,130 @@ export class SlidingWindowLimiter {
 // independent: a fixed IP can't make unlimited attempts
 // across many usernames, AND a fixed username can't be
 // hammered from many IPs.
-const loginLimiter = new SlidingWindowLimiter({
-  windowMs: 5 * 60_000, // 5 minutes
-  max: 20, // 20 per 5 min per IP
-});
-const loginUsernameLimiter = new SlidingWindowLimiter({
-  windowMs: 5 * 60_000,
-  max: 10, // 10 per 5 min per username
-});
+//
+// Wave 71: per-tenant overrides. The login rate-limit config
+// (W70) lets a tenant override the global 20/5min per-IP and
+// 10/5min per-username defaults. The TenantRateLimitCache
+// holds one SlidingWindowLimiter pair per tenant, with a
+// short TTL so DB-side mutations (W52 restore, raw SQL)
+// take effect within a minute. The PUT route invalidates
+// the cache immediately so operator changes apply on the
+// next login attempt.
+const LOGIN_WINDOW_MS = 5 * 60_000; // 5 minutes
 
-loginLimiter.startCleanup();
-loginUsernameLimiter.startCleanup();
+// Module-level cache. Shared between all login attempts.
+// `db` is passed per-request so a post-W52 restore is
+// visible (the limiter pair itself is process-local, but
+// the limits it was constructed with are re-read from the
+// live db).
+let loginRateLimitCache = null;
 
-export function checkLoginRateLimit({ ip, username }) {
+function ensureCache() {
+  if (!loginRateLimitCache) {
+    loginRateLimitCache = new TenantRateLimitCache({
+      getEffectiveLoginLimits,
+      limiterFactory: (limits) => {
+        const pair = makeLoginLimiterPair({
+          maxPerIp: limits.maxPerIp,
+          maxPerUsername: limits.maxPerUsername,
+          factory: ({ max }) => new SlidingWindowLimiter({
+            windowMs: LOGIN_WINDOW_MS,
+            max,
+            cleanupIntervalMs: 60_000,
+          }),
+        });
+        pair.ip.startCleanup();
+        pair.username.startCleanup();
+        return pair;
+      },
+    });
+  }
+  return loginRateLimitCache;
+}
+
+/**
+ * Resolve the tenantId for a username. Default to 0 (the
+ * global tenant) when the user is unknown. This lookup is
+ * one indexed query per login attempt; it's safe to do
+ * before the credential check because we don't reveal
+ * anything about the password.
+ */
+function resolveTenantForUsername(db, username) {
+  if (!username || !db || typeof db.prepare !== 'function') return 0;
+  try {
+    const row = db
+      .prepare('SELECT tenant_id FROM users WHERE username = ?')
+      .get(username);
+    if (row && Number.isInteger(row.tenant_id)) {
+      return row.tenant_id;
+    }
+  } catch (_err) {
+    // If the users table doesn't exist (tests with a
+    // bare db) or some other transient issue, fall back
+    // to the default tenant. We don't want a schema
+    // drift to 500 the login route.
+    return 0;
+  }
+  return 0;
+}
+
+export function checkLoginRateLimit({ ip, username, db }) {
+  const tenantId = resolveTenantForUsername(db, username);
+  const cache = ensureCache();
+  const { ip: ipLimiter, username: usernameLimiter, limits } = cache.getLimiters(
+    tenantId,
+    db,
+  );
   // Check per-IP first (typically stricter because one IP
   // is a single device/network).
-  const ipCheck = loginLimiter.consume(`ip:${ip || 'unknown'}`);
+  const ipKey = `ip:${ip || 'unknown'}`;
+  const ipCheck = ipLimiter.consume(ipKey);
   if (!ipCheck.allowed) {
-    return { ...ipCheck, scope: 'ip' };
+    return { ...ipCheck, scope: 'ip', max: limits.maxPerIp };
   }
   // Then per-username (protects specific accounts from
   // distributed brute force).
   if (username) {
-    const userCheck = loginUsernameLimiter.consume(`user:${username}`);
+    const userKey = `user:${username}`;
+    const userCheck = usernameLimiter.consume(userKey);
     if (!userCheck.allowed) {
-      return { ...userCheck, scope: 'user' };
+      return { ...userCheck, scope: 'user', max: limits.maxPerUsername };
     }
   }
-  return { allowed: true, remaining: ipCheck.remaining, retryAfter: 0, total: ipCheck.total, scope: 'ip' };
+  return {
+    allowed: true,
+    remaining: ipCheck.remaining,
+    retryAfter: 0,
+    total: ipCheck.total,
+    scope: 'ip',
+    max: limits.maxPerIp,
+  };
 }
 
 export function resetLoginRateLimit() {
-  loginLimiter.resetAll();
-  loginUsernameLimiter.resetAll();
+  if (loginRateLimitCache) {
+    loginRateLimitCache.invalidateAll();
+  }
+}
+
+/**
+ * Invalidate the cached limiters for one tenant. Called by
+ * the PUT /api/rbac/tenants/:tenantId/rate-limit route so
+ * operator changes take effect on the next login attempt.
+ */
+export function invalidateTenantLoginLimiters(tenantId) {
+  if (loginRateLimitCache) {
+    loginRateLimitCache.invalidate(tenantId);
+  }
+}
+
+/**
+ * Drop every cached tenant limiter pair. Called by swapDb
+ * (Wave 52) on a backup-restore so the new values are
+ * picked up on the next read regardless of TTL.
+ */
+export function invalidateAllLoginLimiters() {
+  if (loginRateLimitCache) {
+    loginRateLimitCache.invalidateAll();
+  }
 }

@@ -96,6 +96,7 @@ import {
   NotFoundError as ProfileNotFoundError,
   ConflictError as ProfileConflictError,
 } from './profiles.js';
+import { invalidateTenantLoginLimiters } from '../rate-limit.js';
 import {
   requestApproval,
   listPendingApprovals,
@@ -824,6 +825,10 @@ function registerRbacRoutes(app, opts = {}) {
           body.login_max_per_username,
           updatedBy,
         );
+        // W71: drop the cached per-tenant limiters so the next
+        // login attempt picks up the new limits. Idempotent and
+        // cheap; the limiter pair is recreated lazily.
+        invalidateTenantLoginLimiters(tenantId);
         return cfg;
       } catch (err) {
         if (err instanceof RangeError) {

@@ -29,6 +29,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { resetLoginRateLimit } from './rate-limit.js';
 
 // Force the stub auth mode for the duration of this test file.
 process.env.SBOS_AUTH_MODE = 'stub';
@@ -2347,6 +2348,113 @@ describe('bootable HTTP server (server/index.js + server/server.js)', () => {
     });
     assert.equal(r.status, 400);
     assert.equal(r.body.error, 'invalid_request');
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Wave 71: per-tenant rate-limit config wired into the login
+  // rate limiter. The PUT route must invalidate the limiter cache
+  // so the next login attempt uses the new limits.
+  // ──────────────────────────────────────────────────────────────────────
+  test('71a. PUT rate-limit invalidates the per-tenant cache (next login uses the new limit)', async () => {
+    const port = server.address().port;
+    const post = async (body) => {
+      const r = await globalThis.fetch(
+        `http://127.0.0.1:${port}/api/auth/login`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      return r;
+    };
+    // Seed a tenant_id on the admin user so the login
+    // resolves a known tenant. The test schema doesn't
+    // have a `tenants` table — tenant_id is just an integer
+    // on `users` — so we just update the column.
+    const tenantId = 71;
+    full.db.prepare(
+      `UPDATE users SET tenant_id = ? WHERE username = 'admin'`
+    ).run(tenantId);
+    // Clear any per-tenant override from prior tests.
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = ?`).run(tenantId);
+    // Reset the rate-limit cache so the new limits are visible.
+    resetLoginRateLimit();
+    // Set a tight override: 2 attempts per 5 min per IP, 1 per username.
+    const putRes = await putJson(
+      server,
+      `/api/rbac/tenants/${tenantId}/rate-limit`,
+      { login_max_per_ip: 2, login_max_per_username: 1 }
+    );
+    assert.equal(putRes.status, 200);
+    // Attempt 1 (this IP, the admin user). Allowed — wrong password
+    // gives 401, NOT 429.
+    const r1 = await post({ username: 'admin', password: 'wrong' });
+    assert.equal(r1.status, 401, `attempt 1 should be 401, got ${r1.status}`);
+    // Attempt 2. The per-username limit (1) has been hit.
+    const r2 = await post({ username: 'admin', password: 'wrong' });
+    assert.equal(r2.status, 429, `attempt 2 should be 429 (per-username=1 hit), got ${r2.status}`);
+    // The X-RateLimit-Limit header reflects the per-tenant override (1).
+    assert.equal(r2.headers.get('x-ratelimit-limit'), '1');
+    // Cleanup: reset the admin user back to tenant 0 and the
+    // rate-limit row to defaults, so subsequent tests aren't
+    // affected.
+    full.db.prepare(
+      `UPDATE users SET tenant_id = 0 WHERE username = 'admin'`
+    ).run();
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = ?`).run(tenantId);
+    resetLoginRateLimit();
+  });
+
+  test('71b. PUT rate-limit drops the cache so changing the limit takes effect on the next login', async () => {
+    const port = server.address().port;
+    const post = async (body) => {
+      const r = await globalThis.fetch(
+        `http://127.0.0.1:${port}/api/auth/login`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      return r;
+    };
+    const tenantId = 71;
+    // Ensure clean state.
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = ?`).run(tenantId);
+    full.db.prepare(
+      `UPDATE users SET tenant_id = ? WHERE username = 'admin'`
+    ).run(tenantId);
+    resetLoginRateLimit();
+    // First PUT: strict per-username=1.
+    let putRes = await putJson(
+      server,
+      `/api/rbac/tenants/${tenantId}/rate-limit`,
+      { login_max_per_ip: 100, login_max_per_username: 1 }
+    );
+    assert.equal(putRes.status, 200);
+    // Prime the cache: attempt 1 (401), attempt 2 (429).
+    let r1 = await post({ username: 'admin', password: 'wrong' });
+    assert.equal(r1.status, 401, `expected 401, got ${r1.status}`);
+    let r2 = await post({ username: 'admin', password: 'wrong' });
+    assert.equal(r2.status, 429, `expected 429 (per-username=1), got ${r2.status}`);
+    // Second PUT: relax per-username to 5. The cache must be
+    // invalidated so the next login attempt uses 5, not 1.
+    putRes = await putJson(
+      server,
+      `/api/rbac/tenants/${tenantId}/rate-limit`,
+      { login_max_per_ip: 100, login_max_per_username: 5 }
+    );
+    assert.equal(putRes.status, 200);
+    // The 429 should clear; the next attempt should be 401.
+    const r3 = await post({ username: 'admin', password: 'wrong' });
+    assert.equal(r3.status, 401, `expected 401 after PUT (cache invalidated), got ${r3.status}`);
+    // Cleanup.
+    full.db.prepare(
+      `UPDATE users SET tenant_id = 0 WHERE username = 'admin'`
+    ).run();
+    full.db.prepare(`DELETE FROM tenant_rate_limit WHERE tenant_id = ?`).run(tenantId);
+    resetLoginRateLimit();
   });
 
   test('6. GET /api/nonexistent returns 404', async () => {

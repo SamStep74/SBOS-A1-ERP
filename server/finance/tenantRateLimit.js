@@ -106,7 +106,9 @@ export function setTenantRateLimit(db, tenantId, maxPerIp, maxPerUsername, updat
 // getEffectiveLoginLimits — resolve the per-tenant
 // config to the numbers the live rate limit would use.
 // Falls back to the global defaults for any NULL field.
-// Returns: { max_per_ip, max_per_username }.
+// Returns: { max_per_ip, max_per_username } (snake_case
+// to match the W70 HTTP API shape — the rate-limit
+// cache translates to camelCase on the W71 side).
 export function getEffectiveLoginLimits(db, tenantId) {
   const cfg = getTenantRateLimit(db, tenantId);
   return {

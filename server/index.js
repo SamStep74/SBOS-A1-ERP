@@ -37,7 +37,7 @@ import { renderDashboard } from './finance/dashboard.js';
 import { makeAuthMiddleware } from './auth.js';
 import { login as authLogin } from './auth-login.js';
 import { recordSessionEvent } from './auth-sessions.js';
-import { checkLoginRateLimit } from './rate-limit.js';
+import { checkLoginRateLimit, invalidateAllLoginLimiters } from './rate-limit.js';
 
 // Version reported by /api/health. Pulled from package.json lazily so
 // the value tracks the actual installed version without a hardcode.
@@ -386,6 +386,11 @@ export async function createApp({
     }
     dbRef.current = newDb;
     app.locals.db = newDb;
+    // W71: drop the per-tenant rate-limit cache so the next
+    // login attempt reads from the new handle. The TTL would
+    // catch this within 60s; clearing immediately is correct
+    // and cheap.
+    invalidateAllLoginLimiters();
   }
 
   // Body parser — 1mb cap matches the spec.
@@ -457,12 +462,16 @@ export async function createApp({
     const rateCheck = checkLoginRateLimit({
       ip: req.ip,
       username: typeof username === 'string' ? username.trim() : null,
+      db: req.app && req.app.locals && req.app.locals.db,
     });
+    // W71: surface the per-tenant limit on EVERY response so
+    // the client can see its budget. The 429 path overrides
+    // X-RateLimit-Remaining to 0 and adds Retry-After.
+    res.set('X-RateLimit-Limit', String(rateCheck.max || 20));
     if (!rateCheck.allowed) {
       return res
         .status(429)
         .set('Retry-After', String(rateCheck.retryAfter))
-        .set('X-RateLimit-Limit', '20')
         .set('X-RateLimit-Remaining', '0')
         .set(
           'X-RateLimit-Scope',
