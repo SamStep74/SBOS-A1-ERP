@@ -4115,6 +4115,39 @@ export function registerFinanceRoutes(app, opts = {}) {
       }
     },
   );
+
+  // GET /api/finance/ai/auto-merge/status — W115
+  //   Returns the auto-merge worker's most recent result
+  //   (if any) so the operator dashboard can show
+  //   "last ran X minutes ago, applied Y, skipped Z".
+  //   When the worker is off (no handle on app.locals),
+  //   returns 200 with { ok: true, enabled: false }.
+  app.get(
+    '/api/finance/ai/auto-merge/status',
+    requireTenant,
+    requirePerm('finance.customer.merge'),
+    async (req, res, next) => {
+      try {
+        const handle =
+          req.app && req.app.locals && req.app.locals.autoMerge;
+        if (!handle || typeof handle.lastResult !== 'function') {
+          return res.status(200).json({
+            ok: true,
+            enabled: false,
+            lastResult: null,
+          });
+        }
+        const lastResult = handle.lastResult();
+        return res.status(200).json({
+          ok: true,
+          enabled: true,
+          lastResult,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
   app.get('/api/finance/ai/merge-log', requireTenant, requirePerm('finance.customer.merge'), async (req, res, next) => {
     try {
       const tenantId = req.tenantId;

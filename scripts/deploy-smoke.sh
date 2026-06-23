@@ -4878,10 +4878,67 @@ cd "$REPO_ROOT" && node -e '
     await adapter.close();
     console.log("  OK W113-2 pg adapter scaffold");
     process.exit(0);
-  }).catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
 '
 if [ $? -eq 0 ]; then
   echo "  W113-2 pg adapter scaffold OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
+echo "=== STEP 5av: Auto-merge status route (Wave 115) ==="
+# Smoke coverage for the W115 GET
+# /api/finance/ai/auto-merge/status route. The smoke
+# doesn't enable the worker, so we expect
+# enabled=false, lastResult=null.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function get(p) {
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method: "GET",
+        headers: { "authorization": "Bearer " + process.env.ADMIN_TOKEN },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.end();
+    });
+  }
+
+  (async () => {
+    const r = await get("/api/finance/ai/auto-merge/status");
+    if (r.status !== 200) {
+      console.log("  FAIL status expected 200, got " + r.status);
+      process.exit(1);
+    }
+    if (r.body.ok !== true) {
+      console.log("  FAIL status ok not true: " + JSON.stringify(r.body));
+      process.exit(1);
+    }
+    if (r.body.enabled !== false) {
+      console.log("  FAIL expected enabled=false (worker is off in smoke)");
+      process.exit(1);
+    }
+    if (r.body.lastResult !== null) {
+      console.log("  FAIL expected lastResult=null, got " + JSON.stringify(r.body.lastResult));
+      process.exit(1);
+    }
+    console.log("  enabled=" + r.body.enabled + " lastResult=" + r.body.lastResult);
+    console.log("  OK W115 auto-merge status");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W115 auto-merge status OK"
 else
   SMOKE_RC=1
 fi
