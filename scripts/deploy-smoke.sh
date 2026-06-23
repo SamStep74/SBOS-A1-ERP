@@ -5017,6 +5017,44 @@ else
 fi
 echo
 
+echo "=== STEP 5ax: pg-port boot connection check (Wave 118) ==="
+# Verify the boot path with SBOS_DB_BACKEND=postgres +
+# SBOS_PG_URL=<unreachable> fails fast with a clear
+# error message. We run sbos-server.mjs with those env
+# vars and check it exits non-zero with 'pg-port check
+# FAILED' on stdout/stderr. We use a background job +
+# kill so we don't need GNU timeout (macOS lacks it).
+PG_BOOT_LOG=/tmp/sbos-pg-boot-$$.log
+PG_BOOT_PIDFILE=/tmp/sbos-pg-boot-$$.pid
+SBOS_DB_BACKEND=postgres SBOS_PG_URL=postgres://nobody:nobody@127.0.0.1:1/none SBOS_DB=/tmp/sbos-pg-boot-$$.db node bin/sbos-server.mjs > "$PG_BOOT_LOG" 2>&1 &
+PG_BOOT_PID=$!
+echo $PG_BOOT_PID > "$PG_BOOT_PIDFILE"
+# Give the server up to 5s to fail fast (it should fail
+# within ~1-2s when the pg probe times out).
+for i in 1 2 3 4 5; do
+  if ! kill -0 $PG_BOOT_PID 2>/dev/null; then break; fi
+  sleep 1
+done
+# If still alive after 5s, the check didn't fail fast —
+# kill it (this is a fail).
+if kill -0 $PG_BOOT_PID 2>/dev/null; then
+  kill -9 $PG_BOOT_PID 2>/dev/null
+  echo "  FAIL pg boot did not fail fast (still alive after 5s)"
+  tail -5 "$PG_BOOT_LOG"
+  SMOKE_RC=1
+else
+  if grep -q "pg-port check FAILED" "$PG_BOOT_LOG"; then
+    echo "  bad pg URL correctly rejected"
+    echo "  OK W118 pg-port boot check"
+  else
+    echo "  FAIL process exited but no pg-port check FAILED message"
+    tail -10 "$PG_BOOT_LOG"
+    SMOKE_RC=1
+  fi
+fi
+rm -f "$PG_BOOT_LOG" "$PG_BOOT_PIDFILE" /tmp/sbos-pg-boot-$$.db
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

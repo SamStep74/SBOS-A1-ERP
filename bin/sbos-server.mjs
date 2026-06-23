@@ -270,6 +270,35 @@ async function main() {
     );
   }
   console.warn(`[sbos-server] listening on http://${host}:${port}`);
+
+  // W118 pg-port boot connection check. When
+  // SBOS_DB_BACKEND=postgres + SBOS_PG_URL are set, validate
+  // the pg connection BEFORE starting the HTTP server. This
+  // catches a bad pg URL at boot time (operators get a clear
+  // error instead of a silent fallback to sqlite). The
+  // connection is opened + closed here; the app itself still
+  // uses sqlite for everything in this slice (full pg port
+  // is a future wave). The check proves the pg wiring works.
+  if (
+    process.env.SBOS_DB_BACKEND === 'postgres' &&
+    process.env.SBOS_PG_URL
+  ) {
+    const { pgBootCheck } = await import('../server/db/pgBootCheck.js');
+    const result = await pgBootCheck(process.env.SBOS_PG_URL);
+    if (!result.ok) {
+      console.error(
+        `[sbos-server] pg-port check FAILED: ${result.error}`,
+      );
+      // Fail fast: a configured pg backend that can't connect
+      // is an operator error, not a transient issue. Refuse
+      // to boot on sqlite silently.
+      process.exit(1);
+    }
+    console.warn(
+      `[sbos-server] pg-port check: connection OK, probe returned ${result.probe}`,
+    );
+  }
+
   // Pass only `db`. createApp will construct the pgAdapter from
   // the same dbRef that swapDb updates — that way the pgAdapter
   // follows the live handle after a restore (Wave 52 live swap).
