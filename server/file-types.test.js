@@ -379,3 +379,106 @@ test('detectMimeType: listKnownTypes includes the new W62 types', () => {
     assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Wave 72: additional archive + video formats
+//   - Matroska / WebM (shared EBML magic; we label both as Matroska
+//     since the DocType element requires full EBML parsing to
+//     distinguish — out of scope for a magic-byte check)
+//   - RAR 4.x + 5.x (both start with "Rar!\x1a\x07")
+//   - 7z ("7z\xbc\xaf\x27\x1c")
+// ──────────────────────────────────────────────────────────────────────
+
+const MKV = Buffer.from([
+  0x1a, 0x45, 0xdf, 0xa3, // EBML magic
+  0x93, // length of EBML header
+  0x42, 0x86, 0x81, 0x01, // EBMLVersion = 1
+  0x42, 0xf7, 0x81, 0x01, // EBMLReadVersion = 1
+  0x42, 0xf2, 0x81, 0x04, // EBMLMaxIDLength = 4
+  0x42, 0xf3, 0x81, 0x08, // EBMLMaxSizeLength = 8
+  0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d, // DocType = "webm"
+  0x42, 0x87, 0x81, 0x04, // DocTypeVersion = 4
+  0x42, 0x85, 0x81, 0x02, // DocTypeReadVersion = 2
+]);
+const MKV_MATROSKA = Buffer.from([
+  0x1a, 0x45, 0xdf, 0xa3, // EBML magic
+  0xa3, // length of EBML header
+  0x42, 0x86, 0x81, 0x01, // EBMLVersion
+  0x42, 0xf7, 0x81, 0x01, // EBMLReadVersion
+  0x42, 0xf2, 0x81, 0x04, // EBMLMaxIDLength
+  0x42, 0xf3, 0x81, 0x08, // EBMLMaxSizeLength
+  0x42, 0x82, 0x88, 0x6d, 0x61, 0x74, 0x72, 0x6f, 0x73, 0x6b, 0x61, // DocType = "matroska"
+  0x42, 0x87, 0x81, 0x02, // DocTypeVersion
+  0x42, 0x85, 0x81, 0x02, // DocTypeReadVersion
+]);
+const RAR4 = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0x00]);
+const RAR5 = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]);
+const SEVENZ = Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04]);
+
+test('detectMimeType: MKV (Matroska with EBML magic)', () => {
+  assert.equal(detectMimeType(MKV), 'video/x-matroska');
+});
+
+test('detectMimeType: MKV (WebM with EBML magic — same detection)', () => {
+  // WebM and Matroska share the EBML magic 1A 45 DF A3.
+  // Distinguishing them requires parsing the DocType
+  // element, which is out of scope for a magic-byte check.
+  // Both are labelled as Matroska; the operator can
+  // distinguish via file extension or further inspection.
+  assert.equal(detectMimeType(MKV_MATROSKA), 'video/x-matroska');
+});
+
+test('detectMimeType: EBML magic only (4 bytes) is enough to detect', () => {
+  // The first 4 bytes are the EBML signature. A real
+  // MKV/WebM file is much larger, but the magic check
+  // works on the first 4 bytes.
+  const header = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+  assert.equal(detectMimeType(header), 'video/x-matroska');
+});
+
+test('detectMimeType: EBML magic on a 3-byte buffer does NOT match', () => {
+  // The check requires at least 4 bytes.
+  const tooShort = Buffer.from([0x1a, 0x45, 0xdf]);
+  assert.equal(detectMimeType(tooShort), null);
+});
+
+test('detectMimeType: RAR 4.x', () => {
+  assert.equal(detectMimeType(RAR4), 'application/vnd.rar');
+});
+
+test('detectMimeType: RAR 5.x', () => {
+  assert.equal(detectMimeType(RAR5), 'application/vnd.rar');
+});
+
+test('detectMimeType: 7z (7z\xBC\xAF\x27\x1C)', () => {
+  assert.equal(detectMimeType(SEVENZ), 'application/x-7z-compressed');
+});
+
+test('verifyMimeType: RAR claimed as ZIP is REJECTED', () => {
+  const r = verifyMimeType(RAR4, 'application/zip');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'application/vnd.rar');
+});
+
+test('verifyMimeType: 7z claimed as octet-stream is accepted', () => {
+  // Generic types are accepted (no claim to verify).
+  const r = verifyMimeType(SEVENZ, 'application/octet-stream');
+  assert.equal(r.matches, true);
+});
+
+test('verifyMimeType: Matroska claimed as MP4 is REJECTED', () => {
+  const r = verifyMimeType(MKV, 'video/mp4');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'video/x-matroska');
+});
+
+test('listKnownTypes: includes the W72 types', () => {
+  const known = listKnownTypes().map((t) => t.mime);
+  for (const m of [
+    'video/x-matroska',
+    'application/vnd.rar',
+    'application/x-7z-compressed',
+  ]) {
+    assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
+  }
+});

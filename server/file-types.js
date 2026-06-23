@@ -1,4 +1,4 @@
-// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61 + Wave 62).
+// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61 + Wave 62 + Wave 72).
 //
 // Magic-byte detection for the common file types operators
 // attach to invoices. Pairs with Wave 56 attachment upload
@@ -10,7 +10,7 @@
 // system would accept it. This module closes the gap by
 // verifying the actual bytes match the claimed mime type.
 //
-// Coverage (W58 base + W61 extension + W62 OOXML/ODF):
+// Coverage (W58 base + W61 extension + W62 OOXML/ODF + W72):
 //   - application/pdf     %PDF-1.<digit>  (or %PDF-)
 //   - image/jpeg          FF D8 FF
 //   - image/png           89 50 4E 47 0D 0A 1A 0A
@@ -30,6 +30,16 @@
 //     * application/vnd.oasis.opendocument.text       at offset 0
 //     * application/vnd.oasis.opendocument.spreadsheet at offset 0
 //     * application/vnd.oasis.opendocument.presentation at offset 0
+//   - Matroska / WebM     EBML magic 1A 45 DF A3    [W72]
+//     * video/x-matroska (covers both MKV and WebM;
+//       distinguishing requires parsing the DocType
+//       element which is out of scope for a magic-byte
+//       check. Both are labelled as Matroska; the
+//       operator can distinguish via file extension.)
+//   - RAR 4.x + 5.x       Rar!\x1a\x07             [W72]
+//     * application/vnd.rar
+//   - 7z                  7z\xBC\xAF\x27\x1C        [W72]
+//     * application/x-7z-compressed
 //   - text/plain          first 512B is printable ASCII or valid UTF-8
 //   - application/zip     50 4B 03 04 (no OOXML/ODF markers found)
 //   - application/json    parses as JSON (if mime is application/json)
@@ -46,6 +56,70 @@
 // at the extension layer (.exe etc.) still applies.
 
 const SIGNATURES = [
+  {
+    // W72: 7z — 7-Zip archive. Magic: 7z\xBC\xAF\x27\x1C
+    // (6 bytes). The fourth byte onwards includes a
+    // version + start-header CRC; we don't parse them
+    // (out of scope for a magic-byte check). The
+    // canonical mime is application/x-7z-compressed.
+    mime: 'application/x-7z-compressed',
+    label: '7z',
+    check: (buf) => {
+      if (buf.length < 6) return false;
+      return (
+        buf[0] === 0x37 && // 7
+        buf[1] === 0x7a && // z
+        buf[2] === 0xbc &&
+        buf[3] === 0xaf &&
+        buf[4] === 0x27 &&
+        buf[5] === 0x1c
+      );
+    },
+  },
+  {
+    // W72: RAR — Roshal Archive. Both 4.x and 5.x share
+    // the 7-byte magic "Rar!\x1A\x07". The 8th byte
+    // differs (0x00 for 4.x, 0x01 for 5.x) but we don't
+    // distinguish — both are RAR, the operator can
+    // disambiguate by extension.
+    mime: 'application/vnd.rar',
+    label: 'RAR',
+    check: (buf) => {
+      if (buf.length < 7) return false;
+      return (
+        buf[0] === 0x52 && // R
+        buf[1] === 0x61 && // a
+        buf[2] === 0x72 && // r
+        buf[3] === 0x21 && // !
+        buf[4] === 0x1a &&
+        buf[5] === 0x07 &&
+        // byte 6 is 0x00 (RAR 4.x) or 0x01 (RAR 5.x);
+        // we don't care which.
+        (buf[6] === 0x00 || buf[6] === 0x01)
+      );
+    },
+  },
+  {
+    // W72: Matroska / WebM — EBML (Extensible Binary
+    // Meta-Language) container. Magic: 1A 45 DF A3 at
+    // offset 0. Both Matroska (.mkv) and WebM (.webm)
+    // share this magic; distinguishing them requires
+    // parsing the DocType element (out of scope for a
+    // 4-byte magic check). We label both as Matroska;
+    // the operator can disambiguate by extension or
+    // further inspection.
+    mime: 'video/x-matroska',
+    label: 'Matroska',
+    check: (buf) => {
+      if (buf.length < 4) return false;
+      return (
+        buf[0] === 0x1a &&
+        buf[1] === 0x45 &&
+        buf[2] === 0xdf &&
+        buf[3] === 0xa3
+      );
+    },
+  },
   {
     mime: 'application/pdf',
     label: 'PDF',

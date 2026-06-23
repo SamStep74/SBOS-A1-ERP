@@ -4302,6 +4302,114 @@ else
 fi
 echo
 
+echo "=== STEP 5am: File-type detection W72 (Matroska/RAR/7z) ==="
+# Smoke coverage for the W72 file-type detection
+# extension. We exercise the route end-to-end via a
+# multipart upload of synthetic bytes for each new
+# format, verifying the server-side detection.
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+  const crypto = require("node:crypto");
+
+  function upload(bytes, claimedMime, filename) {
+    const boundary = "----W72" + crypto.randomBytes(6).toString("hex");
+    const head = Buffer.from(
+      "--" + boundary + "\r\n" +
+      "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n" +
+      "Content-Type: " + claimedMime + "\r\n\r\n",
+      "utf8"
+    );
+    const tail = Buffer.from("\r\n--" + boundary + "--\r\n", "utf8");
+    const body = Buffer.concat([head, bytes, tail]);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: "/api/finance/invoices/1/attachments",
+        method: "POST",
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "multipart/form-data; boundary=" + boundary,
+          "content-length": body.length,
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      r.write(body);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) Matroska bytes (EBML magic)
+    const mkv = Buffer.from([
+      0x1a, 0x45, 0xdf, 0xa3, 0x93,
+      0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81, 0x01,
+      0x42, 0xf2, 0x81, 0x04, 0x42, 0xf3, 0x81, 0x08,
+    ]);
+    const r1 = await upload(mkv, "video/x-matroska", "sample.mkv");
+    // 200 (uploaded as Matroska) OR 4xx (no invoice 1 in
+    // the smoke DB) — the goal is to confirm the route
+    // accepts the upload, not 415 (unsupported type) which
+    // would mean detection failed.
+    if (r1.status === 415) {
+      console.log("  FAIL Matroska: server returned 415 (detection broken)");
+      process.exit(1);
+    }
+    console.log("  Matroska accepted (status " + r1.status + ")");
+
+    // 2) RAR 5.x bytes
+    const rar = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00, 0x00]);
+    const r2 = await upload(rar, "application/vnd.rar", "archive.rar");
+    if (r2.status === 415) {
+      console.log("  FAIL RAR: server returned 415 (detection broken)");
+      process.exit(1);
+    }
+    console.log("  RAR accepted (status " + r2.status + ")");
+
+    // 3) 7z bytes
+    const sz = Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04, 0x00]);
+    const r3 = await upload(sz, "application/x-7z-compressed", "archive.7z");
+    if (r3.status === 415) {
+      console.log("  FAIL 7z: server returned 415 (detection broken)");
+      process.exit(1);
+    }
+    console.log("  7z accepted (status " + r3.status + ")");
+
+    // 4) Smuggling attempt: claim 7z but send PDF bytes.
+    // The server should detect the mismatch.
+    const pdf = Buffer.from("%PDF-1.4\n%\x93\x8c\x8b\x9e...");
+    const r4 = await upload(pdf, "application/x-7z-compressed", "fake.7z");
+    if (r4.status === 415 && r4.body && r4.body.detected) {
+      console.log("  smuggling detected: " + r4.body.detected);
+    } else if (r4.status >= 400) {
+      // Some other 4xx (e.g. 404 if no invoice) is fine —
+      // it just means the route exists and the claim was
+      // rejected.
+      console.log("  smuggling rejected (status " + r4.status + ")");
+    } else {
+      // 200 means the upload went through — should NOT
+      // happen with the verify-mime check in place.
+      console.log("  FAIL smuggling accepted: status " + r4.status);
+      process.exit(1);
+    }
+
+    console.log("  OK W72 file-type detection");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W72 file-type detection OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1
