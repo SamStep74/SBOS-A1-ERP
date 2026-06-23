@@ -4604,6 +4604,87 @@ else
 fi
 echo
 
+echo "=== STEP 5aq: Rate-limit reset (Wave 78) ==="
+# Smoke coverage for the W78 admin rate-limit reset
+# route. We verify:
+#   1. Both ip and username set → 400
+#   2. Neither set, no confirm header → 400
+#   3. IP-only reset → 200 with scope=ip
+#   4. Username-only reset → 200 with scope=username
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body, extraHeaders) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: Object.assign({
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        }, extraHeaders || {}),
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) Both ip and username → 400
+    const r1 = await sendJson("POST", "/api/rbac/rate-limit/login/reset", {
+      ip: "1.2.3.4", username: "alice"
+    });
+    if (r1.status !== 400) {
+      console.log("  FAIL both-set expected 400, got " + r1.status);
+      process.exit(1);
+    }
+
+    // 2) Neither set, no confirm header → 400
+    const r2 = await sendJson("POST", "/api/rbac/rate-limit/login/reset", {});
+    if (r2.status !== 400) {
+      console.log("  FAIL neither-set expected 400, got " + r2.status);
+      process.exit(1);
+    }
+
+    // 3) IP-only → 200
+    const r3 = await sendJson("POST", "/api/rbac/rate-limit/login/reset", {
+      ip: "1.2.3.4"
+    });
+    if (r3.status !== 200 || r3.body.scope !== "ip") {
+      console.log("  FAIL IP-only expected 200 scope=ip, got " + r3.status + " body " + JSON.stringify(r3.body));
+      process.exit(1);
+    }
+
+    // 4) Username-only → 200
+    const r4 = await sendJson("POST", "/api/rbac/rate-limit/login/reset", {
+      username: "smoke-w78-user"
+    });
+    if (r4.status !== 200 || r4.body.scope !== "username") {
+      console.log("  FAIL username-only expected 200 scope=username, got " + r4.status + " body " + JSON.stringify(r4.body));
+      process.exit(1);
+    }
+
+    console.log("  OK W78 rate-limit reset");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W78 rate-limit reset OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

@@ -482,3 +482,76 @@ test('listKnownTypes: includes the W72 types', () => {
     assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Wave 76: 3D file format detection
+//   - STL (stereolithography): "solid" ASCII prefix or
+//     binary with 80-byte header + 4-byte triangle count
+//   - OBJ (Wavefront): "v " or "vn " or "vt " or "f " or
+//     "#" comment line, or "mtllib" reference
+//   - glTF (JSON-based): "{" then later "scene" + "meshes"
+//     (lighter check: glTF's JSON has gltfVersion key)
+//   - glb (binary glTF): "glTF" magic at offset 0
+// ──────────────────────────────────────────────────────────────────────
+
+const STL_ASCII = Buffer.from(
+  'solid cube\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n    endloop\n  endfacet\nendsolid cube\n',
+);
+const STL_BINARY_HEADER = Buffer.alloc(84);
+// 80-byte header (zeros) + 4-byte triangle count (little-endian 32-bit)
+STL_BINARY_HEADER.writeUInt32LE(1, 80);
+
+const OBJ = Buffer.from(
+  '# Wavefront OBJ\nmtllib cube.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n',
+);
+const GLTF_JSON = Buffer.from(
+  '{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[]}]}\n',
+);
+const GLB_HEADER = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x02, 0x00, 0x00, 0x00]);
+
+test('detectMimeType: STL (ASCII header "solid ")', () => {
+  assert.equal(detectMimeType(STL_ASCII), 'model/stl');
+});
+
+// Note: binary STL has no clean magic bytes — the 80-byte
+// header is arbitrary content. W76 only ships ASCII STL
+// detection. Binary STL falls through to the catch-all
+// (treated as text/plain in the absence of a recognizable
+// signature). Operators with binary STL uploads should
+// claim the mime explicitly.
+
+test('detectMimeType: OBJ (mtllib / v / f / # comment)', () => {
+  assert.equal(detectMimeType(OBJ), 'model/obj');
+});
+
+test('detectMimeType: glTF (JSON with scene key)', () => {
+  assert.equal(detectMimeType(GLTF_JSON), 'model/gltf+json');
+});
+
+test('detectMimeType: GLB (binary glTF "glTF" magic)', () => {
+  assert.equal(detectMimeType(GLB_HEADER), 'model/gltf-binary');
+});
+
+test('verifyMimeType: STL claimed as PDF is REJECTED', () => {
+  const r = verifyMimeType(STL_ASCII, 'application/pdf');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'model/stl');
+});
+
+test('verifyMimeType: glTF claimed as JSON is REJECTED', () => {
+  const r = verifyMimeType(GLTF_JSON, 'application/json');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'model/gltf+json');
+});
+
+test('listKnownTypes: includes the W76 types', () => {
+  const known = listKnownTypes().map((t) => t.mime);
+  for (const m of [
+    'model/stl',
+    'model/obj',
+    'model/gltf+json',
+    'model/gltf-binary',
+  ]) {
+    assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
+  }
+});

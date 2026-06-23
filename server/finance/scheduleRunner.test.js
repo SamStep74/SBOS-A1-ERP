@@ -650,12 +650,20 @@ test('runReportNow: validates tenantId is a non-negative integer', async () => {
 });
 
 test('runReportNow: returns the dispatch result on success', async () => {
+  // Compute the expected asOfDate dynamically so the
+  // test stays green across day boundaries. The stub
+  // falls back to now.toISOString().substring(0, 10)
+  // when the schedule has no explicit params (which is
+  // the case here). Pinning the literal '2026-06-22'
+  // broke on 2026-06-23 because the stub's `now` is
+  // generated inside the call, not at the test top.
+  const expectedAsOfDate = new Date().toISOString().substring(0, 10);
   const db = makeMockDb();
   const schedule = db.seedSchedule({ report_type: 'ar_aging' });
   const result = await runReportNow(db, null, schedule.id, 0, STUB_DISPATCH);
   assert.equal(result.status, 'completed');
   assert.ok(result.result);
-  assert.equal(result.result.asOfDate, '2026-06-22');
+  assert.equal(result.result.asOfDate, expectedAsOfDate);
   assert.equal(result.duration_ms >= 0, true);
 });
 

@@ -297,6 +297,50 @@ export function resetLoginRateLimit() {
 }
 
 /**
+ * W78: targeted reset — clear the per-IP limiter for one
+ * IP across all tenant limiters. The IP limiter is keyed
+ * `ip:<ip>` so we walk the cache and reset just that
+ * key on every tenant's limiter pair.
+ *
+ * This is the operator's panic button when a legitimate
+ * user got blocked by their IP (e.g. shared NAT, VPN).
+ * Returns the number of tenant limiters that were
+ * touched.
+ */
+export function resetLoginRateLimitByIp(ip) {
+  if (!ip || !loginRateLimitCache) return 0;
+  let touched = 0;
+  for (const [, entry] of loginRateLimitCache.entries()) {
+    if (entry && entry.ip && typeof entry.ip.reset === 'function') {
+      entry.ip.reset(`ip:${ip}`);
+      touched += 1;
+    }
+  }
+  return touched;
+}
+
+/**
+ * W78: targeted reset — clear the per-username limiter
+ * for one username across all tenants. Same pattern as
+ * the per-IP reset.
+ */
+export function resetLoginRateLimitByUsername(username) {
+  if (!username || !loginRateLimitCache) return 0;
+  let touched = 0;
+  for (const [, entry] of loginRateLimitCache.entries()) {
+    if (
+      entry &&
+      entry.username &&
+      typeof entry.username.reset === 'function'
+    ) {
+      entry.username.reset(`user:${username}`);
+      touched += 1;
+    }
+  }
+  return touched;
+}
+
+/**
  * Invalidate the cached limiters for one tenant. Called by
  * the PUT /api/rbac/tenants/:tenantId/rate-limit route so
  * operator changes take effect on the next login attempt.

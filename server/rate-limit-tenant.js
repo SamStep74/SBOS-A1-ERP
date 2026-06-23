@@ -118,6 +118,16 @@ export class TenantRateLimitCache {
   size() {
     return this._cache.size;
   }
+
+  /**
+   * Iterate over the cached entries. Yields
+   * [tenantId, {ip, username, limits, fetchedAt}].
+   * Used by the W78 targeted reset to walk every
+   * tenant's limiter pair and clear a single key.
+   */
+  entries() {
+    return this._cache.entries();
+  }
 }
 
 /**

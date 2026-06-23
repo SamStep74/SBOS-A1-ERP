@@ -841,6 +841,47 @@ function registerRbacRoutes(app, opts = {}) {
     },
   );
 
+  // POST /api/rbac/rate-limit/login/reset — W78
+  // operator panic button. Resets the W57 in-memory
+  // login rate-limit store either for one IP, one
+  // username, or entirely (with explicit header
+  // confirmation). Pairs with the W70 per-tenant
+  // rate-limit config; this is the "I got an IP blocked
+  // by mistake" / "I'm doing load testing" affordance.
+  app.post(
+    '/api/rbac/rate-limit/login/reset',
+    { preHandler: requirePermFastify('security.rate_limit.update') },
+    async (request, reply) => {
+      try {
+        const { buildResetLoginRateLimitHandler } = await import(
+          './loginRateLimitReset.js'
+        );
+        const handler = buildResetLoginRateLimitHandler();
+        // Translate the Fastify-shaped (request, reply)
+        // into Express (req, res) so the same handler
+        // works for both routes + tests.
+        const fakeRes = {
+          status(code) {
+            this.statusCode = code;
+            return this;
+          },
+          json(body) {
+            return reply.code(this.statusCode || 200).send(body);
+          },
+        };
+        // Pass the body + headers from the Fastify-shaped
+        // request through to the handler.
+        const fakeReq = {
+          body: request.body || {},
+          headers: request.headers || {},
+        };
+        return handler(fakeReq, fakeRes, () => {});
+      } catch (err) {
+        reply.code(500).send({ error: 'internal_error', message: err.message });
+      }
+    },
+  );
+
   // ───── Profiles (Phase 0.3) ─────
   //
   // Reusable role + permission-set bundles for new users. Catalog stays

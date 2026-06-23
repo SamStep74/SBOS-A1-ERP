@@ -1,4 +1,4 @@
-// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61 + Wave 62 + Wave 72).
+// SBOS-A1-ERP file-type detection (Wave 58 + Wave 61 + Wave 62 + Wave 72 + Wave 76).
 //
 // Magic-byte detection for the common file types operators
 // attach to invoices. Pairs with Wave 56 attachment upload
@@ -40,6 +40,15 @@
 //     * application/vnd.rar
 //   - 7z                  7z\xBC\xAF\x27\x1C        [W72]
 //     * application/x-7z-compressed
+//   - STL (3D mesh)        ASCII "solid " prefix OR    [W76]
+//                          80-byte binary header
+//     * model/stl
+//   - OBJ (3D mesh)        Wavefront ASCII prefix       [W76]
+//     * model/obj
+//   - glTF (JSON)          "{" + "scene" key            [W76]
+//     * model/gltf+json
+//   - GLB (binary glTF)    "glTF" magic                  [W76]
+//     * model/gltf-binary
 //   - text/plain          first 512B is printable ASCII or valid UTF-8
 //   - application/zip     50 4B 03 04 (no OOXML/ODF markers found)
 //   - application/json    parses as JSON (if mime is application/json)
@@ -56,6 +65,93 @@
 // at the extension layer (.exe etc.) still applies.
 
 const SIGNATURES = [
+  {
+    // W76: GLB — binary glTF (Graphics Library
+    // Transmission Format). Magic: "glTF" at offset 0
+    // (bytes 67 6c 54 46). Followed by a 32-bit version
+    // (2), a 32-bit total length, and the embedded JSON
+    // chunk. We only check the magic; the rest is
+    // out of scope for a magic-byte check.
+    mime: 'model/gltf-binary',
+    label: 'GLB',
+    check: (buf) => {
+      if (buf.length < 4) return false;
+      return (
+        buf[0] === 0x67 && // g
+        buf[1] === 0x6c && // l
+        buf[2] === 0x54 && // T
+        buf[3] === 0x46 // F
+      );
+    },
+  },
+  {
+    // W76: glTF — JSON-based glTF. Detection: the buffer
+    // starts with "{" AND contains a top-level "scene"
+    // key (glTF requires a scene). This is a heuristic
+    // (lots of JSON has "scene" as a string somewhere)
+    // but works in practice because glTF documents are
+    // small + structured. To reduce false positives we
+    // also require a "meshes" or "nodes" or "buffers"
+    // key, all of which are mandatory in glTF.
+    mime: 'model/gltf+json',
+    label: 'glTF',
+    check: (buf) => {
+      if (buf.length < 2) return false;
+      if (buf[0] !== 0x7b) return false; // {
+      const s = buf.toString('utf8');
+      // Require glTF-mandatory top-level keys.
+      if (!/"scene"/.test(s)) return false;
+      if (
+        !/"meshes"/.test(s) &&
+        !/"nodes"/.test(s) &&
+        !/"buffers"/.test(s)
+      ) {
+        return false;
+      }
+      return true;
+    },
+  },
+  {
+    // W76: STL — stereolithography mesh. Two flavours:
+    //   - ASCII: starts with "solid " (5 bytes).
+    //   - Binary: 80-byte header (any content) + 4-byte
+    //     little-endian triangle count. We can't reliably
+    //     detect binary STL with magic bytes alone
+    //     (the 80-byte header has no fixed magic), so
+    //     we only detect ASCII STL. Binary STL falls
+    //     through to the catch-all (the operator can
+    //     still upload with an explicit mime claim).
+    mime: 'model/stl',
+    label: 'STL',
+    check: (buf) =>
+      buf.length >= 5 && buf.slice(0, 5).toString('ascii') === 'solid',
+  },
+  {
+    // W76: OBJ — Wavefront OBJ. Detection: the buffer
+    // starts with "#" (comment) OR contains "v " (vertex)
+    // / "vn " (normal) / "vt " (texture coord) / "f "
+    // (face) / "mtllib" (material lib) on a line. We
+    // check for the common prefixes; "v " is the most
+    // reliable because it appears in nearly every OBJ
+    // file (mandatory for any mesh).
+    mime: 'model/obj',
+    label: 'OBJ',
+    check: (buf) => {
+      if (buf.length < 2) return false;
+      // The first non-whitespace char is usually "#"
+      // (comment) or "v" (vertex) or "m" (mtllib / g).
+      // We check for a few distinctive markers to
+      // avoid false positives on text/plain files
+      // that happen to start with these letters.
+      const head = buf.slice(0, Math.min(2048, buf.length)).toString('ascii');
+      // Look for one of the OBJ-mandatory line types.
+      if (/\nv /.test('\n' + head)) return true; // vertex
+      if (/\nf /.test('\n' + head)) return true; // face
+      if (/^# /.test(head) && /Wavefront|OBJ/.test(head)) return true;
+      if (/^mtllib\s/m.test(head)) return true;
+      return false;
+    },
+  },
   {
     // W72: 7z — 7-Zip archive. Magic: 7z\xBC\xAF\x27\x1C
     // (6 bytes). The fourth byte onwards includes a
