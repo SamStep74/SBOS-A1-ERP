@@ -766,3 +766,133 @@ test('undoCustomerMerge: input is required', async () => {
   const db = makeMergeMockDb();
   await assert.rejects(undoCustomerMerge(db, null, 0), /input is required/);
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// undoCustomerMerge (W117) — dry-run mode.
+// ────────────────────────────────────────────────────────────────────────
+
+test('undoCustomerMerge: dryRun returns preview counts without writing', async () => {
+  const db = makeMergeMockDb();
+  const primary = db.seedCustomer({ name: 'A' });
+  const secondary = db.seedCustomer({ name: 'B' });
+  const inv1 = db.seedInvoice({ customer_id: secondary });
+  const inv2 = db.seedInvoice({ customer_id: secondary });
+  db.seedPayment({ invoice_id: inv1 });
+  db.seedPayment({ invoice_id: inv1 });
+
+  // Apply a merge so we have something to undo.
+  const mergeRes = await applyCustomerMerge(
+    db,
+    { primary_id: primary, secondary_id: secondary },
+    0,
+  );
+  // dryRun should NOT change state.
+  const beforeArchived = db._isArchived(secondary);
+  const beforeInv1 = db._invoiceCustomerId(inv1);
+  const beforeInv2 = db._invoiceCustomerId(inv2);
+  const beforeLog = db._mergeLogGet(mergeRes.merge_log_id);
+
+  const dry = await undoCustomerMerge(
+    db,
+    { merge_log_id: mergeRes.merge_log_id, dryRun: true },
+    0,
+  );
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.invoices_restored, 2, 'should preview 2 invoices restored');
+  assert.equal(dry.payments_restored, 2, 'should preview 2 payments following');
+
+  // State must NOT have changed.
+  assert.equal(db._isArchived(secondary), beforeArchived);
+  assert.equal(db._invoiceCustomerId(inv1), beforeInv1);
+  assert.equal(db._invoiceCustomerId(inv2), beforeInv2);
+  // The log row's undone_at must still be null.
+  assert.equal(db._mergeLogGet(mergeRes.merge_log_id).undone_at, beforeLog.undone_at);
+});
+
+test('undoCustomerMerge: dryRun still validates log exists', async () => {
+  const db = makeMergeMockDb();
+  await assert.rejects(
+    undoCustomerMerge(db, { merge_log_id: 9999, dryRun: true }, 0),
+    /not found/,
+  );
+});
+
+test('undoCustomerMerge: dryRun still rejects already-undone merges', async () => {
+  const db = makeMergeMockDb();
+  const a = db.seedCustomer({ name: 'A' });
+  const b = db.seedCustomer({ name: 'B' });
+  db.seedInvoice({ customer_id: b });
+  const mergeRes = await applyCustomerMerge(
+    db,
+    { primary_id: a, secondary_id: b },
+    0,
+  );
+  await undoCustomerMerge(
+    db,
+    { merge_log_id: mergeRes.merge_log_id },
+    0,
+  );
+  await assert.rejects(
+    undoCustomerMerge(
+      db,
+      { merge_log_id: mergeRes.merge_log_id, dryRun: true },
+      0,
+    ),
+    /already been undone/,
+  );
+});
+
+test('undoCustomerMerge: dryRun still rejects when secondary was deleted', async () => {
+  const db = makeMergeMockDb();
+  const a = db.seedCustomer({ name: 'A' });
+  const b = db.seedCustomer({ name: 'B' });
+  const inv1 = db.seedInvoice({ customer_id: b });
+  const mergeRes = await applyCustomerMerge(
+    db,
+    { primary_id: a, secondary_id: b },
+    0,
+  );
+  // Delete the secondary (simulate operator error or
+  // data corruption).
+  db._customerDelete(b);
+  await assert.rejects(
+    undoCustomerMerge(
+      db,
+      { merge_log_id: mergeRes.merge_log_id, dryRun: true },
+      0,
+    ),
+    /secondary customer.*not found/,
+  );
+});
+
+test('undoCustomerMerge: real undo after dryRun still works (dryRun is read-only)', async () => {
+  const db = makeMergeMockDb();
+  const primary = db.seedCustomer({ name: 'A' });
+  const secondary = db.seedCustomer({ name: 'B' });
+  const inv1 = db.seedInvoice({ customer_id: secondary });
+  const inv2 = db.seedInvoice({ customer_id: secondary });
+  const mergeRes = await applyCustomerMerge(
+    db,
+    { primary_id: primary, secondary_id: secondary },
+    0,
+  );
+  // Preview (no state change).
+  const dry = await undoCustomerMerge(
+    db,
+    { merge_log_id: mergeRes.merge_log_id, dryRun: true },
+    0,
+  );
+  assert.equal(dry.dryRun, true);
+  // Real undo (does state change).
+  const real = await undoCustomerMerge(
+    db,
+    { merge_log_id: mergeRes.merge_log_id },
+    0,
+  );
+  assert.equal(real.dryRun, undefined, 'real undo should not have dryRun flag');
+  assert.equal(real.invoices_restored, 2);
+  // Verify the state changed.
+  assert.equal(db._isArchived(secondary), 0);
+  assert.equal(db._invoiceCustomerId(inv1), secondary);
+  assert.equal(db._invoiceCustomerId(inv2), secondary);
+});

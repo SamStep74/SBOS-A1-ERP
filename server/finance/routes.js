@@ -4195,6 +4195,10 @@ export function registerFinanceRoutes(app, opts = {}) {
         merge_log_id: body.merge_log_id,
         undone_reason: body.undone_reason ?? null,
         undone_by_user_id: body.undone_by_user_id ?? (req.user && req.user.id) ?? null,
+        // W117: dryRun=true previews the changes without
+        // writing. Same perm gate; same response shape
+        // + { dryRun: true }.
+        dryRun: body.dryRun === true,
       };
       const result = await undoCustomerMerge(pgAdapter, input, tenantId);
       res.status(200).json(result);

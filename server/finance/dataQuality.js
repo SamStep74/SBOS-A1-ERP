@@ -914,6 +914,14 @@ export async function listCustomerMergeLog(
 // to the secondary, and stamps the row with the undo
 // metadata (undone_at, undone_by_user_id, undone_reason).
 //
+// W117: dryRun mode. When input.dryRun === true, the
+// function validates everything (log exists, not already
+// undone, secondary still archived, etc.) and computes
+// the expected changes (invoices_to_restore,
+// payments_to_restore) WITHOUT writing. Returns the
+// same shape as a real undo + { dryRun: true }. Lets
+// operators preview before committing.
+//
 // Errors:
 //   404 if the merge log row doesn't exist in the tenant
 //   400 if the merge has already been undone (idempotency check)
@@ -923,7 +931,8 @@ export async function listCustomerMergeLog(
 //
 // Returns:
 //   { merge_log_id, primary_id, secondary_id,
-//     invoices_restored, payments_restored }
+//     invoices_restored, payments_restored,
+//     dryRun?: true }
 //
 // The "invoices_restored" count may be less than the original
 // "invoices_reassigned" count if the operator has done other
@@ -937,6 +946,7 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
   }
   const mergeLogId = Number(input.merge_log_id);
   assertPositiveInt(mergeLogId, 'merge_log_id');
+  const dryRun = input.dryRun === true;
 
   // Optional: undone_reason (operator note), undone_by_user_id.
   let undoneReason = null;
@@ -1049,36 +1059,36 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
   // a single bulk UPDATE with a WHERE id IN (...) clause
   // is the most efficient shape. We use comma-separated
   // placeholders and pass the IDs as individual params.
-  if (invoiceIds.length > 0) {
-    const placeholders = invoiceIds.map((_, i) => `$${i + 3}`).join(', ');
-    const updRes = await runQuery(
-      db,
-      `UPDATE finance.invoices
-          SET customer_id = $1,
-              updated_at = datetime('now')
-        WHERE tenant_id = $2 AND customer_id = $3 AND id IN (${placeholders})`,
-      [secondaryId, tenantId, primaryId, ...invoiceIds],
-    );
-    // We don't return the rowCount from the UPDATE (adapter-
-    // specific); the count is computed via a follow-up SELECT
-    // on the secondary. Below, we do a per-id SELECT to
-    // count how many were actually moved.
-    void updRes;
-  }
-
-  // 7. Count how many invoices are now back on the secondary.
-  // This may be less than invoiceIds.length if some of
-  // those invoices were voided, hard-deleted, or moved
-  // elsewhere in the meantime.
+  //
+  // W117: in dryRun mode we skip the UPDATE. The
+  // "invoices to be restored" count is computed by
+  // checking which of the listed IDs CURRENTLY belong
+  // to the primary (before the move).
   let invoicesRestored = 0;
   if (invoiceIds.length > 0) {
+    if (!dryRun) {
+      const placeholders = invoiceIds.map((_, i) => `$${i + 3}`).join(', ');
+      const updRes = await runQuery(
+        db,
+        `UPDATE finance.invoices
+            SET customer_id = $1,
+                updated_at = datetime('now')
+          WHERE tenant_id = $2 AND customer_id = $3 AND id IN (${placeholders})`,
+        [secondaryId, tenantId, primaryId, ...invoiceIds],
+      );
+      void updRes;
+    }
+    // 7. Count: in real mode, count invoices now on the
+    // secondary (post-move). In dryRun, count invoices
+    // currently on the primary (pre-move, eligible to move).
     const placeholders = invoiceIds.map((_, i) => `$${i + 2}`).join(', ');
+    const ownerCol = dryRun ? primaryId : secondaryId;
     const afterCount = await runQuery(
       db,
       `SELECT COUNT(*) AS n
          FROM finance.invoices
         WHERE tenant_id = $1 AND customer_id = $2 AND id IN (${placeholders})`,
-      [tenantId, secondaryId, ...invoiceIds],
+      [tenantId, ownerCol, ...invoiceIds],
     );
     invoicesRestored = Number(afterCount.rows?.[0]?.n ?? 0);
   }
@@ -1090,16 +1100,21 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
   // report the count of payments whose invoice was just
   // restored, but it's a derived value (not a state change
   // we make).
+  //
+  // W117: in dryRun, we count payments attached to the
+  // invoices CURRENTLY on the primary (those that would
+  // follow the invoices back to the secondary).
   let paymentsRestored = 0;
   if (invoiceIds.length > 0) {
     const placeholders = invoiceIds.map((_, i) => `$${i + 2}`).join(', ');
+    const ownerCol = dryRun ? primaryId : secondaryId;
     const payCount = await runQuery(
       db,
       `SELECT COUNT(*) AS n
          FROM finance.payments p
          JOIN finance.invoices i ON i.id = p.invoice_id
         WHERE i.tenant_id = $1 AND i.customer_id = $2 AND i.id IN (${placeholders})`,
-      [tenantId, secondaryId, ...invoiceIds],
+      [tenantId, ownerCol, ...invoiceIds],
     );
     paymentsRestored = Number(payCount.rows?.[0]?.n ?? 0);
   }
@@ -1107,14 +1122,17 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
   // 9. Un-archive the secondary. The original archive
   // flag is cleared, so the secondary is fully active
   // again (the operator can re-merge if they want).
-  await runQuery(
-    db,
-    `UPDATE finance.customers
-        SET archived = 0,
-            updated_at = datetime('now')
-      WHERE id = $1 AND tenant_id = $2`,
-    [secondaryId, tenantId],
-  );
+  // W117: skip the UPDATE in dryRun.
+  if (!dryRun) {
+    await runQuery(
+      db,
+      `UPDATE finance.customers
+          SET archived = 0,
+              updated_at = datetime('now')
+        WHERE id = $1 AND tenant_id = $2`,
+      [secondaryId, tenantId],
+    );
+  }
 
   // 10. Stamp the audit log row with the undo metadata.
   // This is the ONE place where the merge log is mutated
@@ -1122,16 +1140,19 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
   // fields make the row self-documenting: any operator
   // looking at the row can see "this merge was undone at
   // X by Y for reason Z".
-  const now = new Date().toISOString();
-  await runQuery(
-    db,
-    `UPDATE finance.customer_merge_log
-        SET undone_at = $1,
-            undone_by_user_id = $2,
-            undone_reason = $3
-      WHERE id = $4 AND tenant_id = $5`,
-    [now, undoneByUserId, undoneReason, mergeLogId, tenantId],
-  );
+  // W117: skip the UPDATE in dryRun.
+  if (!dryRun) {
+    const now = new Date().toISOString();
+    await runQuery(
+      db,
+      `UPDATE finance.customer_merge_log
+          SET undone_at = $1,
+              undone_by_user_id = $2,
+              undone_reason = $3
+        WHERE id = $4 AND tenant_id = $5`,
+      [now, undoneByUserId, undoneReason, mergeLogId, tenantId],
+    );
+  }
 
   return {
     merge_log_id: mergeLogId,
@@ -1139,5 +1160,6 @@ export async function undoCustomerMerge(db, input, tenantId = 0) {
     secondary_id: secondaryId,
     invoices_restored: invoicesRestored,
     payments_restored: paymentsRestored,
+    ...(dryRun ? { dryRun: true } : {}),
   };
 }
