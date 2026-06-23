@@ -4685,6 +4685,91 @@ else
 fi
 echo
 
+echo "=== STEP 5ar: Lockout manual purge + per-tenant rate-limit reset (Wave 79) ==="
+# Smoke coverage for W79 manual lockout-purge + per-tenant
+# rate-limit reset routes. We verify:
+#   1. POST /api/rbac/lockout/purge with dryRun returns
+#      ok=true, cleared=0, dryRun=true
+#   2. POST /api/rbac/tenants/:tenantId/rate-limit/reset
+#      returns ok=true, tenantId=N, reset=cache
+PORT="$PORT" ADMIN_TOKEN="$ADMIN_TOKEN" node -e '
+  const http = require("node:http");
+
+  function sendJson(method, p, body) {
+    const data = body == null ? "" : JSON.stringify(body);
+    return new Promise((resolve) => {
+      const r = http.request({
+        host: "127.0.0.1", port: Number(process.env.PORT),
+        path: p, method,
+        headers: {
+          "authorization": "Bearer " + process.env.ADMIN_TOKEN,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      }, (res) => {
+        let buf = "";
+        res.on("data", d => buf += d);
+        res.on("end", () => {
+          let parsed = buf;
+          try { parsed = JSON.parse(buf); } catch (_) {}
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      });
+      if (data) r.write(data);
+      r.end();
+    });
+  }
+
+  (async () => {
+    // 1) Lockout purge dryRun
+    const r1 = await sendJson("POST", "/api/rbac/lockout/purge", { dryRun: true });
+    if (r1.status !== 200) {
+      console.log("  FAIL lockout purge expected 200, got " + r1.status);
+      process.exit(1);
+    }
+    if (r1.body.ok !== true) {
+      console.log("  FAIL lockout purge ok not true: " + JSON.stringify(r1.body));
+      process.exit(1);
+    }
+    if (r1.body.dryRun !== true) {
+      console.log("  FAIL lockout purge dryRun not true: " + JSON.stringify(r1.body));
+      process.exit(1);
+    }
+    if (typeof r1.body.scanned !== "number") {
+      console.log("  FAIL lockout purge scanned not a number");
+      process.exit(1);
+    }
+    if (typeof r1.body.threshold !== "string") {
+      console.log("  FAIL lockout purge threshold not a string");
+      process.exit(1);
+    }
+
+    // 2) Per-tenant rate-limit reset
+    const r2 = await sendJson("POST", "/api/rbac/tenants/0/rate-limit/reset", {});
+    if (r2.status !== 200) {
+      console.log("  FAIL per-tenant reset expected 200, got " + r2.status);
+      process.exit(1);
+    }
+    if (r2.body.tenantId !== 0) {
+      console.log("  FAIL per-tenant reset tenantId not 0: " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+    if (r2.body.reset !== "cache") {
+      console.log("  FAIL per-tenant reset not cache: " + JSON.stringify(r2.body));
+      process.exit(1);
+    }
+
+    console.log("  OK W79 lockout purge + per-tenant reset");
+    process.exit(0);
+  })().catch((e) => { console.log("  FAIL " + e.message); process.exit(1); });
+'
+if [ $? -eq 0 ]; then
+  echo "  W79 lockout purge + per-tenant reset OK"
+else
+  SMOKE_RC=1
+fi
+echo
+
 echo "=== STEP 6: Graceful shutdown ==="
 SERVER_PID=$(cat "$PIDFILE")
 kill -TERM $SERVER_PID 2>&1

@@ -496,6 +496,70 @@ const SIGNATURES = [
     },
   },
   {
+    // W79: HEIC/HEIF (Apple). Same ftyp layout as MP4
+    // but brand is 'heic' (or 'heix', 'heim', 'heis',
+    // 'hevc', 'hevx', 'mif1' for HEIF, etc). Checked
+    // AFTER the MP4/MOV branches so a generic MP4 file
+    // is detected as MP4, not HEIC.
+    mime: 'image/heic',
+    label: 'HEIC',
+    check: (buf) => {
+      if (buf.length < 12) return false;
+      // ftyp magic at offset 4 + 'heic' brand at offset 8
+      return (
+        buf[4] === 0x66 && // f
+        buf[5] === 0x74 && // t
+        buf[6] === 0x79 && // y
+        buf[7] === 0x70 && // p
+        buf[8] === 0x68 && // h
+        buf[9] === 0x65 && // e
+        buf[10] === 0x69 && // i
+        buf[11] === 0x63 // c
+      );
+    },
+  },
+  {
+    // W79: HEIF (generic). Same ftyp layout but brand
+    // is 'mif1' (the most common HEIF brand). Covers
+    // files that don't have 'heic' as the major brand
+    // (e.g., still-image HEIF sequences).
+    mime: 'image/heif',
+    label: 'HEIF',
+    check: (buf) => {
+      if (buf.length < 12) return false;
+      return (
+        buf[4] === 0x66 && // f
+        buf[5] === 0x74 && // t
+        buf[6] === 0x79 && // y
+        buf[7] === 0x70 && // p
+        buf[8] === 0x6d && // m
+        buf[9] === 0x69 && // i
+        buf[10] === 0x66 && // f
+        buf[11] === 0x31 // 1
+      );
+    },
+  },
+  {
+    // W79: AVIF (AV1 Image File Format). ftyp + 'avis'
+    // brand. AVIF uses the AV1 codec inside an ISOBMFF
+    // container, same layout as MP4/HEIC.
+    mime: 'image/avif',
+    label: 'AVIF',
+    check: (buf) => {
+      if (buf.length < 12) return false;
+      return (
+        buf[4] === 0x66 && // f
+        buf[5] === 0x74 && // t
+        buf[6] === 0x79 && // y
+        buf[7] === 0x70 && // p
+        buf[8] === 0x61 && // a
+        buf[9] === 0x76 && // v
+        buf[10] === 0x69 && // i
+        buf[11] === 0x66 // f
+      );
+    },
+  },
+  {
     mime: 'application/json',
     label: 'JSON',
     // The bytes must parse as JSON. We try the whole buffer

@@ -841,6 +841,87 @@ function registerRbacRoutes(app, opts = {}) {
     },
   );
 
+  // POST /api/rbac/tenants/:tenantId/rate-limit/reset — W79
+  // per-tenant rate-limit reset. Pairs with the W78
+  // global reset; this one targets a single tenant. The
+  // W70 cache is invalidated (same as the PUT route)
+  // so the next login attempt re-reads the per-tenant
+  // config and starts with a fresh limiter pair.
+  app.post(
+    '/api/rbac/tenants/:tenantId/rate-limit/reset',
+    { preHandler: requirePermFastify('security.rate_limit.update') },
+    async (request, reply) => {
+      try {
+        const tenantId = Number(request.params && request.params.tenantId);
+        if (!Number.isInteger(tenantId) || tenantId < 0) {
+          return reply
+            .code(400)
+            .send({ error: 'invalid_request', message: 'tenantId must be a non-negative integer' });
+        }
+        // Invalidate just this tenant's cache entry. The
+        // next getLimiters() call will create a fresh pair
+        // with the same limits (re-read from the db).
+        invalidateTenantLoginLimiters(tenantId);
+        return reply.code(200).send({ ok: true, tenantId, reset: 'cache' });
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return reply
+            .code(400)
+            .send({ error: 'invalid_request', message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // POST /api/rbac/lockout/purge — W79
+  // Manual lockout-purge. Pairs with the W73 worker
+  // (opt-in via SBOS_LOCKOUT_PURGE_ENABLED) — when the
+  // worker is OFF, an operator can trigger a one-off
+  // purge via this route. When the worker is ON, this
+  // route is the "I just bumped the threshold, clean
+  // up the stale rows now" panic button.
+  //
+  // Body (all optional):
+  //   staleAfterMs: number (default 24h) — override
+  //     the staleness threshold for this run
+  //   dryRun: boolean (default false) — count
+  //     matching rows but don't write
+  //
+  // Returns: { ok, cleared, scanned, dryRun, threshold }
+  app.post(
+    '/api/rbac/lockout/purge',
+    { preHandler: requirePermFastify('security.audit.retention.update') },
+    async (request, reply) => {
+      try {
+        const { clearStaleFailedLogins } = await import(
+          '../lockout-purge.js'
+        );
+        const body = request.body || {};
+        const db =
+          request.app && request.app.locals && request.app.locals.db;
+        if (!db) {
+          return reply
+            .code(500)
+            .send({ error: 'internal_error', message: 'db unavailable' });
+        }
+        const opts = {};
+        if (Number.isInteger(body.staleAfterMs)) {
+          opts.staleAfterMs = body.staleAfterMs;
+        }
+        if (body.dryRun === true) {
+          opts.dryRun = true;
+        }
+        const result = clearStaleFailedLogins(db, opts);
+        return reply.code(200).send({ ok: true, ...result });
+      } catch (err) {
+        reply
+          .code(500)
+          .send({ error: 'internal_error', message: err.message });
+      }
+    },
+  );
+
   // POST /api/rbac/rate-limit/login/reset — W78
   // operator panic button. Resets the W57 in-memory
   // login rate-limit store either for one IP, one
@@ -848,6 +929,8 @@ function registerRbacRoutes(app, opts = {}) {
   // confirmation). Pairs with the W70 per-tenant
   // rate-limit config; this is the "I got an IP blocked
   // by mistake" / "I'm doing load testing" affordance.
+  // W79 also adds /api/rbac/tenants/:tenantId/
+  // rate-limit/reset for per-tenant targeted resets.
   app.post(
     '/api/rbac/rate-limit/login/reset',
     { preHandler: requirePermFastify('security.rate_limit.update') },

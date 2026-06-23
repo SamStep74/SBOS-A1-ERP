@@ -555,3 +555,60 @@ test('listKnownTypes: includes the W76 types', () => {
     assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Wave 79: HEIC/HEIF (Apple) + AVIF image formats
+//   - HEIC/HEIF: ISO base media file format (ftyp + heic brand)
+//     same ftyp structure as MP4/MOV (W61). Checked
+//     AFTER the generic MP4 branch so the isom brand
+//     wins for actual MP4 files.
+//   - AVIF: ISO base media file format (ftyp + avis
+//     brand). Same structure as HEIC.
+//   - Note: JXL (JPEG XL) has a complex container —
+//     naked JXL starts with FF 0A; container JXL uses
+//     ISOBMFF. We skip JXL in this wave and let
+//     container JXL fall through to the catch-all.
+// ──────────────────────────────────────────────────────────────────────
+
+const HEIC = Buffer.from([
+  // 4-byte size, ftyp, heic brand, minor version
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+  0x68, 0x65, 0x69, 0x63, 0x00, 0x00, 0x00, 0x00,
+  // 4-byte compatible brand (heic)
+  0x68, 0x65, 0x69, 0x63, 0x6d, 0x69, 0x66, 0x31,
+]);
+const HEIF = Buffer.from([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+  0x6d, 0x69, 0x66, 0x31, 0x00, 0x00, 0x00, 0x00,
+  0x6d, 0x69, 0x66, 0x31, 0x68, 0x65, 0x69, 0x63,
+]);
+const AVIF = Buffer.from([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+  0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+  0x61, 0x76, 0x69, 0x66, 0x6d, 0x69, 0x66, 0x31,
+]);
+
+test('detectMimeType: HEIC (ftyp + heic brand)', () => {
+  assert.equal(detectMimeType(HEIC), 'image/heic');
+});
+
+test('detectMimeType: HEIF (ftyp + mif1 brand)', () => {
+  assert.equal(detectMimeType(HEIF), 'image/heif');
+});
+
+test('detectMimeType: AVIF (ftyp + avis brand)', () => {
+  assert.equal(detectMimeType(AVIF), 'image/avif');
+});
+
+test('verifyMimeType: HEIC claimed as MP4 is REJECTED', () => {
+  const r = verifyMimeType(HEIC, 'video/mp4');
+  assert.equal(r.matches, false);
+  assert.equal(r.detected, 'image/heic');
+});
+
+test('listKnownTypes: includes HEIC/HEIF/AVIF', () => {
+  const known = listKnownTypes().map((t) => t.mime);
+  for (const m of ['image/heic', 'image/heif', 'image/avif']) {
+    assert.ok(known.includes(m), `expected ${m} in listKnownTypes`);
+  }
+});
